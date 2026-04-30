@@ -3441,11 +3441,311 @@ static inline bool DoesParentDirectoryExist(const FString& AssetPath) {
   if (ParentPath.IsEmpty()) {
     return false;
   }
-  
+
   // Check if parent exists on disk
   return DoesAssetDirectoryExistOnDisk(ParentPath);
 #else
   return false;
+#endif
+}
+
+// ============================================================================
+// Material Graph Owner - unified UMaterial / UMaterialFunction support
+// ============================================================================
+// UMaterial and UMaterialFunction (including MaterialLayer / MaterialLayerBlend
+// subclasses) expose identical FMaterialExpressionCollection APIs in UE 5.1+.
+// UMaterialFunctionInstance has no graph of its own - it delegates to its Base.
+// These helpers resolve any asset path to a common struct so callers can stay
+// type-agnostic for read operations; write operations check bReadOnly first.
+
+#if WITH_EDITOR
+#include "Engine/Texture.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialFunction.h"
+#include "Materials/MaterialFunctionInterface.h"
+#include "Materials/MaterialFunctionInstance.h"
+#include "Materials/MaterialExpression.h"
+#include "Materials/MaterialExpressionParameter.h"
+#endif
+
+enum class EMcpMaterialGraphOwnerKind : uint8
+{
+    Material,
+    MaterialFunction,       // includes MaterialLayer / MaterialLayerBlend subclasses
+    MaterialFunctionInstance,
+};
+
+struct FMcpMaterialGraphOwner
+{
+    // the raw loaded asset (UMaterial, UMaterialFunction, or UMaterialFunctionInstance)
+    UObject* Asset = nullptr;
+    // the object that actually owns the expression collection; for Instance this is the Base function
+    UObject* GraphSource = nullptr;
+    EMcpMaterialGraphOwnerKind Kind = EMcpMaterialGraphOwnerKind::Material;
+    // true for UMaterialFunctionInstance - edit ops must be rejected
+    bool bReadOnly = false;
+};
+
+// Resolves assetPath to FMcpMaterialGraphOwner.
+// Returns false and fills OutError on failure.
+static inline bool McpResolveMaterialGraphOwner(
+    const FString& AssetPath,
+    FMcpMaterialGraphOwner& Out,
+    FString& OutError)
+{
+#if WITH_EDITOR
+    // try UMaterial first (exact class, no subclass confusion)
+    if (UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath))
+    {
+        Out.Asset       = Mat;
+        Out.GraphSource = Mat;
+        Out.Kind        = EMcpMaterialGraphOwnerKind::Material;
+        Out.bReadOnly   = false;
+        return true;
+    }
+
+    // try UMaterialFunction (catches Layer / LayerBlend via polymorphism)
+    if (UMaterialFunction* Func = LoadObject<UMaterialFunction>(nullptr, *AssetPath))
+    {
+        Out.Asset       = Func;
+        Out.GraphSource = Func;
+        Out.Kind        = EMcpMaterialGraphOwnerKind::MaterialFunction;
+        Out.bReadOnly   = false;
+        return true;
+    }
+
+    // try UMaterialFunctionInstance (read-only proxy; graph lives in Base)
+    if (UMaterialFunctionInstance* Inst = LoadObject<UMaterialFunctionInstance>(nullptr, *AssetPath))
+    {
+        UMaterialFunction* Base = Inst->GetBaseFunction();
+        Out.Asset       = Inst;
+        Out.GraphSource = Base; // may be nullptr if parent not loaded
+        Out.Kind        = EMcpMaterialGraphOwnerKind::MaterialFunctionInstance;
+        Out.bReadOnly   = true;
+        if (!Base)
+        {
+            OutError = FString::Printf(
+                TEXT("MaterialFunctionInstance '%s' has no resolvable Base function"),
+                *AssetPath);
+            return false;
+        }
+        return true;
+    }
+
+    // asset exists but is an unsupported type
+    if (UObject* Generic = LoadObject<UObject>(nullptr, *AssetPath))
+    {
+        OutError = FString::Printf(
+            TEXT("Asset '%s' (class: %s) is not a Material, MaterialFunction, or MaterialFunctionInstance"),
+            *AssetPath, *Generic->GetClass()->GetName());
+        return false;
+    }
+
+    OutError = FString::Printf(TEXT("Asset not found: %s"), *AssetPath);
+    return false;
+#else
+    OutError = TEXT("Material graph resolution requires an editor build");
+    return false;
+#endif
+}
+
+// Returns the expressions array from the GraphSource (const).
+// GraphSource must be UMaterial or UMaterialFunction (not nullptr).
+static inline const TArray<TObjectPtr<UMaterialExpression>>* McpGetGraphExpressions(
+    const FMcpMaterialGraphOwner& Owner)
+{
+#if WITH_EDITOR && ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+    {
+        UMaterial* Mat = CastChecked<UMaterial>(Owner.GraphSource);
+        if (Mat->GetEditorOnlyData())
+            return &Mat->GetEditorOnlyData()->ExpressionCollection.Expressions;
+        return nullptr;
+    }
+    else if (Owner.GraphSource)
+    {
+        // UMaterialFunction (includes Layer/LayerBlend subclasses)
+        UMaterialFunction* Func = Cast<UMaterialFunction>(Owner.GraphSource);
+        if (Func && Func->GetEditorOnlyData())
+            return &Func->GetEditorOnlyData()->ExpressionCollection.Expressions;
+    }
+#elif WITH_EDITOR
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+    {
+        UMaterial* Mat = CastChecked<UMaterial>(Owner.GraphSource);
+        return reinterpret_cast<const TArray<TObjectPtr<UMaterialExpression>>*>(&Mat->Expressions);
+    }
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunction && Owner.GraphSource)
+    {
+        UMaterialFunction* Func = CastChecked<UMaterialFunction>(Owner.GraphSource);
+        return reinterpret_cast<const TArray<TObjectPtr<UMaterialExpression>>*>(&Func->FunctionExpressions);
+    }
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunctionInstance && Owner.GraphSource)
+    {
+        UMaterialFunction* Func = CastChecked<UMaterialFunction>(Owner.GraphSource);
+        return reinterpret_cast<const TArray<TObjectPtr<UMaterialExpression>>*>(&Func->FunctionExpressions);
+    }
+#endif
+    return nullptr;
+}
+
+// Returns the expressions array from the GraphSource (mutable).
+static inline TArray<TObjectPtr<UMaterialExpression>>* McpGetGraphExpressionsMutable(
+    const FMcpMaterialGraphOwner& Owner)
+{
+    return const_cast<TArray<TObjectPtr<UMaterialExpression>>*>(
+        McpGetGraphExpressions(Owner));
+}
+
+// Finds an expression inside Owner.GraphSource by GUID string, object name, path,
+// parameter name, or numeric string index. Returns nullptr if not found.
+static inline UMaterialExpression* McpFindGraphExpression(
+    const FMcpMaterialGraphOwner& Owner,
+    const FString& IdOrName,
+    int32 NumericIndex = -1)
+{
+#if WITH_EDITOR
+    const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+    if (!Exprs) return nullptr;
+
+    // numeric index
+    if (NumericIndex >= 0)
+    {
+        if (NumericIndex < Exprs->Num())
+            return (*Exprs)[NumericIndex];
+        return nullptr;
+    }
+
+    if (IdOrName.IsEmpty()) return nullptr;
+
+    // numeric string index
+    if (IdOrName.IsNumeric())
+    {
+        int32 Idx = FCString::Atoi(*IdOrName);
+        if (Idx >= 0 && Idx < Exprs->Num())
+            return (*Exprs)[Idx];
+        return nullptr;
+    }
+
+    // GUID
+    FGuid ParsedGuid;
+    if (FGuid::Parse(IdOrName, ParsedGuid))
+    {
+        for (UMaterialExpression* Expr : *Exprs)
+        {
+            if (Expr && Expr->MaterialExpressionGuid == ParsedGuid)
+                return Expr;
+        }
+    }
+
+    // name / path / parameter name
+    for (UMaterialExpression* Expr : *Exprs)
+    {
+        if (!Expr) continue;
+        if (Expr->GetName() == IdOrName || Expr->GetPathName() == IdOrName)
+            return Expr;
+        if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr))
+        {
+            if (Param->ParameterName.ToString() == IdOrName)
+                return Expr;
+        }
+    }
+#endif
+    return nullptr;
+}
+
+// Saves/rebuilds the material graph owner after edit operations.
+// Returns false with OutError when Owner.bReadOnly is true.
+static inline bool McpRebuildMaterialGraphOwner(
+    const FMcpMaterialGraphOwner& Owner,
+    FString& OutError)
+{
+#if WITH_EDITOR
+    if (Owner.bReadOnly)
+    {
+        OutError = TEXT("UNSUPPORTED_OPERATION: cannot edit a MaterialFunctionInstance graph - edit the parent function instead");
+        return false;
+    }
+
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+    {
+        UMaterial* Mat = CastChecked<UMaterial>(Owner.GraphSource);
+        Mat->PreEditChange(nullptr);
+        Mat->PostEditChange();
+        Mat->MarkPackageDirty();
+        return true;
+    }
+
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunction)
+    {
+        UMaterialFunction* Func = CastChecked<UMaterialFunction>(Owner.GraphSource);
+        Func->PreEditChange(nullptr);
+        Func->PostEditChange();
+        Func->MarkPackageDirty();
+        return true;
+    }
+
+    OutError = TEXT("UNSUPPORTED_OPERATION: unknown graph owner kind");
+    return false;
+#else
+    OutError = TEXT("Rebuild requires an editor build");
+    return false;
+#endif
+}
+
+// Adds function instance parameter overrides to a JSON object.
+// Used by get_material_info for MaterialFunctionInstance assets.
+static inline void McpCollectFunctionInstanceOverrides(
+    UMaterialFunctionInstance* Inst,
+    TSharedRef<FJsonObject> Out)
+{
+#if WITH_EDITOR
+    if (!Inst) return;
+
+    TArray<TSharedPtr<FJsonValue>> ScalarArr;
+    for (const FScalarParameterValue& P : Inst->ScalarParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetNumberField(TEXT("value"), P.ParameterValue);
+        ScalarArr.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("scalarOverrides"), ScalarArr);
+
+    TArray<TSharedPtr<FJsonValue>> VectorArr;
+    for (const FVectorParameterValue& P : Inst->VectorParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        TSharedPtr<FJsonObject> Color = MakeShared<FJsonObject>();
+        Color->SetNumberField(TEXT("r"), P.ParameterValue.R);
+        Color->SetNumberField(TEXT("g"), P.ParameterValue.G);
+        Color->SetNumberField(TEXT("b"), P.ParameterValue.B);
+        Color->SetNumberField(TEXT("a"), P.ParameterValue.A);
+        Obj->SetObjectField(TEXT("value"), Color);
+        VectorArr.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("vectorOverrides"), VectorArr);
+
+    TArray<TSharedPtr<FJsonValue>> TextureArr;
+    for (const FTextureParameterValue& P : Inst->TextureParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetStringField(TEXT("texture"), P.ParameterValue.Get() ? P.ParameterValue.Get()->GetPathName() : TEXT(""));
+        TextureArr.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("textureOverrides"), TextureArr);
+
+    TArray<TSharedPtr<FJsonValue>> StaticArr;
+    for (const FStaticSwitchParameter& P : Inst->StaticSwitchParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetBoolField(TEXT("value"), P.Value);
+        StaticArr.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("staticSwitchOverrides"), StaticArr);
 #endif
 }
 

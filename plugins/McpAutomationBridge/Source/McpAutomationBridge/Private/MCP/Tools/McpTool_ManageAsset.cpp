@@ -62,9 +62,19 @@ public:
 				TEXT("source_control_checkout"),
 				TEXT("source_control_submit"),
 				TEXT("add_material_node"),
+				TEXT("set_material_node_position"),
+				TEXT("move_material_node"),
+				TEXT("bulk_set_material_node_positions"),
+				TEXT("bulk_move_material_nodes"),
 				TEXT("connect_material_pins"),
 				TEXT("remove_material_node"),
 				TEXT("break_material_connections"),
+				TEXT("create_material_comment"),
+				TEXT("wrap_material_nodes_in_comment"),
+				TEXT("create_named_reroute"),
+				TEXT("use_named_reroute"),
+				TEXT("replace_long_connection_with_named_reroute"),
+				TEXT("align_material_nodes"),
 				TEXT("get_material_node_details"),
 				TEXT("rebuild_material")
 			}, TEXT("Action to perform"))
@@ -104,9 +114,20 @@ public:
 			.String(TEXT("graphName"), TEXT("Name of the graph."))
 			.String(TEXT("nodeType"), TEXT(""))
 			.String(TEXT("nodeId"), TEXT("ID of the node."))
+			.String(TEXT("expressionPath"), TEXT("Material expression path."))
+			.String(TEXT("expressionName"), TEXT("Material expression object name."))
+			.Number(TEXT("sourceExpressionIndex"), TEXT("Source expression index."))
+			.Number(TEXT("targetExpressionIndex"), TEXT("Target expression index."))
+			.String(TEXT("sourceExpressionPath"), TEXT("Source expression path."))
+			.String(TEXT("targetExpressionPath"), TEXT("Target expression path."))
+			.String(TEXT("anchorExpressionPath"), TEXT("Anchor expression path."))
+			.Number(TEXT("anchorExpressionIndex"), TEXT("Anchor expression index."))
+			.String(TEXT("anchorNodeId"), TEXT("Anchor node ID."))
 			.String(TEXT("sourceNodeId"), TEXT("ID of the source node."))
 			.String(TEXT("targetNodeId"), TEXT("ID of the target node."))
+			.Number(TEXT("sourceOutputIndex"), TEXT("Source output index."))
 			.String(TEXT("inputName"), TEXT("Name of the pin."))
+			.String(TEXT("targetInputPin"), TEXT("Name of the target input pin."))
 			.String(TEXT("fromNodeId"), TEXT("ID of the source node."))
 			.String(TEXT("fromPin"), TEXT("Name of the source pin."))
 			.String(TEXT("toNodeId"), TEXT("ID of the target node."))
@@ -116,6 +137,18 @@ public:
 			.Number(TEXT("x"), TEXT(""))
 			.Number(TEXT("y"), TEXT(""))
 			.String(TEXT("comment"), TEXT(""))
+			.String(TEXT("operation"), TEXT("Alignment or distribution operation."))
+			.String(TEXT("backend"), TEXT("native or graph_editor."))
+			.String(TEXT("placementMode"), TEXT("absolute, next_to, or free."))
+			.String(TEXT("direction"), TEXT("right, left, above, or below."))
+			.Bool(TEXT("avoidOverlap"), TEXT("Avoid overlapping existing material nodes."))
+			.FreeformObject(TEXT("placement"), TEXT("Material node placement options."))
+			.Number(TEXT("padding"), TEXT("Padding for comment wrapping."))
+			.Bool(TEXT("groupMode"), TEXT("Whether comment moves grouped nodes."))
+			.Number(TEXT("minDistance"), TEXT("Minimum distance for long connection replacement."))
+			.String(TEXT("declarationId"), TEXT("Named reroute declaration ID."))
+			.String(TEXT("declarationGuid"), TEXT("Named reroute declaration GUID."))
+			.String(TEXT("declarationName"), TEXT("Named reroute declaration name."))
 			.String(TEXT("parentNodeId"), TEXT("ID of the node."))
 			.String(TEXT("childNodeId"), TEXT("ID of the node."))
 			.Number(TEXT("maxDepth"), TEXT(""))
@@ -143,7 +176,7 @@ public:
 			.String(TEXT("inputPin"), TEXT("Name of the target pin."))
 			.String(TEXT("type"), TEXT(""))
 			.FreeformObject(TEXT("defaultValue"), TEXT("Generic value (any type)."))
-			.String(TEXT("expressionIndex"), TEXT("ID of the node."))
+			.Number(TEXT("expressionIndex"), TEXT("Material expression index."))
 			.Required({TEXT("action")})
 			.Build();
 	}

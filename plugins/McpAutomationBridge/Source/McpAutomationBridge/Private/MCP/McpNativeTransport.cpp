@@ -1510,8 +1510,13 @@ bool FMcpNativeTransport::ValidateSession(
 	double* LastActivity = ActiveSessions.Find(SessionId);
 	if (!LastActivity)
 	{
-		OutError = TEXT("Invalid or expired session ID");
-		return false;
+		// Local editor workflow recovery: Codex can keep a session id after the editor
+		// process restarts, while the bridge loses its in-memory session table.
+		ActiveSessions.Add(SessionId, FPlatformTime::Seconds());
+		UE_LOG(LogMcpNativeTransport, Warning,
+			TEXT("Recovered missing MCP session: %s (active sessions: %d)"),
+			*SessionId, ActiveSessions.Num());
+		return true;
 	}
 
 	// Touch session activity

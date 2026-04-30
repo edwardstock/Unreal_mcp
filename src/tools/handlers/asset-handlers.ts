@@ -25,6 +25,11 @@ const VALID_ASSET_ACTIONS = new Set([
   // Material graph operations
   'add_material_node', 'remove_material_node', 'rebuild_material',
   'connect_material_pins', 'break_material_connections', 'get_material_node_details',
+  'set_material_node_position', 'move_material_node',
+  'bulk_set_material_node_positions', 'bulk_move_material_nodes',
+  'create_material_comment', 'wrap_material_nodes_in_comment',
+  'create_named_reroute', 'use_named_reroute', 'replace_long_connection_with_named_reroute',
+  'align_material_nodes',
   // Source control
   'source_control_checkout', 'source_control_submit', 'source_control_enable', 'get_source_control_state',
   // Graph analysis
@@ -105,8 +110,9 @@ interface AssetListItem {
 interface AssetListResponse {
   success?: boolean;
   assets?: AssetListItem[];
-  result?: { assets?: AssetListItem[]; folders?: string[] };
+  result?: { assets?: AssetListItem[]; folders?: string[]; totalCount?: number };
   folders?: string[];
+  totalCount?: number;
   [key: string]: unknown;
 }
 
@@ -128,6 +134,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const params = normalizeArgs(args, [
           { key: 'path', aliases: ['directory', 'directoryPath', 'assetPath'], default: '/Game' },
           { key: 'limit', default: 50 },
+          { key: 'offset', default: 0 },
           { key: 'recursive', aliases: ['recursivePaths'], default: false },
           { key: 'depth', default: undefined }
         ]);
@@ -136,6 +143,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         path = sanitizePath(path);
 
         const limit = extractOptionalNumber(params, 'limit') ?? 50;
+        const offset = extractOptionalNumber(params, 'offset') ?? 0;
         const recursive = extractOptionalBoolean(params, 'recursive') ?? false;
         const depth = extractOptionalNumber(params, 'depth');
 
@@ -144,7 +152,8 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const res = await executeAutomationRequest(tools, 'list', {
           path,
           recursive: effectiveRecursive,
-          depth
+          depth,
+          pagination: { limit, offset }
         }) as AssetListResponse;
 
         const assets: AssetListItem[] = (Array.isArray(res.assets) ? res.assets :
@@ -153,7 +162,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         // New: Handle folders
         const folders: string[] = Array.isArray(res.folders) ? res.folders : (res.result?.folders || []);
 
-        const totalCount = assets.length;
+        const totalCount = res.totalCount ?? res.result?.totalCount ?? assets.length;
         const limitedAssets = assets.slice(0, limit);
         const remaining = Math.max(0, totalCount - limit);
 
@@ -646,7 +655,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         ]);
         const assetPath = extractString(params, 'assetPath');
         const maxDepth = extractOptionalNumber(params, 'maxDepth');
-        const res = await executeAutomationRequest(tools, 'get_asset_graph', {
+        const res = await executeAutomationRequest(tools, 'analyze_graph', {
           assetPath,
           maxDepth
         });
@@ -797,40 +806,100 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
           { key: 'assetPath', aliases: ['materialPath'], required: true },
           { key: 'nodeType', aliases: ['type'], required: true, map: materialNodeAliases },
           { key: 'posX' },
-          { key: 'posY' }
+          { key: 'posY' },
+          { key: 'x' },
+          { key: 'y' },
+          { key: 'placementMode' },
+          { key: 'direction' },
+          { key: 'anchorExpressionIndex' },
+          { key: 'anchorExpressionPath' },
+          { key: 'anchorNodeId' },
+          { key: 'avoidOverlap' },
+          { key: 'placement' }
         ]);
 
         const assetPath = extractString(params, 'assetPath');
         const nodeType = extractString(params, 'nodeType');
         const posX = extractOptionalNumber(params, 'posX');
         const posY = extractOptionalNumber(params, 'posY');
+        const x = extractOptionalNumber(params, 'x');
+        const y = extractOptionalNumber(params, 'y');
+        const placementMode = extractOptionalString(params, 'placementMode');
+        const direction = extractOptionalString(params, 'direction');
+        const anchorExpressionIndex = extractOptionalNumber(params, 'anchorExpressionIndex');
+        const anchorExpressionPath = extractOptionalString(params, 'anchorExpressionPath');
+        const anchorNodeId = extractOptionalString(params, 'anchorNodeId');
+        const avoidOverlap = extractOptionalBoolean(params, 'avoidOverlap');
 
         const res = await executeAutomationRequest(tools, 'add_material_node', {
           assetPath,
           nodeType,
           posX,
-          posY
+          posY,
+          x,
+          y,
+          placementMode,
+          direction,
+          anchorExpressionIndex,
+          anchorExpressionPath,
+          anchorNodeId,
+          avoidOverlap,
+          placement: (params as Record<string, unknown>).placement
         });
         return ResponseFactory.success(res, 'Material node added successfully');
+      }
+      case 'set_material_node_position':
+      case 'move_material_node':
+      case 'bulk_set_material_node_positions':
+      case 'bulk_move_material_nodes':
+      case 'create_material_comment':
+      case 'wrap_material_nodes_in_comment':
+      case 'create_named_reroute':
+      case 'use_named_reroute':
+      case 'replace_long_connection_with_named_reroute':
+      case 'align_material_nodes': {
+        const params = normalizeArgs(args, [
+          { key: 'assetPath', aliases: ['materialPath'], required: true }
+        ]);
+        const res = await executeAutomationRequest(tools, action, {
+          ...args,
+          ...params
+        });
+        return ResponseFactory.success(res, 'Material graph action executed successfully');
       }
       case 'connect_material_pins': {
         const params = normalizeArgs(args, [
           { key: 'assetPath', aliases: ['materialPath'], required: true },
-          { key: 'sourceNodeId', aliases: ['sourceNode'], required: true },
-          { key: 'sourcePin', aliases: ['fromPin', 'outputPin'], required: true },
-          { key: 'targetNodeId', aliases: ['targetNode'], required: true },
-          { key: 'targetPin', aliases: ['toPin', 'inputPin'], required: true }
+          { key: 'sourceNodeId', aliases: ['sourceNode'] },
+          { key: 'sourceExpressionIndex' },
+          { key: 'sourceExpressionPath' },
+          { key: 'sourcePin', aliases: ['fromPin', 'outputPin'] },
+          { key: 'sourceOutputIndex' },
+          { key: 'targetNodeId', aliases: ['targetNode'] },
+          { key: 'targetExpressionIndex' },
+          { key: 'targetExpressionPath' },
+          { key: 'targetPin', aliases: ['toPin', 'inputPin', 'targetInputPin'], required: true }
         ]);
         const assetPath = extractString(params, 'assetPath');
-        const sourceNodeId = extractString(params, 'sourceNodeId');
-        const sourcePin = extractString(params, 'sourcePin');
-        const targetNodeId = extractString(params, 'targetNodeId');
+        const sourceNodeId = extractOptionalString(params, 'sourceNodeId');
+        const sourceExpressionIndex = extractOptionalNumber(params, 'sourceExpressionIndex');
+        const sourceExpressionPath = extractOptionalString(params, 'sourceExpressionPath');
+        const sourcePin = extractOptionalString(params, 'sourcePin');
+        const sourceOutputIndex = extractOptionalNumber(params, 'sourceOutputIndex');
+        const targetNodeId = extractOptionalString(params, 'targetNodeId');
+        const targetExpressionIndex = extractOptionalNumber(params, 'targetExpressionIndex');
+        const targetExpressionPath = extractOptionalString(params, 'targetExpressionPath');
         const targetPin = extractString(params, 'targetPin');
         const res = await executeAutomationRequest(tools, 'connect_material_pins', {
           assetPath,
           sourceNodeId,
+          sourceExpressionIndex,
+          sourceExpressionPath,
           sourcePin,
+          sourceOutputIndex,
           targetNodeId,
+          targetExpressionIndex,
+          targetExpressionPath,
           targetPin
         });
         return ResponseFactory.success(res, 'Material pins connected successfully');
@@ -838,13 +907,22 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
       case 'remove_material_node': {
         const params = normalizeArgs(args, [
           { key: 'assetPath', aliases: ['materialPath'], required: true },
-          { key: 'nodeId', required: true }
+          { key: 'nodeId' },
+          { key: 'expressionIndex' },
+          { key: 'expressionPath' },
+          { key: 'expressionName' }
         ]);
         const assetPath = extractString(params, 'assetPath');
-        const nodeId = extractString(params, 'nodeId');
+        const nodeId = extractOptionalString(params, 'nodeId');
+        const expressionIndex = extractOptionalNumber(params, 'expressionIndex');
+        const expressionPath = extractOptionalString(params, 'expressionPath');
+        const expressionName = extractOptionalString(params, 'expressionName');
         const res = await executeAutomationRequest(tools, 'remove_material_node', {
           assetPath,
-          nodeId
+          nodeId,
+          expressionIndex,
+          expressionPath,
+          expressionName
         });
         return ResponseFactory.success(res, 'Material node removed successfully');
       }
@@ -852,14 +930,23 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const params = normalizeArgs(args, [
           { key: 'assetPath', aliases: ['materialPath'], required: true },
           { key: 'nodeId' },
+          { key: 'expressionIndex' },
+          { key: 'expressionPath' },
+          { key: 'expressionName' },
           { key: 'pinName' }
         ]);
         const assetPath = extractString(params, 'assetPath');
         const nodeId = extractOptionalString(params, 'nodeId');
+        const expressionIndex = extractOptionalNumber(params, 'expressionIndex');
+        const expressionPath = extractOptionalString(params, 'expressionPath');
+        const expressionName = extractOptionalString(params, 'expressionName');
         const pinName = extractOptionalString(params, 'pinName');
         const res = await executeAutomationRequest(tools, 'break_material_connections', {
           assetPath,
           nodeId,
+          expressionIndex,
+          expressionPath,
+          expressionName,
           pinName
         });
         return ResponseFactory.success(res, 'Material connections broken successfully');
@@ -868,16 +955,22 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const params = normalizeArgs(args, [
           { key: 'assetPath', aliases: ['materialPath'], required: true },
           { key: 'nodeId', required: false },  // Optional - if not provided, lists all nodes
-          { key: 'expressionIndex' }  // Alternative to nodeId - numeric index
+          { key: 'expressionIndex' },  // Alternative to nodeId - numeric index
+          { key: 'expressionPath' },
+          { key: 'expressionName' }
         ]);
         const assetPath = extractString(params, 'assetPath');
         const nodeId = extractOptionalString(params, 'nodeId');
         const expressionIndex = extractOptionalNumber(params, 'expressionIndex');
+        const expressionPath = extractOptionalString(params, 'expressionPath');
+        const expressionName = extractOptionalString(params, 'expressionName');
         
         const res = await executeAutomationRequest(tools, 'get_material_node_details', {
           assetPath,
           nodeId,
-          expressionIndex
+          expressionIndex,
+          expressionPath,
+          expressionName
         });
         return ResponseFactory.success(res, 'Material node details retrieved');
       }

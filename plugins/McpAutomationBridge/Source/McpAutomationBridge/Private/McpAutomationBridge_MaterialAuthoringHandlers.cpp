@@ -68,6 +68,8 @@
 // Material Core
 #include "Materials/Material.h"
 #include "Materials/MaterialFunction.h"
+#include "Materials/MaterialFunctionInstance.h"
+#include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "Engine/Texture.h"
@@ -446,6 +448,19 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
       return true;
     }
     AssetPath = ValidatedPath;
+
+    // Reject if the asset is a MaterialFunction - BlendMode is material-only
+    {
+      UObject* TestLoad = LoadObject<UObject>(nullptr, *AssetPath);
+      if (TestLoad && !Cast<UMaterial>(TestLoad))
+      {
+        SendAutomationError(Socket, RequestId,
+                            FString::Printf(TEXT("set_blend_mode is not supported on %s assets"),
+                                            *TestLoad->GetClass()->GetName()),
+                            TEXT("UNSUPPORTED_ASSET_TYPE"));
+        return true;
+      }
+    }
 
     UMaterial *Material = LoadObject<UMaterial>(nullptr, *AssetPath);
     if (!Material) {
@@ -2682,60 +2697,128 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
     }
     AssetPath = ValidatedPath;
 
+    // Try UMaterialFunction first (includes Layer/LayerBlend via polymorphism)
+    if (UMaterialFunction* Func = LoadObject<UMaterialFunction>(nullptr, *AssetPath))
+    {
+      FMcpMaterialGraphOwner GraphOwner;
+      GraphOwner.Asset = Func;
+      GraphOwner.GraphSource = Func;
+      GraphOwner.Kind = EMcpMaterialGraphOwnerKind::MaterialFunction;
+      GraphOwner.bReadOnly = false;
+      const TArray<TObjectPtr<UMaterialExpression>>* Expressions = McpGetGraphExpressions(GraphOwner);
+
+      TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+      Result->SetStringField(TEXT("assetClass"), Func->GetClass()->GetName());
+      Result->SetStringField(TEXT("description"), Func->Description);
+      Result->SetBoolField(TEXT("exposedToLibrary"), Func->bExposeToLibrary != 0);
+      Result->SetNumberField(TEXT("nodeCount"), Expressions ? Expressions->Num() : 0);
+
+      // function inputs/outputs
+      TArray<FFunctionExpressionInput>  FuncInputs;
+      TArray<FFunctionExpressionOutput> FuncOutputs;
+      Func->GetInputsAndOutputs(FuncInputs, FuncOutputs);
+
+      TArray<TSharedPtr<FJsonValue>> InputsArr;
+      for (const FFunctionExpressionInput& In : FuncInputs)
+      {
+        TSharedPtr<FJsonObject> Obj = McpHandlerUtils::CreateResultObject();
+        Obj->SetStringField(TEXT("name"), In.Input.InputName.ToString());
+        InputsArr.Add(MakeShared<FJsonValueObject>(Obj));
+      }
+      Result->SetArrayField(TEXT("inputs"), InputsArr);
+
+      TArray<TSharedPtr<FJsonValue>> OutputsArr;
+      for (const FFunctionExpressionOutput& Out : FuncOutputs)
+      {
+        TSharedPtr<FJsonObject> Obj = McpHandlerUtils::CreateResultObject();
+        Obj->SetStringField(TEXT("name"), Out.Output.OutputName.ToString());
+        OutputsArr.Add(MakeShared<FJsonValueObject>(Obj));
+      }
+      Result->SetArrayField(TEXT("outputs"), OutputsArr);
+
+      // parameters
+      TArray<TSharedPtr<FJsonValue>> ParamsArray;
+      if (Expressions) {
+        for (UMaterialExpression* Expr : *Expressions) {
+          if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr)) {
+          TSharedPtr<FJsonObject> ParamObj = McpHandlerUtils::CreateResultObject();
+          ParamObj->SetStringField(TEXT("name"), Param->ParameterName.ToString());
+          ParamObj->SetStringField(TEXT("type"), Expr->GetClass()->GetName());
+          ParamObj->SetStringField(TEXT("nodeId"), Expr->MaterialExpressionGuid.ToString());
+          ParamsArray.Add(MakeShared<FJsonValueObject>(ParamObj));
+          }
+        }
+      }
+      Result->SetArrayField(TEXT("parameters"), ParamsArray);
+
+      SendAutomationResponse(Socket, RequestId, true, TEXT("Material function info retrieved."), Result);
+      return true;
+    }
+
+    // Try UMaterialFunctionInstance
+    if (UMaterialFunctionInstance* Inst = LoadObject<UMaterialFunctionInstance>(nullptr, *AssetPath))
+    {
+      TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+      Result->SetStringField(TEXT("assetClass"), Inst->GetClass()->GetName());
+      UMaterialFunction* Base = Inst->GetBaseFunction();
+      if (Base)
+      {
+        FMcpMaterialGraphOwner GraphOwner;
+        GraphOwner.Asset = Inst;
+        GraphOwner.GraphSource = Base;
+        GraphOwner.Kind = EMcpMaterialGraphOwnerKind::MaterialFunctionInstance;
+        GraphOwner.bReadOnly = true;
+        const TArray<TObjectPtr<UMaterialExpression>>* Expressions = McpGetGraphExpressions(GraphOwner);
+        Result->SetStringField(TEXT("parentAsset"), Base->GetPathName());
+        Result->SetNumberField(TEXT("nodeCount"), Expressions ? Expressions->Num() : 0);
+      }
+      McpCollectFunctionInstanceOverrides(Inst, Result.ToSharedRef());
+      SendAutomationResponse(Socket, RequestId, true, TEXT("Material function instance info retrieved."), Result);
+      return true;
+    }
+
     UMaterial *Material = LoadObject<UMaterial>(nullptr, *AssetPath);
     if (!Material) {
-      SendAutomationError(Socket, RequestId, TEXT("Could not load Material."),
+      SendAutomationError(Socket, RequestId, TEXT("Could not load Material, MaterialFunction, or MaterialFunctionInstance."),
                           TEXT("ASSET_NOT_FOUND"));
       return true;
     }
 
     TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    Result->SetStringField(TEXT("assetClass"), TEXT("Material"));
 
     // Domain
     switch (Material->MaterialDomain) {
     case EMaterialDomain::MD_Surface:
-      Result->SetStringField(TEXT("domain"), TEXT("Surface"));
-      break;
+      Result->SetStringField(TEXT("domain"), TEXT("Surface")); break;
     case EMaterialDomain::MD_DeferredDecal:
-      Result->SetStringField(TEXT("domain"), TEXT("DeferredDecal"));
-      break;
+      Result->SetStringField(TEXT("domain"), TEXT("DeferredDecal")); break;
     case EMaterialDomain::MD_LightFunction:
-      Result->SetStringField(TEXT("domain"), TEXT("LightFunction"));
-      break;
+      Result->SetStringField(TEXT("domain"), TEXT("LightFunction")); break;
     case EMaterialDomain::MD_Volume:
-      Result->SetStringField(TEXT("domain"), TEXT("Volume"));
-      break;
+      Result->SetStringField(TEXT("domain"), TEXT("Volume")); break;
     case EMaterialDomain::MD_PostProcess:
-      Result->SetStringField(TEXT("domain"), TEXT("PostProcess"));
-      break;
+      Result->SetStringField(TEXT("domain"), TEXT("PostProcess")); break;
     case EMaterialDomain::MD_UI:
-      Result->SetStringField(TEXT("domain"), TEXT("UI"));
-      break;
+      Result->SetStringField(TEXT("domain"), TEXT("UI")); break;
     default:
-      Result->SetStringField(TEXT("domain"), TEXT("Unknown"));
-      break;
+      Result->SetStringField(TEXT("domain"), TEXT("Unknown")); break;
     }
 
     // Blend mode
     switch (Material->BlendMode) {
     case EBlendMode::BLEND_Opaque:
-      Result->SetStringField(TEXT("blendMode"), TEXT("Opaque"));
-      break;
+      Result->SetStringField(TEXT("blendMode"), TEXT("Opaque")); break;
     case EBlendMode::BLEND_Masked:
-      Result->SetStringField(TEXT("blendMode"), TEXT("Masked"));
-      break;
+      Result->SetStringField(TEXT("blendMode"), TEXT("Masked")); break;
     case EBlendMode::BLEND_Translucent:
-      Result->SetStringField(TEXT("blendMode"), TEXT("Translucent"));
-      break;
+      Result->SetStringField(TEXT("blendMode"), TEXT("Translucent")); break;
     case EBlendMode::BLEND_Additive:
-      Result->SetStringField(TEXT("blendMode"), TEXT("Additive"));
-      break;
+      Result->SetStringField(TEXT("blendMode"), TEXT("Additive")); break;
     case EBlendMode::BLEND_Modulate:
-      Result->SetStringField(TEXT("blendMode"), TEXT("Modulate"));
-      break;
+      Result->SetStringField(TEXT("blendMode"), TEXT("Modulate")); break;
     default:
-      Result->SetStringField(TEXT("blendMode"), TEXT("Unknown"));
-      break;
+      Result->SetStringField(TEXT("blendMode"), TEXT("Unknown")); break;
     }
 
     Result->SetBoolField(TEXT("twoSided"), Material->TwoSided);
@@ -2744,13 +2827,11 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
     // List parameters
     TArray<TSharedPtr<FJsonValue>> ParamsArray;
     for (UMaterialExpression *Expr : MCP_GET_MATERIAL_EXPRESSIONS(Material)) {
-      if (UMaterialExpressionParameter *Param =
-              Cast<UMaterialExpressionParameter>(Expr)) {
+      if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
         TSharedPtr<FJsonObject> ParamObj = McpHandlerUtils::CreateResultObject();
         ParamObj->SetStringField(TEXT("name"), Param->ParameterName.ToString());
         ParamObj->SetStringField(TEXT("type"), Expr->GetClass()->GetName());
-        ParamObj->SetStringField(TEXT("nodeId"),
-                                 Expr->MaterialExpressionGuid.ToString());
+        ParamObj->SetStringField(TEXT("nodeId"), Expr->MaterialExpressionGuid.ToString());
         ParamsArray.Add(MakeShared<FJsonValueObject>(ParamObj));
       }
     }

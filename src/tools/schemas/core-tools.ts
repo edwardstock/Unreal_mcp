@@ -80,7 +80,7 @@ export const coreToolDefinitions: ToolDefinition[] = [
   {
     name: 'manage_asset',
     category: 'core',
-    description: 'Create, import, duplicate, rename, delete assets. Edit Material graphs and instances. Analyze dependencies.',
+    description: 'Create, import, duplicate, rename, delete assets. Edit Material and MaterialFunction graphs and instances. Analyze dependencies.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -91,7 +91,11 @@ export const coreToolDefinitions: ToolDefinition[] = [
             'get_dependencies', 'get_source_control_state', 'analyze_graph', 'get_asset_graph', 'create_thumbnail', 'set_tags', 'get_metadata', 'set_metadata', 'validate', 'fixup_redirectors', 'find_by_tag', 'generate_report',
             'create_material', 'create_material_instance', 'create_render_target', 'generate_lods', 'add_material_parameter', 'list_instances', 'reset_instance_parameters', 'exists', 'get_material_stats',
             'nanite_rebuild_mesh', 'bulk_rename', 'bulk_delete', 'source_control_checkout', 'source_control_submit',
-            'add_material_node', 'connect_material_pins', 'remove_material_node', 'break_material_connections', 'get_material_node_details', 'rebuild_material'
+            'add_material_node', 'connect_material_pins', 'remove_material_node', 'break_material_connections', 'get_material_node_details', 'rebuild_material',
+            'set_material_node_position', 'move_material_node', 'bulk_set_material_node_positions', 'bulk_move_material_nodes',
+            'create_material_comment', 'wrap_material_nodes_in_comment',
+            'create_named_reroute', 'use_named_reroute', 'replace_long_connection_with_named_reroute',
+            'align_material_nodes'
           ],
           description: 'Action to perform'
         },
@@ -130,9 +134,21 @@ export const coreToolDefinitions: ToolDefinition[] = [
         graphName: commonSchemas.graphName,
         nodeType: commonSchemas.stringProp,
         nodeId: commonSchemas.nodeId,
+        expressionPath: commonSchemas.stringProp,
+        expressionName: commonSchemas.stringProp,
+        expressionGuid: commonSchemas.stringProp,
+        sourceExpressionIndex: commonSchemas.numberProp,
+        targetExpressionIndex: commonSchemas.numberProp,
+        sourceExpressionPath: commonSchemas.stringProp,
+        targetExpressionPath: commonSchemas.stringProp,
+        anchorExpressionIndex: commonSchemas.numberProp,
+        anchorExpressionPath: commonSchemas.stringProp,
+        anchorNodeId: commonSchemas.nodeId,
         sourceNodeId: commonSchemas.sourceNodeId,
         targetNodeId: commonSchemas.targetNodeId,
+        sourceOutputIndex: commonSchemas.numberProp,
         inputName: commonSchemas.pinName,
+        targetInputPin: commonSchemas.pinName,
         fromNodeId: commonSchemas.sourceNodeId,
         fromPin: commonSchemas.sourcePin,
         toNodeId: commonSchemas.targetNodeId,
@@ -142,6 +158,18 @@ export const coreToolDefinitions: ToolDefinition[] = [
         x: commonSchemas.numberProp,
         y: commonSchemas.numberProp,
         comment: commonSchemas.stringProp,
+        operation: commonSchemas.stringProp,
+        backend: commonSchemas.stringProp,
+        placementMode: commonSchemas.stringProp,
+        direction: commonSchemas.stringProp,
+        avoidOverlap: commonSchemas.booleanProp,
+        placement: commonSchemas.objectProp,
+        padding: commonSchemas.numberProp,
+        groupMode: commonSchemas.booleanProp,
+        minDistance: commonSchemas.numberProp,
+        declarationId: commonSchemas.nodeId,
+        declarationGuid: commonSchemas.stringProp,
+        declarationName: commonSchemas.name,
         parentNodeId: commonSchemas.nodeId,
         childNodeId: commonSchemas.nodeId,
         maxDepth: commonSchemas.numberProp,
@@ -174,7 +202,7 @@ export const coreToolDefinitions: ToolDefinition[] = [
         inputPin: commonSchemas.targetPin,
         type: commonSchemas.stringProp,
         defaultValue: commonSchemas.value,
-        expressionIndex: commonSchemas.nodeId
+        expressionIndex: commonSchemas.numberProp
       },
       required: ['action']
     },

@@ -528,6 +528,14 @@ private:
                         const TSharedPtr<FJsonObject> &Payload,
                         TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
   bool
+  HandleSetMaterialNodePosition(const FString &RequestId, const FString &Action,
+                                const TSharedPtr<FJsonObject> &Payload,
+                                TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleBulkSetMaterialNodePositions(const FString &RequestId, const FString &Action,
+                                     const TSharedPtr<FJsonObject> &Payload,
+                                     TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
   HandleConnectMaterialPins(const FString &RequestId, const FString &Action,
                             const TSharedPtr<FJsonObject> &Payload,
                             TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
@@ -546,6 +554,30 @@ private:
                                const TSharedPtr<FJsonObject> &Payload,
                                TSharedPtr<FMcpBridgeWebSocket>
                                    RequestingSocket);
+  bool
+  HandleCreateMaterialComment(const FString &RequestId, const FString &Action,
+                              const TSharedPtr<FJsonObject> &Payload,
+                              TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleWrapMaterialNodesInComment(const FString &RequestId, const FString &Action,
+                                   const TSharedPtr<FJsonObject> &Payload,
+                                   TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleCreateNamedReroute(const FString &RequestId, const FString &Action,
+                           const TSharedPtr<FJsonObject> &Payload,
+                           TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleUseNamedReroute(const FString &RequestId, const FString &Action,
+                        const TSharedPtr<FJsonObject> &Payload,
+                        TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleReplaceLongConnectionWithNamedReroute(const FString &RequestId, const FString &Action,
+                                             const TSharedPtr<FJsonObject> &Payload,
+                                             TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleAlignMaterialNodes(const FString &RequestId, const FString &Action,
+                           const TSharedPtr<FJsonObject> &Payload,
+                           TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
   bool
   HandleRebuildMaterial(const FString &RequestId, const FString &Action,
                         const TSharedPtr<FJsonObject> &Payload,
@@ -1264,9 +1296,6 @@ private:
   bool HandleGetDependencies(const FString &RequestId,
                              const TSharedPtr<FJsonObject> &Payload,
                              TSharedPtr<FMcpBridgeWebSocket> Socket);
-  bool HandleGetAssetGraph(const FString &RequestId,
-                           const TSharedPtr<FJsonObject> &Payload,
-                           TSharedPtr<FMcpBridgeWebSocket> Socket);
   bool HandleCreateThumbnail(const FString &RequestId,
                              const TSharedPtr<FJsonObject> &Payload,
                              TSharedPtr<FMcpBridgeWebSocket> Socket);

@@ -115,6 +115,13 @@
 #include "ImageUtils.h"
 #include "MaterialEditingLibrary.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialExpressionComment.h"
+#include "Materials/MaterialExpressionFunctionInput.h"
+#include "Materials/MaterialExpressionFunctionOutput.h"
+#include "Materials/MaterialExpressionNamedReroute.h"
+#include "Materials/MaterialFunction.h"
+#include "Materials/MaterialFunctionInstance.h"
+#include "Materials/MaterialFunctionInterface.h"
 
 // MaterialDomain.h was introduced in UE 5.1 - in UE 5.0 EMaterialDomain is in MaterialShared.h
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
@@ -145,8 +152,421 @@
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "Blueprint/BlueprintSupport.h"
+#include "GraphEditor.h"
 
 #endif // WITH_EDITOR
+
+#if WITH_EDITOR
+namespace
+{
+struct FMcpMaterialNodeRect
+{
+  int32 X = 0;
+  int32 Y = 0;
+  int32 W = 260;
+  int32 H = 140;
+
+  bool Overlaps(const FMcpMaterialNodeRect& Other, int32 Padding = 40) const
+  {
+    return X < Other.X + Other.W + Padding &&
+           X + W + Padding > Other.X &&
+           Y < Other.Y + Other.H + Padding &&
+           Y + H + Padding > Other.Y;
+  }
+};
+
+static FString McpExpressionPath(const UMaterialExpression* Expr)
+{
+  return Expr ? Expr->GetPathName() : FString();
+}
+
+static int32 McpExpressionIndex(const FMcpMaterialGraphOwner& Owner, const UMaterialExpression* Expr)
+{
+  const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+  return Exprs && Expr ? Exprs->IndexOfByKey(Expr) : INDEX_NONE;
+}
+
+static void McpAddExpressionIdentity(
+    const FMcpMaterialGraphOwner& Owner,
+    UMaterialExpression* Expr,
+    int32 Index,
+    const TSharedRef<FJsonObject>& Obj)
+{
+  if (!Expr)
+  {
+    return;
+  }
+
+  Obj->SetNumberField(TEXT("index"), Index);
+  Obj->SetNumberField(TEXT("expressionIndex"), Index);
+  Obj->SetStringField(TEXT("nodeId"), Expr->MaterialExpressionGuid.ToString());
+  Obj->SetStringField(TEXT("expressionGuid"), Expr->MaterialExpressionGuid.ToString());
+  Obj->SetStringField(TEXT("expressionName"), Expr->GetName());
+  Obj->SetStringField(TEXT("expressionPath"), McpExpressionPath(Expr));
+  Obj->SetStringField(TEXT("name"), Expr->GetName());
+  Obj->SetStringField(TEXT("type"), Expr->GetClass()->GetName());
+  Obj->SetNumberField(TEXT("x"), Expr->MaterialExpressionEditorX);
+  Obj->SetNumberField(TEXT("y"), Expr->MaterialExpressionEditorY);
+  Obj->SetNumberField(TEXT("editorX"), Expr->MaterialExpressionEditorX);
+  Obj->SetNumberField(TEXT("editorY"), Expr->MaterialExpressionEditorY);
+
+  if (UMaterialExpressionFunctionInput* Input = Cast<UMaterialExpressionFunctionInput>(Expr))
+  {
+    Obj->SetStringField(TEXT("functionInputId"), Input->Id.ToString());
+    Obj->SetStringField(TEXT("inputName"), Input->InputName.ToString());
+  }
+  else if (UMaterialExpressionFunctionOutput* Output = Cast<UMaterialExpressionFunctionOutput>(Expr))
+  {
+    Obj->SetStringField(TEXT("functionOutputId"), Output->Id.ToString());
+    Obj->SetStringField(TEXT("outputName"), Output->OutputName.ToString());
+  }
+  else if (UMaterialExpressionNamedRerouteDeclaration* Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(Expr))
+  {
+    Obj->SetStringField(TEXT("rerouteName"), Declaration->Name.ToString());
+    Obj->SetStringField(TEXT("rerouteGuid"), Declaration->VariableGuid.ToString());
+  }
+  else if (UMaterialExpressionNamedRerouteUsage* Usage = Cast<UMaterialExpressionNamedRerouteUsage>(Expr))
+  {
+    Obj->SetStringField(TEXT("declarationGuid"), Usage->DeclarationGuid.ToString());
+    if (Usage->Declaration)
+    {
+      Obj->SetStringField(TEXT("declarationName"), Usage->Declaration->Name.ToString());
+      Obj->SetNumberField(TEXT("declarationExpressionIndex"), McpExpressionIndex(Owner, Usage->Declaration));
+    }
+  }
+}
+
+static UMaterialExpression* McpFindGraphExpressionFromPayload(
+    const FMcpMaterialGraphOwner& Owner,
+    const TSharedPtr<FJsonObject>& Payload,
+    const TCHAR* IndexField = TEXT("expressionIndex"),
+    const TCHAR* IdField = TEXT("nodeId"),
+    const TCHAR* PathField = TEXT("expressionPath"))
+{
+  if (!Payload.IsValid())
+  {
+    return nullptr;
+  }
+
+  int32 ExpressionIndex = INDEX_NONE;
+  if (Payload->TryGetNumberField(IndexField, ExpressionIndex))
+  {
+    return McpFindGraphExpression(Owner, FString(), ExpressionIndex);
+  }
+
+  FString ExpressionPath;
+  if (Payload->TryGetStringField(PathField, ExpressionPath) && !ExpressionPath.IsEmpty())
+  {
+    return McpFindGraphExpression(Owner, ExpressionPath);
+  }
+
+  FString NodeId;
+  if (Payload->TryGetStringField(IdField, NodeId) && !NodeId.IsEmpty())
+  {
+    return McpFindGraphExpression(Owner, NodeId);
+  }
+
+  FString ExpressionName;
+  if (Payload->TryGetStringField(TEXT("expressionName"), ExpressionName) && !ExpressionName.IsEmpty())
+  {
+    return McpFindGraphExpression(Owner, ExpressionName);
+  }
+
+  return nullptr;
+}
+
+static FExpressionInput* McpFindExpressionInputByName(
+    UMaterialExpression* Expression,
+    FString& InOutInputName)
+{
+  if (!Expression)
+  {
+    return nullptr;
+  }
+
+  if (!InOutInputName.IsEmpty())
+  {
+    for (FProperty* Property = Expression->GetClass()->PropertyLink; Property; Property = Property->PropertyLinkNext)
+    {
+      if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
+      {
+        if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput")) &&
+            Property->GetName().Equals(InOutInputName, ESearchCase::IgnoreCase))
+        {
+          InOutInputName = Property->GetName();
+          return StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
+        }
+      }
+    }
+  }
+
+  for (FProperty* Property = Expression->GetClass()->PropertyLink; Property; Property = Property->PropertyLinkNext)
+  {
+    if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
+    {
+      if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput")))
+      {
+        InOutInputName = Property->GetName();
+        return StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
+      }
+    }
+  }
+
+  return nullptr;
+}
+
+static FIntPoint McpEstimateExpressionSize(UMaterialExpression* Expr)
+{
+  if (!Expr)
+  {
+    return FIntPoint(260, 140);
+  }
+  if (Expr->IsA<UMaterialExpressionTextureSample>())
+  {
+    return FIntPoint(340, 280);
+  }
+  if (Expr->IsA<UMaterialExpressionFunctionInput>() || Expr->IsA<UMaterialExpressionFunctionOutput>())
+  {
+    return FIntPoint(260, 110);
+  }
+  if (Expr->IsA<UMaterialExpressionNamedRerouteDeclaration>() ||
+      Expr->IsA<UMaterialExpressionNamedRerouteUsage>())
+  {
+    return FIntPoint(220, 80);
+  }
+  if (Expr->GetClass()->GetName().Contains(TEXT("SetMaterialAttributes")))
+  {
+    return FIntPoint(360, 340);
+  }
+  if (Expr->GetClass()->GetName().Contains(TEXT("MaterialFunctionCall")))
+  {
+    return FIntPoint(340, 180);
+  }
+  return FIntPoint(260, 140);
+}
+
+static TArray<FMcpMaterialNodeRect> McpCollectExpressionRects(const FMcpMaterialGraphOwner& Owner)
+{
+  TArray<FMcpMaterialNodeRect> Rects;
+  const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+  if (!Exprs)
+  {
+    return Rects;
+  }
+
+  for (UMaterialExpression* Expr : *Exprs)
+  {
+    if (!Expr)
+    {
+      continue;
+    }
+    const FIntPoint Size = McpEstimateExpressionSize(Expr);
+    Rects.Add({Expr->MaterialExpressionEditorX, Expr->MaterialExpressionEditorY, Size.X, Size.Y});
+  }
+
+  return Rects;
+}
+
+static FIntPoint McpFindFreePosition(
+    const FMcpMaterialGraphOwner& Owner,
+    const FIntPoint& Start,
+    const FIntPoint& Size,
+    int32 StepY = 180)
+{
+  const TArray<FMcpMaterialNodeRect> Existing = McpCollectExpressionRects(Owner);
+  FIntPoint Candidate = Start;
+  for (int32 Attempt = 0; Attempt < 256; ++Attempt)
+  {
+    const FMcpMaterialNodeRect CandidateRect{Candidate.X, Candidate.Y, Size.X, Size.Y};
+    bool bOverlaps = false;
+    for (const FMcpMaterialNodeRect& ExistingRect : Existing)
+    {
+      if (CandidateRect.Overlaps(ExistingRect))
+      {
+        bOverlaps = true;
+        break;
+      }
+    }
+    if (!bOverlaps)
+    {
+      return Candidate;
+    }
+    Candidate.Y += StepY;
+  }
+  return Candidate;
+}
+
+static FIntPoint McpResolvePlacement(
+    const FMcpMaterialGraphOwner& Owner,
+    const TSharedPtr<FJsonObject>& Payload,
+    UMaterialExpression* NewExpression)
+{
+  double ExplicitX = 0.0;
+  double ExplicitY = 0.0;
+  const bool bHasPosX = Payload->TryGetNumberField(TEXT("posX"), ExplicitX) || Payload->TryGetNumberField(TEXT("x"), ExplicitX);
+  const bool bHasPosY = Payload->TryGetNumberField(TEXT("posY"), ExplicitY) || Payload->TryGetNumberField(TEXT("y"), ExplicitY);
+
+  const TSharedPtr<FJsonObject>* PlacementObjPtr = nullptr;
+  TSharedPtr<FJsonObject> Placement;
+  if (Payload->TryGetObjectField(TEXT("placement"), PlacementObjPtr) && PlacementObjPtr)
+  {
+    Placement = *PlacementObjPtr;
+  }
+
+  FString Mode;
+  if (Placement.IsValid())
+  {
+    Placement->TryGetStringField(TEXT("mode"), Mode);
+  }
+  if (Mode.IsEmpty())
+  {
+    Payload->TryGetStringField(TEXT("placementMode"), Mode);
+  }
+
+  if (Mode.Equals(TEXT("absolute"), ESearchCase::IgnoreCase) || (bHasPosX && bHasPosY && Mode.IsEmpty()))
+  {
+    return FIntPoint(static_cast<int32>(ExplicitX), static_cast<int32>(ExplicitY));
+  }
+
+  UMaterialExpression* Anchor = nullptr;
+  if (Placement.IsValid())
+  {
+    Anchor = McpFindGraphExpressionFromPayload(Owner, Placement, TEXT("anchorExpressionIndex"), TEXT("anchorNodeId"), TEXT("anchorExpressionPath"));
+  }
+  if (!Anchor)
+  {
+    Anchor = McpFindGraphExpressionFromPayload(Owner, Payload, TEXT("anchorExpressionIndex"), TEXT("anchorNodeId"), TEXT("anchorExpressionPath"));
+  }
+
+  FString Direction = TEXT("right");
+  if (Placement.IsValid())
+  {
+    Placement->TryGetStringField(TEXT("direction"), Direction);
+  }
+  Payload->TryGetStringField(TEXT("direction"), Direction);
+
+  const FIntPoint Size = McpEstimateExpressionSize(NewExpression);
+  FIntPoint Start(static_cast<int32>(ExplicitX), static_cast<int32>(ExplicitY));
+  if (Anchor)
+  {
+    const FIntPoint AnchorSize = McpEstimateExpressionSize(Anchor);
+    if (Direction.Equals(TEXT("left"), ESearchCase::IgnoreCase))
+    {
+      Start = FIntPoint(Anchor->MaterialExpressionEditorX - Size.X - 320, Anchor->MaterialExpressionEditorY);
+    }
+    else if (Direction.Equals(TEXT("below"), ESearchCase::IgnoreCase))
+    {
+      Start = FIntPoint(Anchor->MaterialExpressionEditorX, Anchor->MaterialExpressionEditorY + AnchorSize.Y + 180);
+    }
+    else if (Direction.Equals(TEXT("above"), ESearchCase::IgnoreCase))
+    {
+      Start = FIntPoint(Anchor->MaterialExpressionEditorX, Anchor->MaterialExpressionEditorY - Size.Y - 180);
+    }
+    else
+    {
+      Start = FIntPoint(Anchor->MaterialExpressionEditorX + AnchorSize.X + 320, Anchor->MaterialExpressionEditorY);
+    }
+  }
+
+  bool bAvoidOverlap = true;
+  if (Placement.IsValid())
+  {
+    Placement->TryGetBoolField(TEXT("avoidOverlap"), bAvoidOverlap);
+  }
+  Payload->TryGetBoolField(TEXT("avoidOverlap"), bAvoidOverlap);
+
+  if (!bAvoidOverlap)
+  {
+    return Start;
+  }
+  return McpFindFreePosition(Owner, Start, Size);
+}
+
+static bool McpAddExpressionToGraph(const FMcpMaterialGraphOwner& Owner, UMaterialExpression* Expression)
+{
+  if (!Expression)
+  {
+    return false;
+  }
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+  {
+    CastChecked<UMaterial>(Owner.GraphSource)->GetEditorOnlyData()->ExpressionCollection.AddExpression(Expression);
+  }
+  else
+  {
+    CastChecked<UMaterialFunction>(Owner.GraphSource)->GetEditorOnlyData()->ExpressionCollection.AddExpression(Expression);
+  }
+#else
+  if (TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressionsMutable(Owner))
+  {
+    Exprs->Add(Expression);
+  }
+#endif
+  return true;
+}
+
+static bool McpAddCommentToGraph(const FMcpMaterialGraphOwner& Owner, UMaterialExpressionComment* Comment)
+{
+  if (!Comment)
+  {
+    return false;
+  }
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+  if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+  {
+    CastChecked<UMaterial>(Owner.GraphSource)->GetEditorOnlyData()->ExpressionCollection.AddComment(Comment);
+  }
+  else
+  {
+    CastChecked<UMaterialFunction>(Owner.GraphSource)->GetEditorOnlyData()->ExpressionCollection.AddComment(Comment);
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
+static TConstArrayView<TObjectPtr<UMaterialExpressionComment>> McpGetGraphComments(const FMcpMaterialGraphOwner& Owner)
+{
+  if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+  {
+    return CastChecked<UMaterial>(Owner.GraphSource)->GetEditorComments();
+  }
+  return CastChecked<UMaterialFunction>(Owner.GraphSource)->GetEditorComments();
+}
+
+static UMaterialExpressionNamedRerouteDeclaration* McpFindNamedRerouteDeclaration(
+    const FMcpMaterialGraphOwner& Owner,
+    const FString& NameOrGuid)
+{
+  const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+  if (!Exprs)
+  {
+    return nullptr;
+  }
+
+  FGuid ParsedGuid;
+  const bool bHasGuid = FGuid::Parse(NameOrGuid, ParsedGuid);
+  for (UMaterialExpression* Expr : *Exprs)
+  {
+    UMaterialExpressionNamedRerouteDeclaration* Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(Expr);
+    if (!Declaration)
+    {
+      continue;
+    }
+    if ((bHasGuid && Declaration->VariableGuid == ParsedGuid) ||
+        Declaration->Name.ToString() == NameOrGuid ||
+        Declaration->GetName() == NameOrGuid ||
+        Declaration->GetPathName() == NameOrGuid)
+    {
+      return Declaration;
+    }
+  }
+  return nullptr;
+}
+} // namespace
+#endif
 
 // =============================================================================
 // ASSET ACTION DISPATCHER
@@ -195,7 +615,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
   if (Lower == TEXT("get_dependencies"))
     return HandleGetDependencies(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("get_asset_graph"))
-    return HandleGetAssetGraph(RequestId, Payload, RequestingSocket);
+    return HandleGetAssetGraph(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("set_tags"))
     return HandleSetTags(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("set_metadata"))
@@ -209,7 +629,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
   if (Lower == TEXT("generate_report"))
     return HandleGenerateReport(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("create_thumbnail") || Lower == TEXT("generate_thumbnail"))
-    return HandleGenerateThumbnail(RequestId, Action, Payload, RequestingSocket);
+    return HandleGenerateThumbnail(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("add_material_parameter"))
     return HandleAddMaterialParameter(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("list_instances"))
@@ -223,49 +643,65 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
   
   // Search (CRITICAL: search_assets must be dispatched - was missing causing timeouts)
   if (Lower == TEXT("search_assets"))
-    return HandleSearchAssets(RequestId, Action, Payload, RequestingSocket);
+    return HandleSearchAssets(RequestId, Lower, Payload, RequestingSocket);
 
   // Bulk Operations
   if (Lower == TEXT("fixup_redirectors"))
-    return HandleFixupRedirectors(RequestId, Action, Payload, RequestingSocket);
+    return HandleFixupRedirectors(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("bulk_rename"))
-    return HandleBulkRenameAssets(RequestId, Action, Payload, RequestingSocket);
+    return HandleBulkRenameAssets(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("bulk_delete"))
-    return HandleBulkDeleteAssets(RequestId, Action, Payload, RequestingSocket);
+    return HandleBulkDeleteAssets(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("generate_lods"))
-    return HandleGenerateLODs(RequestId, Action, Payload, RequestingSocket);
+    return HandleGenerateLODs(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("nanite_rebuild_mesh"))
-    return HandleNaniteRebuildMesh(RequestId, Action, Payload, RequestingSocket);
+    return HandleNaniteRebuildMesh(RequestId, Lower, Payload, RequestingSocket);
 
   // Source Control
   if (Lower == TEXT("source_control_checkout"))
-    return HandleSourceControlCheckout(RequestId, Action, Payload, RequestingSocket);
+    return HandleSourceControlCheckout(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("source_control_submit"))
-    return HandleSourceControlSubmit(RequestId, Action, Payload, RequestingSocket);
+    return HandleSourceControlSubmit(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("get_source_control_state"))
-    return HandleGetSourceControlState(RequestId, Action, Payload, RequestingSocket);
+    return HandleGetSourceControlState(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("source_control_enable"))
-    return HandleSourceControlEnable(RequestId, Action, Payload, RequestingSocket);
+    return HandleSourceControlEnable(RequestId, Lower, Payload, RequestingSocket);
 
   // Graph & Analysis
   if (Lower == TEXT("analyze_graph"))
-    return HandleAnalyzeGraph(RequestId, Action, Payload, RequestingSocket);
+    return HandleAnalyzeGraph(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("find_by_tag"))
-    return HandleFindByTag(RequestId, Action, Payload, RequestingSocket);
+    return HandleFindByTag(RequestId, Lower, Payload, RequestingSocket);
 
   // Material Authoring
   if (Lower == TEXT("add_material_node"))
-    return HandleAddMaterialNode(RequestId, Action, Payload, RequestingSocket);
+    return HandleAddMaterialNode(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("set_material_node_position") || Lower == TEXT("move_material_node"))
+    return HandleSetMaterialNodePosition(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("bulk_set_material_node_positions") || Lower == TEXT("bulk_move_material_nodes"))
+    return HandleBulkSetMaterialNodePositions(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("connect_material_pins"))
-    return HandleConnectMaterialPins(RequestId, Action, Payload, RequestingSocket);
+    return HandleConnectMaterialPins(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("remove_material_node"))
-    return HandleRemoveMaterialNode(RequestId, Action, Payload, RequestingSocket);
+    return HandleRemoveMaterialNode(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("break_material_connections"))
-    return HandleBreakMaterialConnections(RequestId, Action, Payload, RequestingSocket);
+    return HandleBreakMaterialConnections(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("create_material_comment"))
+    return HandleCreateMaterialComment(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("wrap_material_nodes_in_comment"))
+    return HandleWrapMaterialNodesInComment(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("create_named_reroute"))
+    return HandleCreateNamedReroute(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("use_named_reroute"))
+    return HandleUseNamedReroute(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("replace_long_connection_with_named_reroute"))
+    return HandleReplaceLongConnectionWithNamedReroute(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("align_material_nodes"))
+    return HandleAlignMaterialNodes(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("get_material_node_details"))
-    return HandleGetMaterialNodeDetails(RequestId, Action, Payload, RequestingSocket);
+    return HandleGetMaterialNodeDetails(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("rebuild_material"))
-    return HandleRebuildMaterial(RequestId, Action, Payload, RequestingSocket);
+    return HandleRebuildMaterial(RequestId, Lower, Payload, RequestingSocket);
 
   return false;
 }
@@ -2045,97 +2481,6 @@ bool UMcpAutomationBridgeSubsystem::HandleGetDependencies(
 }
 
 /**
- * Handles requests to traverse and return an asset dependency graph.
- *
- * @param RequestId Unique request identifier.
- * @param Payload JSON payload containing 'assetPath' and optional 'maxDepth'.
- * @param Socket WebSocket connection.
- * @return True if handled.
- */
-bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
-    const FString &RequestId, const TSharedPtr<FJsonObject> &Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket) {
-#if WITH_EDITOR
-  FString AssetPath;
-  Payload->TryGetStringField(TEXT("assetPath"), AssetPath);
-  if (AssetPath.IsEmpty()) {
-    SendAutomationResponse(Socket, RequestId, false, TEXT("assetPath required"),
-                           nullptr, TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  if (!IsValidAssetPath(AssetPath)) {
-    SendAutomationResponse(Socket, RequestId, false, TEXT("Invalid asset path"),
-                           nullptr, TEXT("INVALID_PATH"));
-    return true;
-  }
-
-  // Check if asset exists - return error for non-existent assets
-  if (!UEditorAssetLibrary::DoesAssetExist(AssetPath)) {
-    SendAutomationError(Socket, RequestId, 
-                        FString::Printf(TEXT("Asset not found: %s"), *AssetPath),
-                        TEXT("ASSET_NOT_FOUND"));
-    return true;
-  }
-
-  int32 MaxDepth = 3;
-  Payload->TryGetNumberField(TEXT("maxDepth"), MaxDepth);
-
-  FAssetRegistryModule &AssetRegistryModule =
-      FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-  IAssetRegistry &AssetRegistry = AssetRegistryModule.Get();
-
-  TSharedPtr<FJsonObject> GraphObj = McpHandlerUtils::CreateResultObject();
-
-  TArray<FString> Queue;
-  Queue.Add(AssetPath);
-
-  TSet<FString> Visited;
-  Visited.Add(AssetPath);
-
-  TMap<FString, int32> Depths;
-  Depths.Add(AssetPath, 0);
-
-  int32 Head = 0;
-  while (Head < Queue.Num()) {
-    FString Current = Queue[Head++];
-    int32 CurrentDepth = Depths[Current];
-
-    TArray<FName> Dependencies;
-    AssetRegistry.GetDependencies(FName(*Current), Dependencies);
-
-    TArray<TSharedPtr<FJsonValue>> DepArray;
-    for (const FName &Dep : Dependencies) {
-      FString DepStr = Dep.ToString();
-      if (!DepStr.StartsWith(TEXT("/Game")))
-        continue; // Only graph Game assets for now
-
-      DepArray.Add(MakeShared<FJsonValueString>(DepStr));
-
-      if (CurrentDepth < MaxDepth) {
-        if (!Visited.Contains(DepStr)) {
-          Visited.Add(DepStr);
-          Depths.Add(DepStr, CurrentDepth + 1);
-          Queue.Add(DepStr);
-        }
-      }
-    }
-    GraphObj->SetArrayField(Current, DepArray);
-  }
-
-  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  Resp->SetBoolField(TEXT("success"), true);
-  Resp->SetObjectField(TEXT("graph"), GraphObj);
-  SendAutomationResponse(Socket, RequestId, true, TEXT("Asset graph retrieved"),
-                         Resp, FString());
-  return true;
-#else
-  SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
-  return true;
-#endif
-}
-
-/**
  * Handles requests to set asset tags. NOTE: Asset Registry tags are distinct
  * from Actor tags. This function currently returns NOT_IMPLEMENTED as generic
  * asset tagging is ambiguous (metadata vs registry tags).
@@ -2328,12 +2673,16 @@ bool UMcpAutomationBridgeSubsystem::HandleListAssets(
   // Parse pagination
   int32 Offset = 0;
   int32 Limit = -1; // -1 means no limit
+  Payload->TryGetNumberField(TEXT("offset"), Offset);
+  Payload->TryGetNumberField(TEXT("limit"), Limit);
   const TSharedPtr<FJsonObject> *PaginationObj;
   if (Payload->TryGetObjectField(TEXT("pagination"), PaginationObj) &&
       PaginationObj) {
     (*PaginationObj)->TryGetNumberField(TEXT("offset"), Offset);
     (*PaginationObj)->TryGetNumberField(TEXT("limit"), Limit);
   }
+
+  Offset = FMath::Max(0, Offset);
 
   FAssetRegistryModule &AssetRegistryModule =
       FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
@@ -3844,11 +4193,16 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
   }
 
   FString MaterialPath;
-  if (!Payload->TryGetStringField(TEXT("materialPath"), MaterialPath) ||
-      MaterialPath.IsEmpty()) {
+  if (!Payload->TryGetStringField(TEXT("materialPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("assetPath"), MaterialPath))
+  {
     SendAutomationError(Socket, RequestId,
-                        TEXT("materialPath is required"),
+                        TEXT("assetPath or materialPath is required"),
                         TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+  if (MaterialPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath cannot be empty"), TEXT("INVALID_ARGUMENT"));
     return true;
   }
 
@@ -3861,12 +4215,21 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
     return true;
   }
 
-  // Load the material
-  UMaterial *Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
-  if (!Material) {
+  // Resolve to UMaterial or UMaterialFunction (Instance is read-only, reject it)
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError))
+  {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found"))
+                            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly)
+  {
     SendAutomationError(Socket, RequestId,
-                        FString::Printf(TEXT("Material not found: %s"), *MaterialPath),
-                        TEXT("MATERIAL_NOT_FOUND"));
+                        TEXT("Cannot add nodes to a MaterialFunctionInstance - edit the parent function instead"),
+                        TEXT("UNSUPPORTED_OPERATION"));
     return true;
   }
 
@@ -3915,8 +4278,8 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
     }
   }
 
-  // Create the expression
-  NewExpression = NewObject<UMaterialExpression>(Material, ExpressionClass, NAME_None, RF_Transactional);
+  // Create the expression owned by the graph source object
+  NewExpression = NewObject<UMaterialExpression>(GraphOwner.GraphSource, ExpressionClass, NAME_None, RF_Transactional);
   if (!NewExpression) {
     SendAutomationError(Socket, RequestId,
                         TEXT("Failed to create material expression"),
@@ -3924,12 +4287,9 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
     return true;
   }
 
-  // Set position
-  double PosX = 0, PosY = 0;
-  Payload->TryGetNumberField(TEXT("posX"), PosX);
-  Payload->TryGetNumberField(TEXT("posY"), PosY);
-  NewExpression->MaterialExpressionEditorX = static_cast<int32>(PosX);
-  NewExpression->MaterialExpressionEditorY = static_cast<int32>(PosY);
+  const FIntPoint Position = McpResolvePlacement(GraphOwner, Payload, NewExpression);
+  NewExpression->MaterialExpressionEditorX = Position.X;
+  NewExpression->MaterialExpressionEditorY = Position.Y;
 
   // Set node properties based on type
   if (UMaterialExpressionConstant *Const = Cast<UMaterialExpressionConstant>(NewExpression)) {
@@ -3955,29 +4315,20 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
     }
   }
 
-  // Add to material
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-  Material->GetEditorOnlyData()->ExpressionCollection.AddExpression(NewExpression);
-#else
-  Material->Expressions.Add(NewExpression);
-#endif
+  McpAddExpressionToGraph(GraphOwner, NewExpression);
+  TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressionsMutable(GraphOwner);
 
-  Material->MarkPackageDirty();
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
 
-  // Get the expression index for reference
-  int32 ExpressionIndex = -1;
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-  ExpressionIndex = Material->GetEditorOnlyData()->ExpressionCollection.Expressions.IndexOfByKey(NewExpression);
-#else
-  ExpressionIndex = Material->Expressions.IndexOfByKey(NewExpression);
-#endif
+  int32 ExpressionIndex = Exprs ? Exprs->IndexOfByKey(NewExpression) : -1;
 
   TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  Resp->SetStringField(TEXT("materialPath"), MaterialPath);
+  Resp->SetStringField(TEXT("assetPath"), MaterialPath);
+  Resp->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
   Resp->SetStringField(TEXT("nodeType"), NodeType);
-  Resp->SetNumberField(TEXT("expressionIndex"), ExpressionIndex);
-  Resp->SetStringField(TEXT("expressionName"), NewExpression->GetName());
   Resp->SetStringField(TEXT("nodeGuid"), NewExpression->MaterialExpressionGuid.ToString());
+  McpAddExpressionIdentity(GraphOwner, NewExpression, ExpressionIndex, Resp.ToSharedRef());
 
   SendAutomationResponse(Socket, RequestId, true,
                          TEXT("Material node added successfully"), Resp, FString());
@@ -3986,6 +4337,162 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
   SendAutomationResponse(Socket, RequestId, false,
                          TEXT("add_material_node requires editor build"), nullptr,
                          TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleSetMaterialNodePosition(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("set_material_node_position"), ESearchCase::IgnoreCase) &&
+      !Lower.Equals(TEXT("move_material_node"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId, TEXT("set_material_node_position payload missing"), TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly) {
+    SendAutomationError(Socket, RequestId, TEXT("Cannot move nodes on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
+    return true;
+  }
+
+  UMaterialExpression* Expression = McpFindGraphExpressionFromPayload(GraphOwner, Payload);
+  if (!Expression) {
+    SendAutomationError(Socket, RequestId, TEXT("Node not found. Provide expressionIndex, expressionPath, or nodeId"), TEXT("NODE_NOT_FOUND"));
+    return true;
+  }
+
+  double NewX = 0.0;
+  double NewY = 0.0;
+  if (!(Payload->TryGetNumberField(TEXT("x"), NewX) || Payload->TryGetNumberField(TEXT("posX"), NewX)) ||
+      !(Payload->TryGetNumberField(TEXT("y"), NewY) || Payload->TryGetNumberField(TEXT("posY"), NewY))) {
+    SendAutomationError(Socket, RequestId, TEXT("x/y or posX/posY are required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  const int32 OldX = Expression->MaterialExpressionEditorX;
+  const int32 OldY = Expression->MaterialExpressionEditorY;
+  Expression->Modify();
+  Expression->MaterialExpressionEditorX = static_cast<int32>(NewX);
+  Expression->MaterialExpressionEditorY = static_cast<int32>(NewY);
+
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  McpAddExpressionIdentity(GraphOwner, Expression, McpExpressionIndex(GraphOwner, Expression), Resp.ToSharedRef());
+  Resp->SetNumberField(TEXT("oldX"), OldX);
+  Resp->SetNumberField(TEXT("oldY"), OldY);
+  Resp->SetNumberField(TEXT("newX"), Expression->MaterialExpressionEditorX);
+  Resp->SetNumberField(TEXT("newY"), Expression->MaterialExpressionEditorY);
+  SendAutomationResponse(Socket, RequestId, true, TEXT("Material node position updated"), Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false, TEXT("set_material_node_position requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleBulkSetMaterialNodePositions(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("bulk_set_material_node_positions"), ESearchCase::IgnoreCase) &&
+      !Lower.Equals(TEXT("bulk_move_material_nodes"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId, TEXT("bulk_set_material_node_positions payload missing"), TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+  if (!Payload->TryGetArrayField(TEXT("nodes"), Nodes) || !Nodes || Nodes->Num() == 0) {
+    SendAutomationError(Socket, RequestId, TEXT("nodes array is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly) {
+    SendAutomationError(Socket, RequestId, TEXT("Cannot move nodes on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
+    return true;
+  }
+
+  int32 UpdatedCount = 0;
+  TArray<TSharedPtr<FJsonValue>> UpdatedNodes;
+  for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes) {
+    const TSharedPtr<FJsonObject>* NodeObj = nullptr;
+    if (!NodeValue.IsValid() || !NodeValue->TryGetObject(NodeObj) || !NodeObj) {
+      continue;
+    }
+
+    UMaterialExpression* Expression = McpFindGraphExpressionFromPayload(GraphOwner, *NodeObj);
+    double NewX = 0.0;
+    double NewY = 0.0;
+    const bool bHasX = (*NodeObj)->TryGetNumberField(TEXT("x"), NewX) || (*NodeObj)->TryGetNumberField(TEXT("posX"), NewX);
+    const bool bHasY = (*NodeObj)->TryGetNumberField(TEXT("y"), NewY) || (*NodeObj)->TryGetNumberField(TEXT("posY"), NewY);
+    if (!Expression || !bHasX || !bHasY) {
+      continue;
+    }
+
+    Expression->Modify();
+    Expression->MaterialExpressionEditorX = static_cast<int32>(NewX);
+    Expression->MaterialExpressionEditorY = static_cast<int32>(NewY);
+    UpdatedCount++;
+
+    TSharedPtr<FJsonObject> UpdatedObj = McpHandlerUtils::CreateResultObject();
+    McpAddExpressionIdentity(GraphOwner, Expression, McpExpressionIndex(GraphOwner, Expression), UpdatedObj.ToSharedRef());
+    UpdatedNodes.Add(MakeShared<FJsonValueObject>(UpdatedObj));
+  }
+
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  Resp->SetNumberField(TEXT("affectedNodeCount"), UpdatedCount);
+  Resp->SetArrayField(TEXT("nodes"), UpdatedNodes);
+  SendAutomationResponse(Socket, RequestId, true, TEXT("Material node positions updated"), Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false, TEXT("bulk_set_material_node_positions requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
   return true;
 #endif
 }
@@ -4024,169 +4531,103 @@ bool UMcpAutomationBridgeSubsystem::HandleConnectMaterialPins(
     return true;
   }
 
-  // Load the material
-  UMaterial *Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
-  if (!Material) {
+  // Resolve to UMaterial or UMaterialFunction
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError))
+  {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found"))
+                            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly)
+  {
     SendAutomationError(Socket, RequestId,
-                        FString::Printf(TEXT("Material not found: %s"), *MaterialPath),
-                        TEXT("MATERIAL_NOT_FOUND"));
+                        TEXT("Cannot connect pins on a MaterialFunctionInstance - edit the parent function instead"),
+                        TEXT("UNSUPPORTED_OPERATION"));
     return true;
   }
 
-  // Helper to find expression by GUID, name, or index
-  auto FindExpression = [&Material](const FString &IdOrIndex) -> UMaterialExpression* {
-    if (IdOrIndex.IsEmpty()) {
-      return nullptr;
-    }
+  static const TArray<TObjectPtr<UMaterialExpression>> EmptyExprs;
+  const TArray<TObjectPtr<UMaterialExpression>>* ExpressionsPtr = McpGetGraphExpressions(GraphOwner);
+  const TArray<TObjectPtr<UMaterialExpression>>& Expressions = ExpressionsPtr ? *ExpressionsPtr : EmptyExprs;
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-    const TArray<TObjectPtr<UMaterialExpression>> &Expressions =
-        Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
-#else
-    const TArray<UMaterialExpression *> &Expressions = Material->Expressions;
-#endif
-
-    // Try as GUID string first
-    FGuid GuidId;
-    if (FGuid::Parse(IdOrIndex, GuidId)) {
-      for (UMaterialExpression *Expr : Expressions) {
-        if (Expr && Expr->MaterialExpressionGuid == GuidId) {
-          return Expr;
-        }
-      }
-    }
-
-    // Try as name
-    for (UMaterialExpression *Expr : Expressions) {
-      if (Expr) {
-        if (Expr->GetName() == IdOrIndex || Expr->GetPathName() == IdOrIndex) {
-          return Expr;
-        }
-        // Check parameter name
-        if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
-          if (Param->ParameterName.ToString() == IdOrIndex) {
-            return Expr;
-          }
-        }
-      }
-    }
-
-    // Try as numeric index
-    int32 Index = -1;
-    if (IdOrIndex.IsNumeric()) {
-      Index = FCString::Atoi(*IdOrIndex);
-      if (Index >= 0 && Index < Expressions.Num()) {
-        return Expressions[Index];
-      }
-    }
-
-    return nullptr;
-  };
-
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-  const TArray<TObjectPtr<UMaterialExpression>> &Expressions =
-      Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
-#else
-  const TArray<UMaterialExpression *> &Expressions = Material->Expressions;
-#endif
-
-  // Accept both sourceNodeId/targetNodeId (GUID strings) and fromExpression/toExpression (indices)
+  // Accept sourceNodeId/targetNodeId, sourceExpressionPath/targetExpressionPath, and fromExpression/toExpression indices.
   FString SourceNodeId, TargetNodeId;
   int32 FromExpressionIndex = -1, ToExpressionIndex = -1;
-  
+
   UMaterialExpression *FromExpression = nullptr;
   UMaterialExpression *ToExpression = nullptr;
 
-  // Try GUID-based parameters first
-  if (Payload->TryGetStringField(TEXT("sourceNodeId"), SourceNodeId) && !SourceNodeId.IsEmpty()) {
-    FromExpression = FindExpression(SourceNodeId);
-  }
-  if (Payload->TryGetStringField(TEXT("targetNodeId"), TargetNodeId) && !TargetNodeId.IsEmpty()) {
-    ToExpression = FindExpression(TargetNodeId);
-  }
+  FromExpression = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("sourceExpressionIndex"), TEXT("sourceNodeId"), TEXT("sourceExpressionPath"));
+  ToExpression = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("targetExpressionIndex"), TEXT("targetNodeId"), TEXT("targetExpressionPath"));
+  Payload->TryGetStringField(TEXT("sourceNodeId"), SourceNodeId);
+  Payload->TryGetStringField(TEXT("targetNodeId"), TargetNodeId);
 
-  // Fall back to index-based parameters
-  if (!FromExpression && Payload->TryGetNumberField(TEXT("fromExpression"), FromExpressionIndex)) {
-    if (FromExpressionIndex >= 0 && FromExpressionIndex < Expressions.Num()) {
-      FromExpression = Expressions[FromExpressionIndex];
-    }
-  }
-  if (!ToExpression && Payload->TryGetNumberField(TEXT("toExpression"), ToExpressionIndex)) {
-    if (ToExpressionIndex >= 0 && ToExpressionIndex < Expressions.Num()) {
-      ToExpression = Expressions[ToExpressionIndex];
-    }
-  }
+  if (!FromExpression && Payload->TryGetNumberField(TEXT("fromExpression"), FromExpressionIndex))
+    FromExpression = McpFindGraphExpression(GraphOwner, FString(), FromExpressionIndex);
+  if (!ToExpression && Payload->TryGetNumberField(TEXT("toExpression"), ToExpressionIndex))
+    ToExpression = McpFindGraphExpression(GraphOwner, FString(), ToExpressionIndex);
 
-  // Check if target is the main material node
   FString InputName;
   Payload->TryGetStringField(TEXT("inputName"), InputName);
-  if (InputName.IsEmpty()) {
-    Payload->TryGetStringField(TEXT("targetPin"), InputName);  // Alias
-  }
-  if (InputName.IsEmpty()) {
-    Payload->TryGetStringField(TEXT("sourcePin"), InputName);  // Another alias
-  }
+  if (InputName.IsEmpty()) Payload->TryGetStringField(TEXT("targetPin"), InputName);
+  if (InputName.IsEmpty()) Payload->TryGetStringField(TEXT("sourcePin"), InputName);
 
-  // Handle connection to main material node
+  // Handle connection to main material node (only for UMaterial)
   bool bConnectToMainNode = false;
-  if ((TargetNodeId.IsEmpty() || TargetNodeId == TEXT("Main")) && !InputName.IsEmpty()) {
+  if (!ToExpression && (TargetNodeId.IsEmpty() || TargetNodeId == TEXT("Main")) && !InputName.IsEmpty())
     bConnectToMainNode = true;
-  } else if (ToExpression == nullptr && !InputName.IsEmpty()) {
-    // No target expression but have input name = main node connection
+  else if (!ToExpression && !InputName.IsEmpty())
     bConnectToMainNode = true;
-  }
 
-  if (bConnectToMainNode && FromExpression) {
-    // Connect to main material input
+  if (bConnectToMainNode && FromExpression)
+  {
+    if (GraphOwner.Kind != EMcpMaterialGraphOwnerKind::Material)
+    {
+      SendAutomationError(Socket, RequestId,
+                          TEXT("Main material node connections only apply to UMaterial, not UMaterialFunction"),
+                          TEXT("UNSUPPORTED_OPERATION"));
+      return true;
+    }
+
+    UMaterial* Material = CastChecked<UMaterial>(GraphOwner.GraphSource);
     bool bFound = false;
 #if WITH_EDITORONLY_DATA
     if (InputName == TEXT("BaseColor")) {
-      MCP_GET_MATERIAL_INPUT(Material, BaseColor).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, BaseColor).Expression = FromExpression; bFound = true;
     } else if (InputName == TEXT("EmissiveColor")) {
-      MCP_GET_MATERIAL_INPUT(Material, EmissiveColor).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, EmissiveColor).Expression = FromExpression; bFound = true;
     } else if (InputName == TEXT("Roughness")) {
-      MCP_GET_MATERIAL_INPUT(Material, Roughness).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, Roughness).Expression = FromExpression; bFound = true;
     } else if (InputName == TEXT("Metallic")) {
-      MCP_GET_MATERIAL_INPUT(Material, Metallic).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, Metallic).Expression = FromExpression; bFound = true;
     } else if (InputName == TEXT("Specular")) {
-      MCP_GET_MATERIAL_INPUT(Material, Specular).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, Specular).Expression = FromExpression; bFound = true;
     } else if (InputName == TEXT("Normal")) {
-      MCP_GET_MATERIAL_INPUT(Material, Normal).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, Normal).Expression = FromExpression; bFound = true;
     } else if (InputName == TEXT("Opacity")) {
-      MCP_GET_MATERIAL_INPUT(Material, Opacity).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, Opacity).Expression = FromExpression; bFound = true;
     } else if (InputName == TEXT("OpacityMask")) {
-      MCP_GET_MATERIAL_INPUT(Material, OpacityMask).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, OpacityMask).Expression = FromExpression; bFound = true;
     } else if (InputName == TEXT("AmbientOcclusion") || InputName == TEXT("AO")) {
-      MCP_GET_MATERIAL_INPUT(Material, AmbientOcclusion).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, AmbientOcclusion).Expression = FromExpression; bFound = true;
     } else if (InputName == TEXT("SubsurfaceColor")) {
-      MCP_GET_MATERIAL_INPUT(Material, SubsurfaceColor).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, SubsurfaceColor).Expression = FromExpression; bFound = true;
     } else if (InputName == TEXT("WorldPositionOffset")) {
-      MCP_GET_MATERIAL_INPUT(Material, WorldPositionOffset).Expression = FromExpression;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, WorldPositionOffset).Expression = FromExpression; bFound = true;
     }
-    // Note: TessellationMultiplier removed - not available in all UE versions
 #endif
 
     if (bFound) {
-      Material->PostEditChange();
-      Material->MarkPackageDirty();
-
+      FString RebuildErr;
+      McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
       TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
       McpHandlerUtils::AddVerification(Resp, Material);
       Resp->SetStringField(TEXT("inputName"), InputName);
       Resp->SetStringField(TEXT("sourceNodeId"), FromExpression->MaterialExpressionGuid.ToString());
-      SendAutomationResponse(Socket, RequestId, true,
-                             TEXT("Connected to main material pin"), Resp, FString());
+      SendAutomationResponse(Socket, RequestId, true, TEXT("Connected to main material pin"), Resp, FString());
     } else {
       SendAutomationError(Socket, RequestId,
                           FString::Printf(TEXT("Unknown main material input: %s"), *InputName),
@@ -4197,25 +4638,16 @@ bool UMcpAutomationBridgeSubsystem::HandleConnectMaterialPins(
 
   // Normal expression-to-expression connection
   if (!FromExpression) {
-    SendAutomationError(Socket, RequestId,
-                        TEXT("Source node not found"),
-                        TEXT("SOURCE_NODE_NOT_FOUND"));
+    SendAutomationError(Socket, RequestId, TEXT("Source node not found"), TEXT("SOURCE_NODE_NOT_FOUND"));
     return true;
   }
-
   if (!ToExpression) {
-    SendAutomationError(Socket, RequestId,
-                        TEXT("Target node not found"),
-                        TEXT("TARGET_NODE_NOT_FOUND"));
+    SendAutomationError(Socket, RequestId, TEXT("Target node not found"), TEXT("TARGET_NODE_NOT_FOUND"));
     return true;
   }
 
-  // Get input name (default to first available input)
-  if (InputName.IsEmpty()) {
-    InputName = TEXT("Input");
-  }
+  if (InputName.IsEmpty()) InputName = TEXT("Input");
 
-  // Find the input on the destination expression
   FExpressionInput *TargetInput = nullptr;
   for (FProperty *Property = ToExpression->GetClass()->PropertyLink; Property;
        Property = Property->PropertyLinkNext) {
@@ -4229,7 +4661,6 @@ bool UMcpAutomationBridgeSubsystem::HandleConnectMaterialPins(
     }
   }
 
-  // If not found, try first available input
   if (!TargetInput) {
     for (FProperty *Property = ToExpression->GetClass()->PropertyLink; Property;
          Property = Property->PropertyLinkNext) {
@@ -4250,20 +4681,19 @@ bool UMcpAutomationBridgeSubsystem::HandleConnectMaterialPins(
     return true;
   }
 
-  // Make the connection
   TargetInput->Expression = FromExpression;
-  Material->PostEditChange();
-  Material->MarkPackageDirty();
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
 
   TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, Material);
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  Resp->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
   Resp->SetStringField(TEXT("sourceNodeId"), FromExpression->MaterialExpressionGuid.ToString());
   Resp->SetStringField(TEXT("targetNodeId"), ToExpression->MaterialExpressionGuid.ToString());
   Resp->SetStringField(TEXT("inputName"), InputName);
 
   SendAutomationResponse(Socket, RequestId, true,
-                         TEXT("Material pins connected successfully"), Resp,
-                         FString());
+                         TEXT("Material pins connected successfully"), Resp, FString());
   return true;
 #else
   SendAutomationResponse(Socket, RequestId, false,
@@ -4307,82 +4737,33 @@ bool UMcpAutomationBridgeSubsystem::HandleRemoveMaterialNode(
     return true;
   }
 
-  // Load the material
-  UMaterial *Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
-  if (!Material) {
+  // Resolve to UMaterial or UMaterialFunction
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError))
+  {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found"))
+                            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly)
+  {
     SendAutomationError(Socket, RequestId,
-                        FString::Printf(TEXT("Material not found: %s"), *MaterialPath),
-                        TEXT("MATERIAL_NOT_FOUND"));
+                        TEXT("Cannot remove nodes from a MaterialFunctionInstance - edit the parent function instead"),
+                        TEXT("UNSUPPORTED_OPERATION"));
     return true;
   }
 
-  // Get expressions array
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-  TArray<TObjectPtr<UMaterialExpression>> &Expressions =
-      Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
-#else
-  TArray<UMaterialExpression *> &Expressions = Material->Expressions;
-#endif
+  TArray<TObjectPtr<UMaterialExpression>>* ExpressionsPtr = McpGetGraphExpressionsMutable(GraphOwner);
+  static TArray<TObjectPtr<UMaterialExpression>> EmptyExprs;
+  TArray<TObjectPtr<UMaterialExpression>>& Expressions = ExpressionsPtr ? *ExpressionsPtr : EmptyExprs;
 
-  // Helper to find expression by GUID, name, or index
-  auto FindExpression = [&Expressions](const FString &IdOrIndex) -> UMaterialExpression* {
-    if (IdOrIndex.IsEmpty()) {
-      return nullptr;
-    }
-
-    // Try as GUID string first
-    FGuid GuidId;
-    if (FGuid::Parse(IdOrIndex, GuidId)) {
-      for (UMaterialExpression *Expr : Expressions) {
-        if (Expr && Expr->MaterialExpressionGuid == GuidId) {
-          return Expr;
-        }
-      }
-    }
-
-    // Try as name
-    for (UMaterialExpression *Expr : Expressions) {
-      if (Expr) {
-        if (Expr->GetName() == IdOrIndex || Expr->GetPathName() == IdOrIndex) {
-          return Expr;
-        }
-        // Check parameter name
-        if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
-          if (Param->ParameterName.ToString() == IdOrIndex) {
-            return Expr;
-          }
-        }
-      }
-    }
-
-    // Try as numeric index
-    int32 Index = -1;
-    if (IdOrIndex.IsNumeric()) {
-      Index = FCString::Atoi(*IdOrIndex);
-      if (Index >= 0 && Index < Expressions.Num()) {
-        return Expressions[Index];
-      }
-    }
-
-    return nullptr;
-  };
-
-  // Accept both nodeId (GUID string) and expressionIndex (int)
-  FString NodeId;
-  int32 ExpressionIndex = -1;
-  UMaterialExpression *ExpressionToRemove = nullptr;
-
-  if (Payload->TryGetStringField(TEXT("nodeId"), NodeId) && !NodeId.IsEmpty()) {
-    ExpressionToRemove = FindExpression(NodeId);
-  } else if (Payload->TryGetNumberField(TEXT("expressionIndex"), ExpressionIndex)) {
-    if (ExpressionIndex >= 0 && ExpressionIndex < Expressions.Num()) {
-      ExpressionToRemove = Expressions[ExpressionIndex];
-    }
-  }
+  UMaterialExpression *ExpressionToRemove = McpFindGraphExpressionFromPayload(GraphOwner, Payload);
 
   if (!ExpressionToRemove) {
     SendAutomationError(Socket, RequestId,
-                        TEXT("Node not found. Provide valid nodeId (GUID) or expressionIndex"),
+                        TEXT("Node not found. Provide valid expressionIndex, expressionPath, or nodeId"),
                         TEXT("NODE_NOT_FOUND"));
     return true;
   }
@@ -4390,29 +4771,33 @@ bool UMcpAutomationBridgeSubsystem::HandleRemoveMaterialNode(
   FString RemovedName = ExpressionToRemove->GetName();
   FString RemovedGuid = ExpressionToRemove->MaterialExpressionGuid.ToString();
 
-  // Remove the expression
+  // Remove from collection
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-  Material->GetEditorOnlyData()->ExpressionCollection.RemoveExpression(ExpressionToRemove);
+  if (GraphOwner.Kind == EMcpMaterialGraphOwnerKind::Material)
+    CastChecked<UMaterial>(GraphOwner.GraphSource)->GetEditorOnlyData()->ExpressionCollection.RemoveExpression(ExpressionToRemove);
+  else
+    CastChecked<UMaterialFunction>(GraphOwner.GraphSource)->GetEditorOnlyData()->ExpressionCollection.RemoveExpression(ExpressionToRemove);
 #else
   Expressions.Remove(ExpressionToRemove);
 #endif
 
-  // Also remove from the material's root node if connected
-  Material->RemoveExpressionParameter(ExpressionToRemove);
+  // Remove from material parameter tracking (only relevant for UMaterial)
+  if (GraphOwner.Kind == EMcpMaterialGraphOwnerKind::Material)
+    CastChecked<UMaterial>(GraphOwner.GraphSource)->RemoveExpressionParameter(ExpressionToRemove);
 
-  Material->PostEditChange();
-  Material->MarkPackageDirty();
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
 
   TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, Material);
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  Resp->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
   Resp->SetStringField(TEXT("nodeId"), RemovedGuid);
   Resp->SetStringField(TEXT("removedName"), RemovedName);
   Resp->SetNumberField(TEXT("remainingExpressions"), Expressions.Num());
   Resp->SetBoolField(TEXT("removed"), true);
 
   SendAutomationResponse(Socket, RequestId, true,
-                         TEXT("Material node removed successfully"), Resp,
-                         FString());
+                         TEXT("Material node removed successfully"), Resp, FString());
   return true;
 #else
   SendAutomationResponse(Socket, RequestId, false,
@@ -4456,116 +4841,72 @@ bool UMcpAutomationBridgeSubsystem::HandleBreakMaterialConnections(
     return true;
   }
 
-  // Load the material
-  UMaterial *Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
-  if (!Material) {
+  // Resolve to UMaterial or UMaterialFunction
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError))
+  {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found"))
+                            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly)
+  {
     SendAutomationError(Socket, RequestId,
-                        FString::Printf(TEXT("Material not found: %s"), *MaterialPath),
-                        TEXT("MATERIAL_NOT_FOUND"));
+                        TEXT("Cannot break connections on a MaterialFunctionInstance - edit the parent function instead"),
+                        TEXT("UNSUPPORTED_OPERATION"));
     return true;
   }
 
-  // Get expressions
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-  const TArray<TObjectPtr<UMaterialExpression>> &Expressions =
-      Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
-#else
-  const TArray<UMaterialExpression *> &Expressions = Material->Expressions;
-#endif
+  static const TArray<TObjectPtr<UMaterialExpression>> EmptyExprs;
+  const TArray<TObjectPtr<UMaterialExpression>>* ExpressionsPtr = McpGetGraphExpressions(GraphOwner);
+  const TArray<TObjectPtr<UMaterialExpression>>& Expressions = ExpressionsPtr ? *ExpressionsPtr : EmptyExprs;
 
-  // Helper to find expression by GUID, name, or index
-  auto FindExpression = [&Expressions](const FString &IdOrIndex) -> UMaterialExpression* {
-    if (IdOrIndex.IsEmpty()) {
-      return nullptr;
-    }
-
-    // Try as GUID string first
-    FGuid GuidId;
-    if (FGuid::Parse(IdOrIndex, GuidId)) {
-      for (UMaterialExpression *Expr : Expressions) {
-        if (Expr && Expr->MaterialExpressionGuid == GuidId) {
-          return Expr;
-        }
-      }
-    }
-
-    // Try as name
-    for (UMaterialExpression *Expr : Expressions) {
-      if (Expr) {
-        if (Expr->GetName() == IdOrIndex || Expr->GetPathName() == IdOrIndex) {
-          return Expr;
-        }
-        if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
-          if (Param->ParameterName.ToString() == IdOrIndex) {
-            return Expr;
-          }
-        }
-      }
-    }
-
-    // Try as numeric index
-    int32 Index = -1;
-    if (IdOrIndex.IsNumeric()) {
-      Index = FCString::Atoi(*IdOrIndex);
-      if (Index >= 0 && Index < Expressions.Num()) {
-        return Expressions[Index];
-      }
-    }
-
-    return nullptr;
-  };
-
-  // Check if breaking from main material node
   FString NodeId, PinName;
   bool bHasNodeId = Payload->TryGetStringField(TEXT("nodeId"), NodeId) && !NodeId.IsEmpty();
   bool bHasPinName = Payload->TryGetStringField(TEXT("pinName"), PinName) && !PinName.IsEmpty();
-  
-  // Also check nodeId alias
-  if (!bHasNodeId) {
-    bHasNodeId = Payload->TryGetStringField(TEXT("nodeId"), NodeId) && !NodeId.IsEmpty();
-  }
 
-  // If nodeId is "Main" or empty with pinName, disconnect from main material node
-  if ((!bHasNodeId || NodeId == TEXT("Main")) && bHasPinName) {
+  // Break from main material node (only valid for UMaterial)
+  if ((!bHasNodeId || NodeId == TEXT("Main")) && bHasPinName)
+  {
+    if (GraphOwner.Kind != EMcpMaterialGraphOwnerKind::Material)
+    {
+      SendAutomationError(Socket, RequestId,
+                          TEXT("Main material node pins only exist on UMaterial, not UMaterialFunction"),
+                          TEXT("UNSUPPORTED_OPERATION"));
+      return true;
+    }
+
+    UMaterial* Material = CastChecked<UMaterial>(GraphOwner.GraphSource);
     bool bFound = false;
 #if WITH_EDITORONLY_DATA
     if (PinName == TEXT("BaseColor")) {
-      MCP_GET_MATERIAL_INPUT(Material, BaseColor).Expression = nullptr;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, BaseColor).Expression = nullptr; bFound = true;
     } else if (PinName == TEXT("EmissiveColor")) {
-      MCP_GET_MATERIAL_INPUT(Material, EmissiveColor).Expression = nullptr;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, EmissiveColor).Expression = nullptr; bFound = true;
     } else if (PinName == TEXT("Roughness")) {
-      MCP_GET_MATERIAL_INPUT(Material, Roughness).Expression = nullptr;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, Roughness).Expression = nullptr; bFound = true;
     } else if (PinName == TEXT("Metallic")) {
-      MCP_GET_MATERIAL_INPUT(Material, Metallic).Expression = nullptr;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, Metallic).Expression = nullptr; bFound = true;
     } else if (PinName == TEXT("Specular")) {
-      MCP_GET_MATERIAL_INPUT(Material, Specular).Expression = nullptr;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, Specular).Expression = nullptr; bFound = true;
     } else if (PinName == TEXT("Normal")) {
-      MCP_GET_MATERIAL_INPUT(Material, Normal).Expression = nullptr;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, Normal).Expression = nullptr; bFound = true;
     } else if (PinName == TEXT("Opacity")) {
-      MCP_GET_MATERIAL_INPUT(Material, Opacity).Expression = nullptr;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, Opacity).Expression = nullptr; bFound = true;
     } else if (PinName == TEXT("OpacityMask")) {
-      MCP_GET_MATERIAL_INPUT(Material, OpacityMask).Expression = nullptr;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, OpacityMask).Expression = nullptr; bFound = true;
     } else if (PinName == TEXT("AmbientOcclusion") || PinName == TEXT("AO")) {
-      MCP_GET_MATERIAL_INPUT(Material, AmbientOcclusion).Expression = nullptr;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, AmbientOcclusion).Expression = nullptr; bFound = true;
     } else if (PinName == TEXT("SubsurfaceColor")) {
-      MCP_GET_MATERIAL_INPUT(Material, SubsurfaceColor).Expression = nullptr;
-      bFound = true;
+      MCP_GET_MATERIAL_INPUT(Material, SubsurfaceColor).Expression = nullptr; bFound = true;
     }
 #endif
 
     if (bFound) {
-      Material->PostEditChange();
-      Material->MarkPackageDirty();
-
+      FString RebuildErr;
+      McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
       TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
       McpHandlerUtils::AddVerification(Resp, Material);
       Resp->SetStringField(TEXT("pinName"), PinName);
@@ -4581,65 +4922,46 @@ bool UMcpAutomationBridgeSubsystem::HandleBreakMaterialConnections(
   }
 
   // Find target expression
-  int32 ExpressionIndex = -1;
-  UMaterialExpression *TargetExpression = nullptr;
-
-  if (bHasNodeId) {
-    TargetExpression = FindExpression(NodeId);
-  } else if (Payload->TryGetNumberField(TEXT("expressionIndex"), ExpressionIndex)) {
-    if (ExpressionIndex >= 0 && ExpressionIndex < Expressions.Num()) {
-      TargetExpression = Expressions[ExpressionIndex];
-    }
-  }
+  UMaterialExpression *TargetExpression = McpFindGraphExpressionFromPayload(GraphOwner, Payload);
 
   if (!TargetExpression) {
     SendAutomationError(Socket, RequestId,
-                        TEXT("Node not found. Provide valid nodeId (GUID) or expressionIndex"),
+                        TEXT("Node not found. Provide valid expressionIndex, expressionPath, or nodeId"),
                         TEXT("NODE_NOT_FOUND"));
     return true;
   }
 
-  // Get optional input name to break specific connection
   FString InputName;
-  bool bSpecificInput = Payload->TryGetStringField(TEXT("inputName"), InputName) &&
-                        !InputName.IsEmpty();
-
+  bool bSpecificInput = Payload->TryGetStringField(TEXT("inputName"), InputName) && !InputName.IsEmpty();
   int32 BrokenConnections = 0;
 
-  // Iterate through all properties of the expression to find and break connections
   for (FProperty *Property = TargetExpression->GetClass()->PropertyLink; Property;
        Property = Property->PropertyLinkNext) {
     if (FStructProperty *StructProp = CastField<FStructProperty>(Property)) {
       if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput"))) {
-        // Check if we should break this specific input
-        if (bSpecificInput && !Property->GetName().Equals(InputName, ESearchCase::IgnoreCase)) {
+        if (bSpecificInput && !Property->GetName().Equals(InputName, ESearchCase::IgnoreCase))
           continue;
-        }
 
         FExpressionInput *Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(TargetExpression);
         if (Input && Input->Expression) {
           Input->Expression = nullptr;
           BrokenConnections++;
-
-          // If breaking specific input, we can stop after finding it
-          if (bSpecificInput) {
-            break;
-          }
+          if (bSpecificInput) break;
         }
       }
     }
   }
 
-  Material->PostEditChange();
-  Material->MarkPackageDirty();
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
 
   TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, Material);
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  Resp->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
   Resp->SetStringField(TEXT("nodeId"), TargetExpression->MaterialExpressionGuid.ToString());
   Resp->SetNumberField(TEXT("brokenConnections"), BrokenConnections);
-  if (bSpecificInput) {
+  if (bSpecificInput)
     Resp->SetStringField(TEXT("inputName"), InputName);
-  }
 
   SendAutomationResponse(Socket, RequestId, true,
                          FString::Printf(TEXT("Broken %d connection(s)"), BrokenConnections),
@@ -4649,6 +4971,661 @@ bool UMcpAutomationBridgeSubsystem::HandleBreakMaterialConnections(
   SendAutomationResponse(Socket, RequestId, false,
                          TEXT("break_material_connections requires editor build"),
                          nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleCreateMaterialComment(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("create_material_comment"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId, TEXT("create_material_comment payload missing"), TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly) {
+    SendAutomationError(Socket, RequestId, TEXT("Cannot create comments on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
+    return true;
+  }
+
+  FString Text;
+  Payload->TryGetStringField(TEXT("text"), Text);
+  if (Text.IsEmpty()) {
+    Payload->TryGetStringField(TEXT("comment"), Text);
+  }
+
+  double X = 0.0, Y = 0.0, Width = 800.0, Height = 400.0;
+  Payload->TryGetNumberField(TEXT("x"), X);
+  Payload->TryGetNumberField(TEXT("y"), Y);
+  Payload->TryGetNumberField(TEXT("width"), Width);
+  Payload->TryGetNumberField(TEXT("height"), Height);
+
+  UMaterialExpressionComment* Comment = NewObject<UMaterialExpressionComment>(GraphOwner.GraphSource, UMaterialExpressionComment::StaticClass(), NAME_None, RF_Transactional);
+  Comment->Text = Text;
+  Comment->MaterialExpressionEditorX = static_cast<int32>(X);
+  Comment->MaterialExpressionEditorY = static_cast<int32>(Y);
+  Comment->SizeX = static_cast<int32>(Width);
+  Comment->SizeY = static_cast<int32>(Height);
+
+  bool bGroupMode = true;
+  Payload->TryGetBoolField(TEXT("groupMode"), bGroupMode);
+  Comment->bGroupMode = bGroupMode;
+
+  const TSharedPtr<FJsonObject>* ColorObj = nullptr;
+  if (Payload->TryGetObjectField(TEXT("color"), ColorObj) && ColorObj) {
+    double R = 1.0, G = 1.0, B = 1.0, A = 1.0;
+    (*ColorObj)->TryGetNumberField(TEXT("r"), R);
+    (*ColorObj)->TryGetNumberField(TEXT("g"), G);
+    (*ColorObj)->TryGetNumberField(TEXT("b"), B);
+    (*ColorObj)->TryGetNumberField(TEXT("a"), A);
+    Comment->CommentColor = FLinearColor(static_cast<float>(R), static_cast<float>(G), static_cast<float>(B), static_cast<float>(A));
+  }
+
+  if (!McpAddCommentToGraph(GraphOwner, Comment)) {
+    SendAutomationError(Socket, RequestId, TEXT("Material comments require UE 5.1+ expression collections"), TEXT("UNSUPPORTED_OPERATION"));
+    return true;
+  }
+
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  Resp->SetStringField(TEXT("commentId"), Comment->GetPathName());
+  Resp->SetStringField(TEXT("text"), Comment->Text);
+  Resp->SetNumberField(TEXT("x"), Comment->MaterialExpressionEditorX);
+  Resp->SetNumberField(TEXT("y"), Comment->MaterialExpressionEditorY);
+  Resp->SetNumberField(TEXT("width"), Comment->SizeX);
+  Resp->SetNumberField(TEXT("height"), Comment->SizeY);
+  Resp->SetBoolField(TEXT("groupMode"), Comment->bGroupMode);
+  SendAutomationResponse(Socket, RequestId, true, TEXT("Material comment created"), Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false, TEXT("create_material_comment requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleWrapMaterialNodesInComment(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("wrap_material_nodes_in_comment"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId, TEXT("wrap_material_nodes_in_comment payload missing"), TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+  if (!Payload->TryGetArrayField(TEXT("nodes"), Nodes) || !Nodes || Nodes->Num() == 0) {
+    SendAutomationError(Socket, RequestId, TEXT("nodes array is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly) {
+    SendAutomationError(Socket, RequestId, TEXT("Cannot create comments on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
+    return true;
+  }
+
+  int32 MinX = TNumericLimits<int32>::Max();
+  int32 MinY = TNumericLimits<int32>::Max();
+  int32 MaxX = TNumericLimits<int32>::Min();
+  int32 MaxY = TNumericLimits<int32>::Min();
+  int32 ResolvedCount = 0;
+
+  for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes) {
+    const TSharedPtr<FJsonObject>* NodeObj = nullptr;
+    if (!NodeValue.IsValid() || !NodeValue->TryGetObject(NodeObj) || !NodeObj) {
+      continue;
+    }
+    UMaterialExpression* Expr = McpFindGraphExpressionFromPayload(GraphOwner, *NodeObj);
+    if (!Expr) {
+      continue;
+    }
+    const FIntPoint Size = McpEstimateExpressionSize(Expr);
+    MinX = FMath::Min(MinX, Expr->MaterialExpressionEditorX);
+    MinY = FMath::Min(MinY, Expr->MaterialExpressionEditorY);
+    MaxX = FMath::Max(MaxX, Expr->MaterialExpressionEditorX + Size.X);
+    MaxY = FMath::Max(MaxY, Expr->MaterialExpressionEditorY + Size.Y);
+    ResolvedCount++;
+  }
+
+  if (ResolvedCount == 0) {
+    SendAutomationError(Socket, RequestId, TEXT("No nodes could be resolved"), TEXT("NODE_NOT_FOUND"));
+    return true;
+  }
+
+  double Padding = 80.0;
+  Payload->TryGetNumberField(TEXT("padding"), Padding);
+  TSharedPtr<FJsonObject> LocalPayload = McpHandlerUtils::CreateResultObject();
+  LocalPayload->SetStringField(TEXT("assetPath"), MaterialPath);
+  FString Text;
+  Payload->TryGetStringField(TEXT("text"), Text);
+  if (Text.IsEmpty()) {
+    Payload->TryGetStringField(TEXT("comment"), Text);
+  }
+  LocalPayload->SetStringField(TEXT("text"), Text);
+  LocalPayload->SetNumberField(TEXT("x"), MinX - Padding);
+  LocalPayload->SetNumberField(TEXT("y"), MinY - Padding);
+  LocalPayload->SetNumberField(TEXT("width"), (MaxX - MinX) + Padding * 2.0);
+  LocalPayload->SetNumberField(TEXT("height"), (MaxY - MinY) + Padding * 2.0);
+  bool bGroupMode = true;
+  Payload->TryGetBoolField(TEXT("groupMode"), bGroupMode);
+  LocalPayload->SetBoolField(TEXT("groupMode"), bGroupMode);
+  return HandleCreateMaterialComment(RequestId, TEXT("create_material_comment"), LocalPayload, Socket);
+#else
+  SendAutomationResponse(Socket, RequestId, false, TEXT("wrap_material_nodes_in_comment requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleCreateNamedReroute(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("create_named_reroute"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId, TEXT("create_named_reroute payload missing"), TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString MaterialPath, RerouteName;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+  if (!Payload->TryGetStringField(TEXT("name"), RerouteName) || RerouteName.IsEmpty()) {
+    SendAutomationError(Socket, RequestId, TEXT("name is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly) {
+    SendAutomationError(Socket, RequestId, TEXT("Cannot create named reroutes on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
+    return true;
+  }
+
+  UMaterialExpression* Source = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("sourceExpressionIndex"), TEXT("sourceNodeId"), TEXT("sourceExpressionPath"));
+  if (!Source) {
+    Source = McpFindGraphExpressionFromPayload(GraphOwner, Payload);
+  }
+  if (!Source) {
+    SendAutomationError(Socket, RequestId, TEXT("Source node not found"), TEXT("SOURCE_NODE_NOT_FOUND"));
+    return true;
+  }
+
+  int32 SourceOutputIndex = 0;
+  Payload->TryGetNumberField(TEXT("sourceOutputIndex"), SourceOutputIndex);
+
+  UMaterialExpressionNamedRerouteDeclaration* Declaration =
+      NewObject<UMaterialExpressionNamedRerouteDeclaration>(GraphOwner.GraphSource, UMaterialExpressionNamedRerouteDeclaration::StaticClass(), NAME_None, RF_Transactional);
+  Declaration->Name = FName(*RerouteName);
+  Declaration->Input.Expression = Source;
+  Declaration->Input.OutputIndex = SourceOutputIndex;
+  const FIntPoint Position = McpResolvePlacement(GraphOwner, Payload, Declaration);
+  Declaration->MaterialExpressionEditorX = Position.X;
+  Declaration->MaterialExpressionEditorY = Position.Y;
+  McpAddExpressionToGraph(GraphOwner, Declaration);
+
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  McpAddExpressionIdentity(GraphOwner, Declaration, McpExpressionIndex(GraphOwner, Declaration), Resp.ToSharedRef());
+  Resp->SetStringField(TEXT("rerouteName"), Declaration->Name.ToString());
+  Resp->SetStringField(TEXT("rerouteGuid"), Declaration->VariableGuid.ToString());
+  Resp->SetNumberField(TEXT("sourceExpressionIndex"), McpExpressionIndex(GraphOwner, Source));
+  SendAutomationResponse(Socket, RequestId, true, TEXT("Named reroute declaration created"), Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false, TEXT("create_named_reroute requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleUseNamedReroute(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("use_named_reroute"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId, TEXT("use_named_reroute payload missing"), TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly) {
+    SendAutomationError(Socket, RequestId, TEXT("Cannot create named reroute usages on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
+    return true;
+  }
+
+  FString DeclarationRef;
+  Payload->TryGetStringField(TEXT("declarationId"), DeclarationRef);
+  if (DeclarationRef.IsEmpty()) Payload->TryGetStringField(TEXT("declarationGuid"), DeclarationRef);
+  if (DeclarationRef.IsEmpty()) Payload->TryGetStringField(TEXT("declarationName"), DeclarationRef);
+  if (DeclarationRef.IsEmpty()) Payload->TryGetStringField(TEXT("name"), DeclarationRef);
+  UMaterialExpressionNamedRerouteDeclaration* Declaration = McpFindNamedRerouteDeclaration(GraphOwner, DeclarationRef);
+  if (!Declaration) {
+    SendAutomationError(Socket, RequestId, TEXT("Named reroute declaration not found"), TEXT("DECLARATION_NOT_FOUND"));
+    return true;
+  }
+
+  UMaterialExpression* Target = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("targetExpressionIndex"), TEXT("targetNodeId"), TEXT("targetExpressionPath"));
+  if (!Target) {
+    SendAutomationError(Socket, RequestId, TEXT("Target node not found"), TEXT("TARGET_NODE_NOT_FOUND"));
+    return true;
+  }
+
+  FString TargetInputName;
+  Payload->TryGetStringField(TEXT("targetInputPin"), TargetInputName);
+  if (TargetInputName.IsEmpty()) Payload->TryGetStringField(TEXT("targetPin"), TargetInputName);
+  if (TargetInputName.IsEmpty()) Payload->TryGetStringField(TEXT("inputName"), TargetInputName);
+  FExpressionInput* TargetInput = McpFindExpressionInputByName(Target, TargetInputName);
+  if (!TargetInput) {
+    SendAutomationError(Socket, RequestId, TEXT("Target input pin not found"), TEXT("INPUT_NOT_FOUND"));
+    return true;
+  }
+
+  UMaterialExpressionNamedRerouteUsage* Usage =
+      NewObject<UMaterialExpressionNamedRerouteUsage>(GraphOwner.GraphSource, UMaterialExpressionNamedRerouteUsage::StaticClass(), NAME_None, RF_Transactional);
+  Usage->Declaration = Declaration;
+  Usage->DeclarationGuid = Declaration->VariableGuid;
+  const FIntPoint Position = McpResolvePlacement(GraphOwner, Payload, Usage);
+  Usage->MaterialExpressionEditorX = Position.X;
+  Usage->MaterialExpressionEditorY = Position.Y;
+  McpAddExpressionToGraph(GraphOwner, Usage);
+  TargetInput->Expression = Usage;
+  TargetInput->OutputIndex = 0;
+
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  McpAddExpressionIdentity(GraphOwner, Usage, McpExpressionIndex(GraphOwner, Usage), Resp.ToSharedRef());
+  Resp->SetStringField(TEXT("targetInputPin"), TargetInputName);
+  Resp->SetNumberField(TEXT("targetExpressionIndex"), McpExpressionIndex(GraphOwner, Target));
+  SendAutomationResponse(Socket, RequestId, true, TEXT("Named reroute usage created"), Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false, TEXT("use_named_reroute requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleReplaceLongConnectionWithNamedReroute(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("replace_long_connection_with_named_reroute"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId, TEXT("replace_long_connection_with_named_reroute payload missing"), TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString MaterialPath, RerouteName;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+  if (!Payload->TryGetStringField(TEXT("name"), RerouteName) || RerouteName.IsEmpty()) {
+    SendAutomationError(Socket, RequestId, TEXT("name is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly) {
+    SendAutomationError(Socket, RequestId, TEXT("Cannot edit named reroutes on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
+    return true;
+  }
+
+  UMaterialExpression* Source = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("sourceExpressionIndex"), TEXT("sourceNodeId"), TEXT("sourceExpressionPath"));
+  UMaterialExpression* Target = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("targetExpressionIndex"), TEXT("targetNodeId"), TEXT("targetExpressionPath"));
+  if (!Source || !Target) {
+    SendAutomationError(Socket, RequestId, TEXT("Source or target node not found"), TEXT("NODE_NOT_FOUND"));
+    return true;
+  }
+
+  FString TargetInputName;
+  Payload->TryGetStringField(TEXT("targetInputPin"), TargetInputName);
+  if (TargetInputName.IsEmpty()) Payload->TryGetStringField(TEXT("targetPin"), TargetInputName);
+  if (TargetInputName.IsEmpty()) Payload->TryGetStringField(TEXT("inputName"), TargetInputName);
+  FExpressionInput* TargetInput = McpFindExpressionInputByName(Target, TargetInputName);
+  if (!TargetInput) {
+    SendAutomationError(Socket, RequestId, TEXT("Target input pin not found"), TEXT("INPUT_NOT_FOUND"));
+    return true;
+  }
+
+  double MinDistance = 0.0;
+  Payload->TryGetNumberField(TEXT("minDistance"), MinDistance);
+  const int32 Distance = FMath::Abs(Source->MaterialExpressionEditorX - Target->MaterialExpressionEditorX);
+  if (MinDistance > 0.0 && Distance < MinDistance) {
+    SendAutomationError(Socket, RequestId, TEXT("Connection is shorter than minDistance"), TEXT("DISTANCE_BELOW_THRESHOLD"));
+    return true;
+  }
+
+  int32 SourceOutputIndex = TargetInput->OutputIndex;
+  Payload->TryGetNumberField(TEXT("sourceOutputIndex"), SourceOutputIndex);
+
+  UMaterialExpressionNamedRerouteDeclaration* Declaration =
+      NewObject<UMaterialExpressionNamedRerouteDeclaration>(GraphOwner.GraphSource, UMaterialExpressionNamedRerouteDeclaration::StaticClass(), NAME_None, RF_Transactional);
+  Declaration->Name = FName(*RerouteName);
+  Declaration->Input.Expression = Source;
+  Declaration->Input.OutputIndex = SourceOutputIndex;
+  Declaration->MaterialExpressionEditorX = Source->MaterialExpressionEditorX + McpEstimateExpressionSize(Source).X + 220;
+  Declaration->MaterialExpressionEditorY = Source->MaterialExpressionEditorY;
+  const FIntPoint DeclarationPos = McpFindFreePosition(GraphOwner, FIntPoint(Declaration->MaterialExpressionEditorX, Declaration->MaterialExpressionEditorY), McpEstimateExpressionSize(Declaration));
+  Declaration->MaterialExpressionEditorX = DeclarationPos.X;
+  Declaration->MaterialExpressionEditorY = DeclarationPos.Y;
+  McpAddExpressionToGraph(GraphOwner, Declaration);
+
+  UMaterialExpressionNamedRerouteUsage* Usage =
+      NewObject<UMaterialExpressionNamedRerouteUsage>(GraphOwner.GraphSource, UMaterialExpressionNamedRerouteUsage::StaticClass(), NAME_None, RF_Transactional);
+  Usage->Declaration = Declaration;
+  Usage->DeclarationGuid = Declaration->VariableGuid;
+  Usage->MaterialExpressionEditorX = Target->MaterialExpressionEditorX - 260;
+  Usage->MaterialExpressionEditorY = Target->MaterialExpressionEditorY;
+  const FIntPoint UsagePos = McpFindFreePosition(GraphOwner, FIntPoint(Usage->MaterialExpressionEditorX, Usage->MaterialExpressionEditorY), McpEstimateExpressionSize(Usage));
+  Usage->MaterialExpressionEditorX = UsagePos.X;
+  Usage->MaterialExpressionEditorY = UsagePos.Y;
+  McpAddExpressionToGraph(GraphOwner, Usage);
+  TargetInput->Expression = Usage;
+  TargetInput->OutputIndex = 0;
+
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  Resp->SetStringField(TEXT("rerouteName"), Declaration->Name.ToString());
+  Resp->SetStringField(TEXT("rerouteGuid"), Declaration->VariableGuid.ToString());
+  Resp->SetNumberField(TEXT("declarationExpressionIndex"), McpExpressionIndex(GraphOwner, Declaration));
+  Resp->SetNumberField(TEXT("usageExpressionIndex"), McpExpressionIndex(GraphOwner, Usage));
+  Resp->SetNumberField(TEXT("sourceExpressionIndex"), McpExpressionIndex(GraphOwner, Source));
+  Resp->SetNumberField(TEXT("targetExpressionIndex"), McpExpressionIndex(GraphOwner, Target));
+  Resp->SetStringField(TEXT("targetInputPin"), TargetInputName);
+  SendAutomationResponse(Socket, RequestId, true, TEXT("Long material connection replaced with named reroute"), Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false, TEXT("replace_long_connection_with_named_reroute requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleAlignMaterialNodes(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("align_material_nodes"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId, TEXT("align_material_nodes payload missing"), TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString Backend = TEXT("native");
+  Payload->TryGetStringField(TEXT("backend"), Backend);
+
+  FString MaterialPath, Operation;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+  if (!Payload->TryGetStringField(TEXT("operation"), Operation) || Operation.IsEmpty()) {
+    SendAutomationError(Socket, RequestId, TEXT("operation is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+  if (!Payload->TryGetArrayField(TEXT("nodes"), Nodes) || !Nodes || Nodes->Num() < 2) {
+    SendAutomationError(Socket, RequestId, TEXT("nodes array with at least two nodes is required"), TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+
+  TArray<UMaterialExpression*> Resolved;
+  for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes) {
+    const TSharedPtr<FJsonObject>* NodeObj = nullptr;
+    if (NodeValue.IsValid() && NodeValue->TryGetObject(NodeObj) && NodeObj) {
+      if (UMaterialExpression* Expr = McpFindGraphExpressionFromPayload(GraphOwner, *NodeObj)) {
+        Resolved.Add(Expr);
+      }
+    }
+  }
+  if (Resolved.Num() < 2) {
+    SendAutomationError(Socket, RequestId, TEXT("Fewer than two nodes could be resolved"), TEXT("NODE_NOT_FOUND"));
+    return true;
+  }
+
+  if (Backend.Equals(TEXT("graph_editor"), ESearchCase::IgnoreCase)) {
+    UEdGraph* Graph = nullptr;
+    TArray<UEdGraphNode*> GraphNodes;
+    for (UMaterialExpression* Expr : Resolved) {
+      UEdGraphNode* GraphNode = Expr ? Expr->GraphNode : nullptr;
+      if (!GraphNode) {
+        SendAutomationError(Socket, RequestId, TEXT("Selected material expression does not have a graph editor node"), TEXT("GRAPH_EDITOR_NODE_NOT_FOUND"));
+        return true;
+      }
+      UEdGraph* NodeGraph = GraphNode->GetGraph();
+      if (!NodeGraph) {
+        SendAutomationError(Socket, RequestId, TEXT("Selected material expression graph node is not attached to a graph"), TEXT("GRAPH_EDITOR_NODE_NOT_FOUND"));
+        return true;
+      }
+      if (!Graph) {
+        Graph = NodeGraph;
+      } else if (Graph != NodeGraph) {
+        SendAutomationError(Socket, RequestId, TEXT("Selected material expressions are not in the same graph editor"), TEXT("INVALID_ARGUMENT"));
+        return true;
+      }
+      GraphNodes.Add(GraphNode);
+    }
+
+    TSharedPtr<SGraphEditor> GraphEditor = SGraphEditor::FindGraphEditorForGraph(Graph);
+    if (!GraphEditor.IsValid()) {
+      SendAutomationError(Socket, RequestId, TEXT("No open graph editor widget found for the requested material graph"), TEXT("GRAPH_EDITOR_UNAVAILABLE"));
+      return true;
+    }
+
+    const FGraphPanelSelectionSet PreviousSelection = GraphEditor->GetSelectedNodes();
+    GraphEditor->ClearSelectionSet();
+    for (UEdGraphNode* GraphNode : GraphNodes) {
+      GraphEditor->SetNodeSelection(GraphNode, true);
+    }
+
+    if (Operation.Equals(TEXT("align_left"), ESearchCase::IgnoreCase)) {
+      GraphEditor->OnAlignLeft();
+    } else if (Operation.Equals(TEXT("align_right"), ESearchCase::IgnoreCase)) {
+      GraphEditor->OnAlignRight();
+    } else if (Operation.Equals(TEXT("align_top"), ESearchCase::IgnoreCase)) {
+      GraphEditor->OnAlignTop();
+    } else if (Operation.Equals(TEXT("align_bottom"), ESearchCase::IgnoreCase)) {
+      GraphEditor->OnAlignBottom();
+    } else if (Operation.Equals(TEXT("align_center"), ESearchCase::IgnoreCase)) {
+      GraphEditor->OnAlignCenter();
+    } else if (Operation.Equals(TEXT("align_middle"), ESearchCase::IgnoreCase)) {
+      GraphEditor->OnAlignMiddle();
+    } else if (Operation.Equals(TEXT("distribute_horizontal"), ESearchCase::IgnoreCase)) {
+      GraphEditor->OnDistributeNodesH();
+    } else if (Operation.Equals(TEXT("distribute_vertical"), ESearchCase::IgnoreCase)) {
+      GraphEditor->OnDistributeNodesV();
+    } else if (Operation.Equals(TEXT("straighten_connections"), ESearchCase::IgnoreCase)) {
+      GraphEditor->OnStraightenConnections();
+    } else {
+      GraphEditor->ClearSelectionSet();
+      for (UObject* SelectedObject : PreviousSelection) {
+        if (UEdGraphNode* PreviousNode = Cast<UEdGraphNode>(SelectedObject)) {
+          GraphEditor->SetNodeSelection(PreviousNode, true);
+        }
+      }
+      SendAutomationError(Socket, RequestId, TEXT("Unsupported alignment operation"), TEXT("INVALID_ARGUMENT"));
+      return true;
+    }
+
+    GraphEditor->ClearSelectionSet();
+    for (UObject* SelectedObject : PreviousSelection) {
+      if (UEdGraphNode* PreviousNode = Cast<UEdGraphNode>(SelectedObject)) {
+        GraphEditor->SetNodeSelection(PreviousNode, true);
+      }
+    }
+
+    FString RebuildErr;
+    McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+    Resp->SetStringField(TEXT("backend"), TEXT("graph_editor"));
+    Resp->SetStringField(TEXT("operation"), Operation);
+    Resp->SetNumberField(TEXT("affectedNodeCount"), Resolved.Num());
+    SendAutomationResponse(Socket, RequestId, true, TEXT("Material nodes aligned with graph editor"), Resp, FString());
+    return true;
+  }
+
+  int32 MinX = TNumericLimits<int32>::Max(), MinY = TNumericLimits<int32>::Max();
+  int32 MaxX = TNumericLimits<int32>::Min(), MaxY = TNumericLimits<int32>::Min();
+  for (UMaterialExpression* Expr : Resolved) {
+    const FIntPoint Size = McpEstimateExpressionSize(Expr);
+    MinX = FMath::Min(MinX, Expr->MaterialExpressionEditorX);
+    MinY = FMath::Min(MinY, Expr->MaterialExpressionEditorY);
+    MaxX = FMath::Max(MaxX, Expr->MaterialExpressionEditorX + Size.X);
+    MaxY = FMath::Max(MaxY, Expr->MaterialExpressionEditorY + Size.Y);
+  }
+
+  Resolved.Sort([](const UMaterialExpression& A, const UMaterialExpression& B) {
+    return A.MaterialExpressionEditorX == B.MaterialExpressionEditorX
+        ? A.MaterialExpressionEditorY < B.MaterialExpressionEditorY
+        : A.MaterialExpressionEditorX < B.MaterialExpressionEditorX;
+  });
+
+  for (int32 i = 0; i < Resolved.Num(); ++i) {
+    UMaterialExpression* Expr = Resolved[i];
+    const FIntPoint Size = McpEstimateExpressionSize(Expr);
+    Expr->Modify();
+    if (Operation.Equals(TEXT("align_left"), ESearchCase::IgnoreCase)) {
+      Expr->MaterialExpressionEditorX = MinX;
+    } else if (Operation.Equals(TEXT("align_right"), ESearchCase::IgnoreCase)) {
+      Expr->MaterialExpressionEditorX = MaxX - Size.X;
+    } else if (Operation.Equals(TEXT("align_top"), ESearchCase::IgnoreCase)) {
+      Expr->MaterialExpressionEditorY = MinY;
+    } else if (Operation.Equals(TEXT("align_bottom"), ESearchCase::IgnoreCase)) {
+      Expr->MaterialExpressionEditorY = MaxY - Size.Y;
+    } else if (Operation.Equals(TEXT("align_center"), ESearchCase::IgnoreCase)) {
+      Expr->MaterialExpressionEditorX = (MinX + MaxX - Size.X) / 2;
+    } else if (Operation.Equals(TEXT("align_middle"), ESearchCase::IgnoreCase)) {
+      Expr->MaterialExpressionEditorY = (MinY + MaxY - Size.Y) / 2;
+    } else if (Operation.Equals(TEXT("distribute_horizontal"), ESearchCase::IgnoreCase) && Resolved.Num() > 2) {
+      Expr->MaterialExpressionEditorX = MinX + ((MaxX - MinX) * i / (Resolved.Num() - 1));
+    } else if (Operation.Equals(TEXT("distribute_vertical"), ESearchCase::IgnoreCase) && Resolved.Num() > 2) {
+      Expr->MaterialExpressionEditorY = MinY + ((MaxY - MinY) * i / (Resolved.Num() - 1));
+    } else if (Operation.Equals(TEXT("straighten_connections"), ESearchCase::IgnoreCase)) {
+      Expr->MaterialExpressionEditorY = MinY;
+    }
+  }
+
+  FString RebuildErr;
+  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  Resp->SetStringField(TEXT("backend"), TEXT("native"));
+  Resp->SetStringField(TEXT("operation"), Operation);
+  Resp->SetNumberField(TEXT("affectedNodeCount"), Resolved.Num());
+  SendAutomationResponse(Socket, RequestId, true, TEXT("Material nodes aligned"), Resp, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false, TEXT("align_material_nodes requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
   return true;
 #endif
 }
@@ -4687,82 +5664,30 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
     return true;
   }
 
-  // Load the material
-  UMaterial *Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
-  if (!Material) {
-    SendAutomationError(Socket, RequestId,
-                        FString::Printf(TEXT("Material not found: %s"), *MaterialPath),
-                        TEXT("MATERIAL_NOT_FOUND"));
+  // Resolve asset - supports UMaterial, UMaterialFunction, and UMaterialFunctionInstance
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError))
+  {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found"))
+                            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
     return true;
   }
 
-  // Get expressions
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-  const TArray<TObjectPtr<UMaterialExpression>> &Expressions =
-      Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
-#else
-  const TArray<UMaterialExpression *> &Expressions = Material->Expressions;
-#endif
+  static const TArray<TObjectPtr<UMaterialExpression>> EmptyExprs;
+  const TArray<TObjectPtr<UMaterialExpression>>* ExpressionsPtr = McpGetGraphExpressions(GraphOwner);
+  const TArray<TObjectPtr<UMaterialExpression>>& Expressions = ExpressionsPtr ? *ExpressionsPtr : EmptyExprs;
 
-  // Helper to find expression by GUID, name, or index
-  auto FindExpression = [&Expressions](const FString &IdOrIndex) -> UMaterialExpression* {
-    if (IdOrIndex.IsEmpty()) {
-      return nullptr;
-    }
-
-    // Try as GUID string first
-    FGuid GuidId;
-    if (FGuid::Parse(IdOrIndex, GuidId)) {
-      for (UMaterialExpression *Expr : Expressions) {
-        if (Expr && Expr->MaterialExpressionGuid == GuidId) {
-          return Expr;
-        }
-      }
-    }
-
-    // Try as name
-    for (UMaterialExpression *Expr : Expressions) {
-      if (Expr) {
-        if (Expr->GetName() == IdOrIndex || Expr->GetPathName() == IdOrIndex) {
-          return Expr;
-        }
-        if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
-          if (Param->ParameterName.ToString() == IdOrIndex) {
-            return Expr;
-          }
-        }
-      }
-    }
-
-    // Try as numeric index
-    int32 Index = -1;
-    if (IdOrIndex.IsNumeric()) {
-      Index = FCString::Atoi(*IdOrIndex);
-      if (Index >= 0 && Index < Expressions.Num()) {
-        return Expressions[Index];
-      }
-    }
-
-    return nullptr;
-  };
-
-  // Accept both nodeId (GUID string) and expressionIndex (int)
   FString NodeId;
-  int32 ExpressionIndex = -1;
-  UMaterialExpression *Expression = nullptr;
-
-  if (Payload->TryGetStringField(TEXT("nodeId"), NodeId) && !NodeId.IsEmpty()) {
-    Expression = FindExpression(NodeId);
-  } else if (Payload->TryGetNumberField(TEXT("expressionIndex"), ExpressionIndex)) {
-    if (ExpressionIndex >= 0 && ExpressionIndex < Expressions.Num()) {
-      Expression = Expressions[ExpressionIndex];
-    }
-  }
+  Payload->TryGetStringField(TEXT("nodeId"), NodeId);
+  UMaterialExpression *Expression = McpFindGraphExpressionFromPayload(GraphOwner, Payload);
 
   // If no specific node requested or node not found, return list of all nodes
   if (!Expression) {
     TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-    McpHandlerUtils::AddVerification(Resp, Material);
+    McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+    Resp->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
     
     TArray<TSharedPtr<FJsonValue>> NodeList;
     for (int32 i = 0; i < Expressions.Num(); ++i) {
@@ -4770,11 +5695,8 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
       if (!Expr) continue;
       
       TSharedPtr<FJsonObject> NodeInfo = McpHandlerUtils::CreateResultObject();
-      NodeInfo->SetStringField(TEXT("nodeId"), Expr->MaterialExpressionGuid.ToString());
+      McpAddExpressionIdentity(GraphOwner, Expr, i, NodeInfo.ToSharedRef());
       NodeInfo->SetStringField(TEXT("nodeType"), Expr->GetClass()->GetName());
-      NodeInfo->SetNumberField(TEXT("index"), i);
-      NodeInfo->SetNumberField(TEXT("editorX"), Expr->MaterialExpressionEditorX);
-      NodeInfo->SetNumberField(TEXT("editorY"), Expr->MaterialExpressionEditorY);
       if (!Expr->Desc.IsEmpty()) {
         NodeInfo->SetStringField(TEXT("desc"), Expr->Desc);
       }
@@ -4789,8 +5711,8 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
     Resp->SetNumberField(TEXT("nodeCount"), Expressions.Num());
 
     FString Message = NodeId.IsEmpty()
-        ? FString::Printf(TEXT("Material has %d nodes. Provide nodeId for specific node details."), Expressions.Num())
-        : FString::Printf(TEXT("Node '%s' not found. Material has %d nodes."), *NodeId, Expressions.Num());
+        ? FString::Printf(TEXT("Asset has %d nodes. Provide nodeId for specific node details."), Expressions.Num())
+        : FString::Printf(TEXT("Node '%s' not found. Asset has %d nodes."), *NodeId, Expressions.Num());
 
     SendAutomationResponse(Socket, RequestId, NodeId.IsEmpty(),
                            Message, Resp, NodeId.IsEmpty() ? FString() : TEXT("NODE_NOT_FOUND"));
@@ -4799,13 +5721,11 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
 
   // Build response for specific node
   TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, Material);
-  Resp->SetStringField(TEXT("nodeId"), Expression->MaterialExpressionGuid.ToString());
-  Resp->SetStringField(TEXT("name"), Expression->GetName());
+  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
+  Resp->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
+  McpAddExpressionIdentity(GraphOwner, Expression, McpExpressionIndex(GraphOwner, Expression), Resp.ToSharedRef());
   Resp->SetStringField(TEXT("class"), Expression->GetClass()->GetName());
   Resp->SetStringField(TEXT("classPath"), Expression->GetClass()->GetPathName());
-  Resp->SetNumberField(TEXT("editorX"), Expression->MaterialExpressionEditorX);
-  Resp->SetNumberField(TEXT("editorY"), Expression->MaterialExpressionEditorY);
   if (!Expression->Desc.IsEmpty()) {
     Resp->SetStringField(TEXT("desc"), Expression->Desc);
   }
@@ -4822,6 +5742,9 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
         InputObj->SetBoolField(TEXT("isConnected"), Input->Expression != nullptr);
         if (Input->Expression) {
           InputObj->SetStringField(TEXT("connectedToId"), Input->Expression->MaterialExpressionGuid.ToString());
+          InputObj->SetStringField(TEXT("connectedToExpressionGuid"), Input->Expression->MaterialExpressionGuid.ToString());
+          InputObj->SetStringField(TEXT("connectedToExpressionPath"), Input->Expression->GetPathName());
+          InputObj->SetNumberField(TEXT("connectedToIndex"), McpExpressionIndex(GraphOwner, Input->Expression));
           InputObj->SetStringField(TEXT("connectedToName"), Input->Expression->GetName());
         }
         InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
@@ -5078,7 +6001,116 @@ bool UMcpAutomationBridgeSubsystem::HandleAnalyzeGraph(
     return true;
   }
 
-  // Load the asset
+  // Try to resolve as a material-type asset (UMaterial / UMaterialFunction / UMaterialFunctionInstance)
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (McpResolveMaterialGraphOwner(AssetPath, GraphOwner, GraphOwnerError))
+  {
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(Result, GraphOwner.Asset);
+    Result->SetStringField(TEXT("assetPath"), AssetPath);
+    Result->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
+
+    const TArray<TObjectPtr<UMaterialExpression>>* Expressions = McpGetGraphExpressions(GraphOwner);
+    int32 NodeCount = Expressions ? Expressions->Num() : 0;
+    int32 ParameterCount = 0;
+    int32 TextureSampleCount = 0;
+    TArray<FString> ParameterNames;
+
+    if (Expressions)
+    {
+      for (UMaterialExpression* Expr : *Expressions)
+      {
+        if (!Expr) continue;
+        if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr))
+        {
+          ParameterCount++;
+          ParameterNames.Add(Param->ParameterName.ToString());
+        }
+        if (Cast<UMaterialExpressionTextureSample>(Expr))
+          TextureSampleCount++;
+      }
+    }
+
+    Result->SetNumberField(TEXT("nodeCount"), NodeCount);
+    Result->SetNumberField(TEXT("parameterCount"), ParameterCount);
+    Result->SetNumberField(TEXT("textureSampleCount"), TextureSampleCount);
+
+    TArray<TSharedPtr<FJsonValue>> ParamArray;
+    for (const FString& ParamName : ParameterNames)
+      ParamArray.Add(MakeShared<FJsonValueString>(ParamName));
+    Result->SetArrayField(TEXT("parameters"), ParamArray);
+
+    if (GraphOwner.Kind == EMcpMaterialGraphOwnerKind::Material)
+    {
+      UMaterial* Material = CastChecked<UMaterial>(GraphOwner.GraphSource);
+      Result->SetStringField(TEXT("graphType"), TEXT("Material"));
+      Result->SetBoolField(TEXT("isMaterialInstance"), false);
+      Result->SetBoolField(TEXT("isTwoSided"), Material->TwoSided);
+      Result->SetBoolField(TEXT("isMasked"), Material->IsMasked());
+#if WITH_EDITORONLY_DATA
+      Result->SetStringField(TEXT("blendMode"),
+        StaticEnum<EBlendMode>()->GetNameStringByValue((int64)Material->GetBlendMode()));
+      FString ShadingModelName = TEXT("Unknown");
+      FMaterialShadingModelField ShadingModels = Material->GetShadingModels();
+      if (ShadingModels.HasShadingModel(MSM_DefaultLit))       ShadingModelName = TEXT("DefaultLit");
+      else if (ShadingModels.HasShadingModel(MSM_Subsurface))  ShadingModelName = TEXT("Subsurface");
+      else if (ShadingModels.HasShadingModel(MSM_Unlit))       ShadingModelName = TEXT("Unlit");
+      else if (ShadingModels.HasShadingModel(MSM_ClearCoat))   ShadingModelName = TEXT("ClearCoat");
+      else if (ShadingModels.HasShadingModel(MSM_SubsurfaceProfile))   ShadingModelName = TEXT("SubsurfaceProfile");
+      else if (ShadingModels.HasShadingModel(MSM_PreintegratedSkin))   ShadingModelName = TEXT("PreintegratedSkin");
+      Result->SetStringField(TEXT("shadingModel"), ShadingModelName);
+#endif
+    }
+    else if (GraphOwner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunction)
+    {
+      UMaterialFunction* Func = CastChecked<UMaterialFunction>(GraphOwner.GraphSource);
+      Result->SetStringField(TEXT("graphType"), TEXT("MaterialFunction"));
+      Result->SetStringField(TEXT("description"), Func->Description);
+      Result->SetBoolField(TEXT("exposedToLibrary"), Func->bExposeToLibrary != 0);
+
+      int32 FunctionInputCount = 0;
+      int32 FunctionOutputCount = 0;
+      if (Expressions)
+      {
+        for (UMaterialExpression* Expr : *Expressions)
+        {
+          FunctionInputCount += Cast<UMaterialExpressionFunctionInput>(Expr) ? 1 : 0;
+          FunctionOutputCount += Cast<UMaterialExpressionFunctionOutput>(Expr) ? 1 : 0;
+        }
+      }
+      Result->SetNumberField(TEXT("functionInputCount"), FunctionInputCount);
+      Result->SetNumberField(TEXT("functionOutputCount"), FunctionOutputCount);
+    }
+    else // MaterialFunctionInstance
+    {
+      UMaterialFunctionInstance* Inst = CastChecked<UMaterialFunctionInstance>(GraphOwner.Asset);
+      UMaterialFunction* Base = CastChecked<UMaterialFunction>(GraphOwner.GraphSource);
+      Result->SetStringField(TEXT("graphType"), TEXT("MaterialFunctionInstance"));
+      Result->SetStringField(TEXT("parentAsset"), Base->GetPathName());
+
+      int32 FunctionInputCount = 0;
+      int32 FunctionOutputCount = 0;
+      if (Expressions)
+      {
+        for (UMaterialExpression* Expr : *Expressions)
+        {
+          FunctionInputCount += Cast<UMaterialExpressionFunctionInput>(Expr) ? 1 : 0;
+          FunctionOutputCount += Cast<UMaterialExpressionFunctionOutput>(Expr) ? 1 : 0;
+        }
+      }
+      Result->SetNumberField(TEXT("functionInputCount"), FunctionInputCount);
+      Result->SetNumberField(TEXT("functionOutputCount"), FunctionOutputCount);
+
+      McpCollectFunctionInstanceOverrides(Inst, Result.ToSharedRef());
+    }
+
+    SendAutomationResponse(Socket, RequestId, true,
+                           TEXT("Material graph analyzed"), Result, FString());
+    return true;
+  }
+
+  // Load the asset for other graph types (Blueprint, etc.)
   UObject *Asset = LoadObject<UObject>(nullptr, *AssetPath);
   if (!Asset) {
     SendAutomationError(Socket, RequestId,
@@ -5091,84 +6123,6 @@ bool UMcpAutomationBridgeSubsystem::HandleAnalyzeGraph(
   McpHandlerUtils::AddVerification(Result, Asset);
   Result->SetStringField(TEXT("assetPath"), AssetPath);
   Result->SetStringField(TEXT("assetClass"), Asset->GetClass()->GetName());
-
-  // Check if it's a material
-  UMaterial *Material = Cast<UMaterial>(Asset);
-  UMaterialInstance *MaterialInstance = Cast<UMaterialInstance>(Asset);
-
-  if (Material || MaterialInstance) {
-    // Analyze material graph
-    UMaterial *BaseMaterial = Material ? Material : MaterialInstance->GetBaseMaterial();
-
-    // Get expressions count
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-    const TArray<TObjectPtr<UMaterialExpression>> *Expressions = nullptr;
-    if (Material && Material->GetEditorOnlyData()) {
-      Expressions = &Material->GetEditorOnlyData()->ExpressionCollection.Expressions;
-    }
-#else
-    // UE 5.0: Direct access, but also uses TObjectPtr
-    const TArray<TObjectPtr<UMaterialExpression>> *Expressions = nullptr;
-    if (Material) {
-      Expressions = &Material->Expressions;
-    }
-#endif
-
-    int32 NodeCount = Expressions ? Expressions->Num() : 0;
-    int32 ParameterCount = 0;
-    int32 TextureSampleCount = 0;
-    TArray<FString> ParameterNames;
-
-    if (Expressions) {
-      for (UMaterialExpression *Expr : *Expressions) {
-        if (!Expr) continue;
-        if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
-          ParameterCount++;
-          ParameterNames.Add(Param->ParameterName.ToString());
-        }
-        if (Cast<UMaterialExpressionTextureSample>(Expr)) {
-          TextureSampleCount++;
-        }
-      }
-    }
-
-    Result->SetStringField(TEXT("graphType"), TEXT("Material"));
-    Result->SetNumberField(TEXT("nodeCount"), NodeCount);
-    Result->SetNumberField(TEXT("parameterCount"), ParameterCount);
-    Result->SetNumberField(TEXT("textureSampleCount"), TextureSampleCount);
-
-    // Add parameter names
-    TArray<TSharedPtr<FJsonValue>> ParamArray;
-    for (const FString &ParamName : ParameterNames) {
-      ParamArray.Add(MakeShared<FJsonValueString>(ParamName));
-    }
-    Result->SetArrayField(TEXT("parameters"), ParamArray);
-
-    // Material properties
-    Result->SetBoolField(TEXT("isMaterialInstance"), MaterialInstance != nullptr);
-    if (Material) {
-      Result->SetBoolField(TEXT("isTwoSided"), Material->TwoSided);
-      Result->SetBoolField(TEXT("isMasked"), Material->IsMasked());
-#if WITH_EDITORONLY_DATA
-      Result->SetStringField(TEXT("blendMode"),
-                             StaticEnum<EBlendMode>()->GetNameStringByValue((int64)Material->GetBlendMode()));
-      // Get shading model name from the first selected model
-      FString ShadingModelName = TEXT("Unknown");
-      FMaterialShadingModelField ShadingModels = Material->GetShadingModels();
-      if (ShadingModels.HasShadingModel(MSM_DefaultLit)) ShadingModelName = TEXT("DefaultLit");
-      else if (ShadingModels.HasShadingModel(MSM_Subsurface)) ShadingModelName = TEXT("Subsurface");
-      else if (ShadingModels.HasShadingModel(MSM_Unlit)) ShadingModelName = TEXT("Unlit");
-      else if (ShadingModels.HasShadingModel(MSM_ClearCoat)) ShadingModelName = TEXT("ClearCoat");
-      else if (ShadingModels.HasShadingModel(MSM_SubsurfaceProfile)) ShadingModelName = TEXT("SubsurfaceProfile");
-      else if (ShadingModels.HasShadingModel(MSM_PreintegratedSkin)) ShadingModelName = TEXT("PreintegratedSkin");
-      Result->SetStringField(TEXT("shadingModel"), ShadingModelName);
-#endif
-    }
-
-    SendAutomationResponse(Socket, RequestId, true,
-                           TEXT("Material graph analyzed"), Result, FString());
-    return true;
-  }
 
   // Check if it's a blueprint
   UBlueprint *Blueprint = Cast<UBlueprint>(Asset);
@@ -5262,12 +6216,122 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
     return true;
   }
 
+  // try resolving as material-type asset first (UMaterial / UMaterialFunction / instance)
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (McpResolveMaterialGraphOwner(AssetPath, GraphOwner, GraphOwnerError))
+  {
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(Result, GraphOwner.Asset);
+    Result->SetStringField(TEXT("assetPath"), AssetPath);
+    Result->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
+
+    const TArray<TObjectPtr<UMaterialExpression>>* ExpressionsPtr = McpGetGraphExpressions(GraphOwner);
+    static const TArray<TObjectPtr<UMaterialExpression>> EmptyExprs;
+    const TArray<TObjectPtr<UMaterialExpression>>& Expressions = ExpressionsPtr ? *ExpressionsPtr : EmptyExprs;
+
+    if (GraphOwner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunctionInstance)
+    {
+      UMaterialFunctionInstance* Inst = CastChecked<UMaterialFunctionInstance>(GraphOwner.Asset);
+      UMaterialFunction* Base = CastChecked<UMaterialFunction>(GraphOwner.GraphSource);
+      Result->SetStringField(TEXT("graphType"), TEXT("MaterialFunctionInstance"));
+      Result->SetStringField(TEXT("parentAsset"), Base->GetPathName());
+      McpCollectFunctionInstanceOverrides(Inst, Result.ToSharedRef());
+    }
+    else
+    {
+      FString GraphTypeName = (GraphOwner.Kind == EMcpMaterialGraphOwnerKind::Material)
+          ? TEXT("Material") : TEXT("MaterialFunction");
+      Result->SetStringField(TEXT("graphType"), GraphTypeName);
+    }
+
+    // build node list (shared for Material and MaterialFunction)
+    TArray<TSharedPtr<FJsonValue>> NodeList;
+    TMap<UMaterialExpression*, int32> NodeIndexMap;
+    for (int32 i = 0; i < Expressions.Num(); ++i)
+      NodeIndexMap.Add(Expressions[i], i);
+
+    for (int32 i = 0; i < Expressions.Num(); ++i)
+    {
+      UMaterialExpression* Expr = Expressions[i];
+      if (!Expr) continue;
+
+      TSharedPtr<FJsonObject> NodeObj = McpHandlerUtils::CreateResultObject();
+      McpAddExpressionIdentity(GraphOwner, Expr, i, NodeObj.ToSharedRef());
+
+      TArray<TSharedPtr<FJsonValue>> InputsArray;
+      for (FProperty* Property = Expr->GetClass()->PropertyLink; Property;
+           Property = Property->PropertyLinkNext)
+      {
+        if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
+        {
+          if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput")))
+          {
+            FExpressionInput* Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expr);
+            TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
+            InputObj->SetStringField(TEXT("name"), Property->GetName());
+            InputObj->SetBoolField(TEXT("isConnected"), Input->Expression != nullptr);
+            if (Input->Expression)
+            {
+              int32* ConnectedIndex = NodeIndexMap.Find(Input->Expression);
+              if (ConnectedIndex)
+                InputObj->SetNumberField(TEXT("connectedToIndex"), *ConnectedIndex);
+              InputObj->SetStringField(TEXT("connectedToId"), Input->Expression->MaterialExpressionGuid.ToString());
+              InputObj->SetStringField(TEXT("connectedToExpressionGuid"), Input->Expression->MaterialExpressionGuid.ToString());
+              InputObj->SetStringField(TEXT("connectedToExpressionPath"), Input->Expression->GetPathName());
+              InputObj->SetStringField(TEXT("connectedToName"), Input->Expression->GetName());
+            }
+            InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
+          }
+        }
+      }
+      NodeObj->SetArrayField(TEXT("inputs"), InputsArray);
+
+      if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr))
+        NodeObj->SetStringField(TEXT("parameterName"), Param->ParameterName.ToString());
+
+      NodeList.Add(MakeShared<FJsonValueObject>(NodeObj));
+    }
+
+    Result->SetNumberField(TEXT("nodeCount"), Expressions.Num());
+    Result->SetArrayField(TEXT("nodes"), NodeList);
+
+    TArray<TSharedPtr<FJsonValue>> CommentList;
+    for (UMaterialExpressionComment* Comment : McpGetGraphComments(GraphOwner))
+    {
+      if (!Comment)
+      {
+        continue;
+      }
+      TSharedPtr<FJsonObject> CommentObj = McpHandlerUtils::CreateResultObject();
+      CommentObj->SetStringField(TEXT("commentId"), Comment->GetPathName());
+      CommentObj->SetStringField(TEXT("expressionPath"), Comment->GetPathName());
+      CommentObj->SetStringField(TEXT("text"), Comment->Text);
+      CommentObj->SetNumberField(TEXT("x"), Comment->MaterialExpressionEditorX);
+      CommentObj->SetNumberField(TEXT("y"), Comment->MaterialExpressionEditorY);
+      CommentObj->SetNumberField(TEXT("width"), Comment->SizeX);
+      CommentObj->SetNumberField(TEXT("height"), Comment->SizeY);
+      CommentObj->SetBoolField(TEXT("groupMode"), Comment->bGroupMode);
+      CommentList.Add(MakeShared<FJsonValueObject>(CommentObj));
+    }
+    Result->SetNumberField(TEXT("commentCount"), CommentList.Num());
+    Result->SetArrayField(TEXT("comments"), CommentList);
+
+    FString Msg = (GraphOwner.Kind == EMcpMaterialGraphOwnerKind::Material)
+        ? TEXT("Material graph retrieved")
+        : TEXT("Material function graph retrieved");
+    SendAutomationResponse(Socket, RequestId, true, Msg, Result, FString());
+    return true;
+  }
+
+  // fall through to non-material graph types (Blueprint, etc.) - Asset already loaded above
+
   TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
   McpHandlerUtils::AddVerification(Result, Asset);
   Result->SetStringField(TEXT("assetPath"), AssetPath);
   Result->SetStringField(TEXT("assetClass"), Asset->GetClass()->GetName());
 
-  // Check if it's a material
+  // Check if it's a material (legacy path - should not be reached for UMaterial, kept for safety)
   UMaterial *Material = Cast<UMaterial>(Asset);
   if (Material) {
     TArray<TSharedPtr<FJsonValue>> NodeList;
@@ -5444,31 +6508,33 @@ bool UMcpAutomationBridgeSubsystem::HandleRebuildMaterial(
     return true;
   }
 
-  // Load the material
-  UMaterial *Material = LoadObject<UMaterial>(nullptr, *AssetPath);
-  if (!Material) {
+  // Resolve to UMaterial or UMaterialFunction
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(AssetPath, GraphOwner, GraphOwnerError))
+  {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found"))
+                            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+  if (GraphOwner.bReadOnly)
+  {
     SendAutomationError(Socket, RequestId,
-                        FString::Printf(TEXT("Material not found: %s"), *AssetPath),
-                        TEXT("ASSET_NOT_FOUND"));
+                        TEXT("Cannot rebuild a MaterialFunctionInstance - rebuild the parent function instead"),
+                        TEXT("UNSUPPORTED_OPERATION"));
     return true;
   }
 
-  // Rebuild the material by triggering a recompile
-  // This forces the material to update its shader maps and expressions
-  AsyncTask(ENamedThreads::GameThread, [this, RequestId, Socket, Material, AssetPath]() {
-    // Mark the material as needing recompilation
-    Material->MarkPackageDirty();
-    
-    // Force material to recompile its shader
-    Material->PreEditChange(nullptr);
-    Material->PostEditChange();
-    
-    // Save the material
-    McpSafeAssetSave(Material);
+  AsyncTask(ENamedThreads::GameThread, [this, RequestId, Socket, GraphOwner, AssetPath]() {
+    FString RebuildErr;
+    McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+    McpSafeAssetSave(GraphOwner.Asset);
 
     TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
-    McpHandlerUtils::AddVerification(Result, Material);
+    McpHandlerUtils::AddVerification(Result, GraphOwner.Asset);
     Result->SetStringField(TEXT("assetPath"), AssetPath);
+    Result->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
     Result->SetBoolField(TEXT("rebuilt"), true);
 
     SendAutomationResponse(Socket, RequestId, true,
