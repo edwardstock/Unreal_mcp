@@ -3465,7 +3465,11 @@ static inline bool DoesParentDirectoryExist(const FString& AssetPath) {
 #include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialFunctionInstance.h"
 #include "Materials/MaterialExpression.h"
+#include "Materials/MaterialInstance.h"
+#include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialExpressionParameter.h"
+#include "Materials/MaterialInterface.h"
+#include "StaticParameterSet.h"
 #endif
 
 enum class EMcpMaterialGraphOwnerKind : uint8
@@ -3746,6 +3750,202 @@ static inline void McpCollectFunctionInstanceOverrides(
         StaticArr.Add(MakeShared<FJsonValueObject>(Obj));
     }
     Out->SetArrayField(TEXT("staticSwitchOverrides"), StaticArr);
+#endif
+}
+
+static inline void McpCollectMaterialInstanceInfo(
+    UMaterialInstance* Inst,
+    TSharedRef<FJsonObject> Out,
+    bool bIncludeEffective = true,
+    bool bOverriddenOnly = false)
+{
+#if WITH_EDITOR
+    if (!Inst) return;
+
+    Out->SetStringField(TEXT("assetClass"), Inst->GetClass()->GetName());
+
+    if (UMaterialInterface* Parent = Inst->Parent)
+    {
+        Out->SetStringField(TEXT("parentAsset"), Parent->GetPathName());
+        if (UMaterial* BaseMaterial = Parent->GetMaterial())
+        {
+            Out->SetStringField(TEXT("resolvedBaseMaterial"), BaseMaterial->GetPathName());
+        }
+    }
+
+    TArray<TSharedPtr<FJsonValue>> ScalarOverrides;
+    for (const FScalarParameterValue& P : Inst->ScalarParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetNumberField(TEXT("value"), P.ParameterValue);
+        Obj->SetBoolField(TEXT("isOverride"), true);
+        ScalarOverrides.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("scalarOverrides"), ScalarOverrides);
+
+    TArray<TSharedPtr<FJsonValue>> VectorOverrides;
+    for (const FVectorParameterValue& P : Inst->VectorParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        TSharedPtr<FJsonObject> Color = MakeShared<FJsonObject>();
+        Color->SetNumberField(TEXT("r"), P.ParameterValue.R);
+        Color->SetNumberField(TEXT("g"), P.ParameterValue.G);
+        Color->SetNumberField(TEXT("b"), P.ParameterValue.B);
+        Color->SetNumberField(TEXT("a"), P.ParameterValue.A);
+        Obj->SetObjectField(TEXT("value"), Color);
+        Obj->SetBoolField(TEXT("isOverride"), true);
+        VectorOverrides.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("vectorOverrides"), VectorOverrides);
+
+    TArray<TSharedPtr<FJsonValue>> TextureOverrides;
+    for (const FTextureParameterValue& P : Inst->TextureParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetStringField(TEXT("texture"), P.ParameterValue.Get() ? P.ParameterValue.Get()->GetPathName() : TEXT(""));
+        Obj->SetBoolField(TEXT("isOverride"), true);
+        TextureOverrides.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("textureOverrides"), TextureOverrides);
+
+    FStaticParameterSet StaticParameters;
+    Inst->GetStaticParameterValues(StaticParameters);
+    TArray<TSharedPtr<FJsonValue>> StaticSwitchOverrides;
+    for (const FStaticSwitchParameter& P : StaticParameters.StaticSwitchParameters)
+    {
+        if (bOverriddenOnly && !P.bOverride)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetBoolField(TEXT("value"), P.Value);
+        Obj->SetBoolField(TEXT("isOverride"), P.bOverride);
+        StaticSwitchOverrides.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("staticSwitchOverrides"), StaticSwitchOverrides);
+
+    if (!bIncludeEffective)
+    {
+        return;
+    }
+
+    TArray<TSharedPtr<FJsonValue>> EffectiveScalarValues;
+    TArray<FMaterialParameterInfo> ScalarInfos;
+    TArray<FGuid> ScalarIds;
+    Inst->GetAllScalarParameterInfo(ScalarInfos, ScalarIds);
+    for (const FMaterialParameterInfo& Info : ScalarInfos)
+    {
+        float Value = 0.0f;
+        const bool bFound = Inst->GetScalarParameterValue(FHashedMaterialParameterInfo(Info), Value, bOverriddenOnly);
+        if (!bFound)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), Info.Name.ToString());
+        Obj->SetNumberField(TEXT("value"), Value);
+        Obj->SetBoolField(TEXT("isOverride"), Inst->GetScalarParameterValue(FHashedMaterialParameterInfo(Info), Value, true));
+        EffectiveScalarValues.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("effectiveScalarParameters"), EffectiveScalarValues);
+
+    TArray<TSharedPtr<FJsonValue>> EffectiveVectorValues;
+    TArray<FMaterialParameterInfo> VectorInfos;
+    TArray<FGuid> VectorIds;
+    Inst->GetAllVectorParameterInfo(VectorInfos, VectorIds);
+    for (const FMaterialParameterInfo& Info : VectorInfos)
+    {
+        FLinearColor Value = FLinearColor::Black;
+        const bool bFound = Inst->GetVectorParameterValue(FHashedMaterialParameterInfo(Info), Value, bOverriddenOnly);
+        if (!bFound)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), Info.Name.ToString());
+        TSharedPtr<FJsonObject> Color = MakeShared<FJsonObject>();
+        Color->SetNumberField(TEXT("r"), Value.R);
+        Color->SetNumberField(TEXT("g"), Value.G);
+        Color->SetNumberField(TEXT("b"), Value.B);
+        Color->SetNumberField(TEXT("a"), Value.A);
+        Obj->SetObjectField(TEXT("value"), Color);
+        Obj->SetBoolField(TEXT("isOverride"), Inst->GetVectorParameterValue(FHashedMaterialParameterInfo(Info), Value, true));
+        EffectiveVectorValues.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("effectiveVectorParameters"), EffectiveVectorValues);
+
+    TArray<TSharedPtr<FJsonValue>> EffectiveTextureValues;
+    TArray<FMaterialParameterInfo> TextureInfos;
+    TArray<FGuid> TextureIds;
+    Inst->GetAllTextureParameterInfo(TextureInfos, TextureIds);
+    for (const FMaterialParameterInfo& Info : TextureInfos)
+    {
+        UTexture* Value = nullptr;
+        const bool bFound = Inst->GetTextureParameterValue(FHashedMaterialParameterInfo(Info), Value, bOverriddenOnly);
+        if (!bFound)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), Info.Name.ToString());
+        Obj->SetStringField(TEXT("texture"), Value ? Value->GetPathName() : TEXT(""));
+        Obj->SetBoolField(TEXT("isOverride"), Inst->GetTextureParameterValue(FHashedMaterialParameterInfo(Info), Value, true));
+        EffectiveTextureValues.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("effectiveTextureParameters"), EffectiveTextureValues);
+
+    TArray<TSharedPtr<FJsonValue>> EffectiveStaticSwitchValues;
+    TArray<FMaterialParameterInfo> StaticInfos;
+    TArray<FGuid> StaticIds;
+    Inst->GetAllStaticSwitchParameterInfo(StaticInfos, StaticIds);
+    for (const FMaterialParameterInfo& Info : StaticInfos)
+    {
+        bool bValue = false;
+        bool bHasValue = false;
+        bool bIsOverride = false;
+        for (const FStaticSwitchParameter& P : StaticParameters.StaticSwitchParameters)
+        {
+            if (P.ParameterInfo == Info)
+            {
+                bValue = P.Value;
+                bHasValue = true;
+                bIsOverride = P.bOverride;
+                break;
+            }
+        }
+        if (bOverriddenOnly && !bIsOverride)
+        {
+            continue;
+        }
+        if (!bHasValue && Inst->Parent)
+        {
+            FStaticParameterSet ParentStaticParameters;
+            Inst->Parent->GetStaticParameterValues(ParentStaticParameters);
+            for (const FStaticSwitchParameter& P : ParentStaticParameters.StaticSwitchParameters)
+            {
+                if (P.ParameterInfo == Info)
+                {
+                    bValue = P.Value;
+                    bHasValue = true;
+                    break;
+                }
+            }
+        }
+        if (!bHasValue)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), Info.Name.ToString());
+        Obj->SetBoolField(TEXT("value"), bValue);
+        Obj->SetBoolField(TEXT("isOverride"), bIsOverride);
+        EffectiveStaticSwitchValues.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("effectiveStaticSwitchParameters"), EffectiveStaticSwitchValues);
 #endif
 }
 

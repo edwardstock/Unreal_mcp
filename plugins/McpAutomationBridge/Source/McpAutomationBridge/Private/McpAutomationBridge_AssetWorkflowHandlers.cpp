@@ -133,6 +133,7 @@
 #include "Materials/MaterialExpressionTextureSampleParameter2D.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialInstanceConstant.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "MaterialShared.h"
 
 // -----------------------------------------------------------------------------
@@ -153,6 +154,15 @@
 #include "EdGraph/EdGraphPin.h"
 #include "Blueprint/BlueprintSupport.h"
 #include "GraphEditor.h"
+#include "Landscape.h"
+#include "LandscapeInfo.h"
+#include "LandscapeProxy.h"
+#include "LandscapeStreamingProxy.h"
+#include "LandscapeLayerInfoObject.h"
+#include "Materials/MaterialExpressionLandscapeLayerBlend.h"
+#include "Materials/MaterialExpressionLandscapeLayerWeight.h"
+#include "Materials/MaterialExpressionLandscapePhysicalMaterialOutput.h"
+#include "Materials/MaterialExpressionMaterialFunctionCall.h"
 
 #endif // WITH_EDITOR
 
@@ -266,10 +276,22 @@ static UMaterialExpression* McpFindGraphExpressionFromPayload(
     return McpFindGraphExpression(Owner, NodeId);
   }
 
+  FString ExpressionGuid;
+  if (Payload->TryGetStringField(TEXT("expressionGuid"), ExpressionGuid) && !ExpressionGuid.IsEmpty())
+  {
+    return McpFindGraphExpression(Owner, ExpressionGuid);
+  }
+
   FString ExpressionName;
   if (Payload->TryGetStringField(TEXT("expressionName"), ExpressionName) && !ExpressionName.IsEmpty())
   {
     return McpFindGraphExpression(Owner, ExpressionName);
+  }
+
+  FString ParameterName;
+  if (Payload->TryGetStringField(TEXT("parameterName"), ParameterName) && !ParameterName.IsEmpty())
+  {
+    return McpFindGraphExpression(Owner, ParameterName);
   }
 
   return nullptr;
@@ -565,6 +587,493 @@ static UMaterialExpressionNamedRerouteDeclaration* McpFindNamedRerouteDeclaratio
   }
   return nullptr;
 }
+
+static FString McpLandscapeBlendTypeToString(ELandscapeLayerBlendType BlendType)
+{
+  switch (BlendType)
+  {
+  case LB_WeightBlend:
+    return TEXT("LB_WeightBlend");
+  case LB_AlphaBlend:
+    return TEXT("LB_AlphaBlend");
+  case LB_HeightBlend:
+    return TEXT("LB_HeightBlend");
+  default:
+    return TEXT("Unknown");
+  }
+}
+
+static FString McpGetOutputName(UMaterialExpression* Expression, int32 OutputIndex, bool& bOutResolved)
+{
+  bOutResolved = false;
+  if (!Expression)
+  {
+    return FString();
+  }
+
+  TArray<FExpressionOutput>& Outputs = Expression->GetOutputs();
+  if (Outputs.IsValidIndex(OutputIndex))
+  {
+    const FExpressionOutput& Output = Outputs[OutputIndex];
+    if (Output.OutputName != NAME_None)
+    {
+      bOutResolved = true;
+      return Output.OutputName.ToString();
+    }
+    bOutResolved = true;
+    return FString::Printf(TEXT("Output%d"), OutputIndex);
+  }
+
+  return FString();
+}
+
+static TSharedPtr<FJsonObject> McpBuildExpressionRef(
+    const FMcpMaterialGraphOwner& Owner,
+    UMaterialExpression* Expression)
+{
+  TSharedPtr<FJsonObject> Obj = McpHandlerUtils::CreateResultObject();
+  McpAddExpressionIdentity(Owner, Expression, McpExpressionIndex(Owner, Expression), Obj.ToSharedRef());
+  if (Expression)
+  {
+    Obj->SetStringField(TEXT("className"), Expression->GetClass()->GetName());
+  }
+  return Obj;
+}
+
+static void McpAddConnectedExpressionInfo(
+    const FMcpMaterialGraphOwner& Owner,
+    const FExpressionInput* Input,
+    const TSharedRef<FJsonObject>& Obj)
+{
+  if (!Input || !Input->Expression)
+  {
+    Obj->SetBoolField(TEXT("isConnected"), false);
+    return;
+  }
+
+  Obj->SetBoolField(TEXT("isConnected"), true);
+  Obj->SetObjectField(TEXT("source"), McpBuildExpressionRef(Owner, Input->Expression));
+  Obj->SetStringField(TEXT("connectedToId"), Input->Expression->MaterialExpressionGuid.ToString());
+  Obj->SetStringField(TEXT("connectedToExpressionGuid"), Input->Expression->MaterialExpressionGuid.ToString());
+  Obj->SetStringField(TEXT("connectedToExpressionPath"), Input->Expression->GetPathName());
+  Obj->SetNumberField(TEXT("connectedToIndex"), McpExpressionIndex(Owner, Input->Expression));
+  Obj->SetStringField(TEXT("connectedToName"), Input->Expression->GetName());
+  Obj->SetNumberField(TEXT("sourceOutputIndex"), Input->OutputIndex);
+  bool bResolvedOutputName = false;
+  const FString OutputName = McpGetOutputName(Input->Expression, Input->OutputIndex, bResolvedOutputName);
+  if (!OutputName.IsEmpty())
+  {
+    Obj->SetStringField(TEXT("sourceOutputName"), OutputName);
+  }
+  Obj->SetBoolField(TEXT("sourceOutputNameResolved"), bResolvedOutputName);
+}
+
+static TArray<TSharedPtr<FJsonValue>> McpBuildExpressionInputsArray(
+    const FMcpMaterialGraphOwner& Owner,
+    UMaterialExpression* Expression)
+{
+  TArray<TSharedPtr<FJsonValue>> InputsArray;
+  if (!Expression)
+  {
+    return InputsArray;
+  }
+
+  for (FProperty* Property = Expression->GetClass()->PropertyLink; Property; Property = Property->PropertyLinkNext)
+  {
+    if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
+    {
+      if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput")))
+      {
+        FExpressionInput* Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
+        TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
+        InputObj->SetStringField(TEXT("name"), Property->GetName());
+        McpAddConnectedExpressionInfo(Owner, Input, InputObj.ToSharedRef());
+        InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
+      }
+    }
+  }
+
+  return InputsArray;
+}
+
+static TArray<TSharedPtr<FJsonValue>> McpBuildExpressionConsumersArray(
+    const FMcpMaterialGraphOwner& Owner,
+    UMaterialExpression* SourceExpression)
+{
+  TArray<TSharedPtr<FJsonValue>> Consumers;
+  if (!SourceExpression)
+  {
+    return Consumers;
+  }
+
+  const TArray<TObjectPtr<UMaterialExpression>>* Expressions = McpGetGraphExpressions(Owner);
+  if (!Expressions)
+  {
+    return Consumers;
+  }
+
+  for (UMaterialExpression* Candidate : *Expressions)
+  {
+    if (!Candidate)
+    {
+      continue;
+    }
+
+    for (FProperty* Property = Candidate->GetClass()->PropertyLink; Property; Property = Property->PropertyLinkNext)
+    {
+      if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
+      {
+        if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput")))
+        {
+          FExpressionInput* Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Candidate);
+          if (Input && Input->Expression == SourceExpression)
+          {
+            TSharedPtr<FJsonObject> ConsumerObj = McpHandlerUtils::CreateResultObject();
+            ConsumerObj->SetObjectField(TEXT("target"), McpBuildExpressionRef(Owner, Candidate));
+            ConsumerObj->SetStringField(TEXT("targetInputPin"), Property->GetName());
+            ConsumerObj->SetNumberField(TEXT("sourceOutputIndex"), Input->OutputIndex);
+            bool bResolvedOutputName = false;
+            const FString OutputName = McpGetOutputName(SourceExpression, Input->OutputIndex, bResolvedOutputName);
+            if (!OutputName.IsEmpty())
+            {
+              ConsumerObj->SetStringField(TEXT("sourceOutputName"), OutputName);
+            }
+            ConsumerObj->SetBoolField(TEXT("sourceOutputNameResolved"), bResolvedOutputName);
+            Consumers.Add(MakeShared<FJsonValueObject>(ConsumerObj));
+          }
+        }
+      }
+    }
+  }
+
+  return Consumers;
+}
+
+static bool McpExpressionMatchesFilters(
+    const FMcpMaterialGraphOwner& Owner,
+    UMaterialExpression* Expr,
+    int32 Index,
+    const TSharedPtr<FJsonObject>& Payload)
+{
+  if (!Expr || !Payload.IsValid())
+  {
+    return false;
+  }
+
+  FString ClassName;
+  if (Payload->TryGetStringField(TEXT("className"), ClassName) ||
+      Payload->TryGetStringField(TEXT("expressionClass"), ClassName))
+  {
+    if (!ClassName.IsEmpty() &&
+        !Expr->GetClass()->GetName().Contains(ClassName, ESearchCase::IgnoreCase))
+    {
+      return false;
+    }
+  }
+
+  FString ParameterName;
+  if (Payload->TryGetStringField(TEXT("parameterName"), ParameterName) && !ParameterName.IsEmpty())
+  {
+    const UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr);
+    if (!Param || !Param->ParameterName.ToString().Contains(ParameterName, ESearchCase::IgnoreCase))
+    {
+      return false;
+    }
+  }
+
+  FString ExpressionName;
+  if (Payload->TryGetStringField(TEXT("expressionName"), ExpressionName) && !ExpressionName.IsEmpty())
+  {
+    if (!Expr->GetName().Contains(ExpressionName, ESearchCase::IgnoreCase))
+    {
+      return false;
+    }
+  }
+
+  FString Desc;
+  if (Payload->TryGetStringField(TEXT("desc"), Desc) && !Desc.IsEmpty())
+  {
+    if (!Expr->Desc.Contains(Desc, ESearchCase::IgnoreCase))
+    {
+      return false;
+    }
+  }
+
+  FString ExpressionPath;
+  if (Payload->TryGetStringField(TEXT("expressionPath"), ExpressionPath) && !ExpressionPath.IsEmpty())
+  {
+    if (!Expr->GetPathName().Equals(ExpressionPath, ESearchCase::IgnoreCase))
+    {
+      return false;
+    }
+  }
+
+  FString Guid;
+  if ((Payload->TryGetStringField(TEXT("expressionGuid"), Guid) || Payload->TryGetStringField(TEXT("nodeId"), Guid)) &&
+      !Guid.IsEmpty())
+  {
+    if (!Expr->MaterialExpressionGuid.ToString().Equals(Guid, ESearchCase::IgnoreCase))
+    {
+      return false;
+    }
+  }
+
+  int32 ExpressionIndex = INDEX_NONE;
+  if (Payload->TryGetNumberField(TEXT("expressionIndex"), ExpressionIndex) && ExpressionIndex != Index)
+  {
+    return false;
+  }
+
+  return true;
+}
+
+static void McpAppendTypedExpressionDetails(
+    const FMcpMaterialGraphOwner& Owner,
+    UMaterialExpression* Expression,
+    const TSharedRef<FJsonObject>& Resp)
+{
+  if (!Expression)
+  {
+    return;
+  }
+
+  if (UMaterialExpressionConstant* Const = Cast<UMaterialExpressionConstant>(Expression))
+  {
+    Resp->SetNumberField(TEXT("value"), Const->R);
+  }
+  else if (UMaterialExpressionConstant2Vector* Const2 = Cast<UMaterialExpressionConstant2Vector>(Expression))
+  {
+    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
+    ValueObj->SetNumberField(TEXT("r"), Const2->R);
+    ValueObj->SetNumberField(TEXT("g"), Const2->G);
+    Resp->SetObjectField(TEXT("value"), ValueObj);
+  }
+  else if (UMaterialExpressionConstant3Vector* Const3 = Cast<UMaterialExpressionConstant3Vector>(Expression))
+  {
+    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
+    ValueObj->SetNumberField(TEXT("r"), Const3->Constant.R);
+    ValueObj->SetNumberField(TEXT("g"), Const3->Constant.G);
+    ValueObj->SetNumberField(TEXT("b"), Const3->Constant.B);
+    Resp->SetObjectField(TEXT("value"), ValueObj);
+  }
+  else if (UMaterialExpressionConstant4Vector* Const4 = Cast<UMaterialExpressionConstant4Vector>(Expression))
+  {
+    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
+    ValueObj->SetNumberField(TEXT("r"), Const4->Constant.R);
+    ValueObj->SetNumberField(TEXT("g"), Const4->Constant.G);
+    ValueObj->SetNumberField(TEXT("b"), Const4->Constant.B);
+    ValueObj->SetNumberField(TEXT("a"), Const4->Constant.A);
+    Resp->SetObjectField(TEXT("value"), ValueObj);
+  }
+  else if (UMaterialExpressionTextureSample* TexSample = Cast<UMaterialExpressionTextureSample>(Expression))
+  {
+    if (TexSample->Texture)
+    {
+      Resp->SetStringField(TEXT("texture"), TexSample->Texture->GetPathName());
+      Resp->SetStringField(TEXT("textureName"), TexSample->Texture->GetName());
+    }
+  }
+  else if (UMaterialExpressionScalarParameter* ScalarParam = Cast<UMaterialExpressionScalarParameter>(Expression))
+  {
+    Resp->SetStringField(TEXT("parameterName"), ScalarParam->ParameterName.ToString());
+    Resp->SetNumberField(TEXT("defaultValue"), ScalarParam->DefaultValue);
+  }
+  else if (UMaterialExpressionVectorParameter* VectorParam = Cast<UMaterialExpressionVectorParameter>(Expression))
+  {
+    Resp->SetStringField(TEXT("parameterName"), VectorParam->ParameterName.ToString());
+    TSharedPtr<FJsonObject> DefaultObj = McpHandlerUtils::CreateResultObject();
+    DefaultObj->SetNumberField(TEXT("r"), VectorParam->DefaultValue.R);
+    DefaultObj->SetNumberField(TEXT("g"), VectorParam->DefaultValue.G);
+    DefaultObj->SetNumberField(TEXT("b"), VectorParam->DefaultValue.B);
+    DefaultObj->SetNumberField(TEXT("a"), VectorParam->DefaultValue.A);
+    Resp->SetObjectField(TEXT("defaultValue"), DefaultObj);
+  }
+  else if (UMaterialExpressionStaticSwitchParameter* SwitchParam = Cast<UMaterialExpressionStaticSwitchParameter>(Expression))
+  {
+    Resp->SetStringField(TEXT("parameterName"), SwitchParam->ParameterName.ToString());
+    Resp->SetBoolField(TEXT("defaultValue"), SwitchParam->DefaultValue);
+  }
+  else if (UMaterialExpressionLandscapeLayerWeight* LayerWeight = Cast<UMaterialExpressionLandscapeLayerWeight>(Expression))
+  {
+    Resp->SetStringField(TEXT("parameterName"), LayerWeight->ParameterName.ToString());
+    Resp->SetNumberField(TEXT("previewWeight"), LayerWeight->PreviewWeight);
+    TSharedPtr<FJsonObject> BaseObj = McpHandlerUtils::CreateResultObject();
+    BaseObj->SetStringField(TEXT("name"), TEXT("Base"));
+    McpAddConnectedExpressionInfo(Owner, &LayerWeight->Base, BaseObj.ToSharedRef());
+    Resp->SetObjectField(TEXT("baseInput"), BaseObj);
+
+    TSharedPtr<FJsonObject> LayerObj = McpHandlerUtils::CreateResultObject();
+    LayerObj->SetStringField(TEXT("name"), TEXT("Layer"));
+    McpAddConnectedExpressionInfo(Owner, &LayerWeight->Layer, LayerObj.ToSharedRef());
+    Resp->SetObjectField(TEXT("layerInput"), LayerObj);
+  }
+  else if (UMaterialExpressionLandscapeLayerBlend* LayerBlend = Cast<UMaterialExpressionLandscapeLayerBlend>(Expression))
+  {
+    TArray<TSharedPtr<FJsonValue>> LayersArray;
+    for (const FLayerBlendInput& Layer : LayerBlend->Layers)
+    {
+      TSharedPtr<FJsonObject> LayerObj = McpHandlerUtils::CreateResultObject();
+      LayerObj->SetStringField(TEXT("name"), Layer.LayerName.ToString());
+      LayerObj->SetStringField(TEXT("blendType"), McpLandscapeBlendTypeToString(Layer.BlendType));
+      LayerObj->SetNumberField(TEXT("previewWeight"), Layer.PreviewWeight);
+      LayerObj->SetNumberField(TEXT("constHeightInput"), Layer.ConstHeightInput);
+      TSharedPtr<FJsonObject> ConstLayerInput = McpHandlerUtils::CreateResultObject();
+      ConstLayerInput->SetNumberField(TEXT("x"), Layer.ConstLayerInput.X);
+      ConstLayerInput->SetNumberField(TEXT("y"), Layer.ConstLayerInput.Y);
+      ConstLayerInput->SetNumberField(TEXT("z"), Layer.ConstLayerInput.Z);
+      LayerObj->SetObjectField(TEXT("constLayerInput"), ConstLayerInput);
+
+      TSharedPtr<FJsonObject> LayerInputObj = McpHandlerUtils::CreateResultObject();
+      McpAddConnectedExpressionInfo(Owner, &Layer.LayerInput, LayerInputObj.ToSharedRef());
+      LayerObj->SetObjectField(TEXT("layerInput"), LayerInputObj);
+
+      TSharedPtr<FJsonObject> HeightInputObj = McpHandlerUtils::CreateResultObject();
+      McpAddConnectedExpressionInfo(Owner, &Layer.HeightInput, HeightInputObj.ToSharedRef());
+      LayerObj->SetObjectField(TEXT("heightInput"), HeightInputObj);
+
+      LayersArray.Add(MakeShared<FJsonValueObject>(LayerObj));
+    }
+    Resp->SetArrayField(TEXT("layers"), LayersArray);
+  }
+  else if (UMaterialExpressionMaterialFunctionCall* FuncCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expression))
+  {
+    if (FuncCall->MaterialFunction)
+    {
+      Resp->SetStringField(TEXT("functionPath"), FuncCall->MaterialFunction->GetPathName());
+      Resp->SetStringField(TEXT("functionName"), FuncCall->MaterialFunction->GetName());
+    }
+
+    TArray<TSharedPtr<FJsonValue>> FunctionInputs;
+    for (int32 InputIndex = 0; InputIndex < FuncCall->FunctionInputs.Num(); ++InputIndex)
+    {
+      const FFunctionExpressionInput& FunctionInput = FuncCall->FunctionInputs[InputIndex];
+      TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
+      InputObj->SetNumberField(TEXT("index"), InputIndex);
+      InputObj->SetStringField(TEXT("name"), FuncCall->GetInputName(InputIndex).ToString());
+      if (FunctionInput.ExpressionInput)
+      {
+        InputObj->SetStringField(TEXT("functionInputId"), FunctionInput.ExpressionInput->Id.ToString());
+      }
+      McpAddConnectedExpressionInfo(Owner, &FunctionInput.Input, InputObj.ToSharedRef());
+      FunctionInputs.Add(MakeShared<FJsonValueObject>(InputObj));
+    }
+    Resp->SetArrayField(TEXT("functionInputs"), FunctionInputs);
+
+    TArray<TSharedPtr<FJsonValue>> FunctionOutputs;
+    for (int32 OutputIndex = 0; OutputIndex < FuncCall->FunctionOutputs.Num(); ++OutputIndex)
+    {
+      const FFunctionExpressionOutput& FunctionOutput = FuncCall->FunctionOutputs[OutputIndex];
+      TSharedPtr<FJsonObject> OutputObj = McpHandlerUtils::CreateResultObject();
+      OutputObj->SetNumberField(TEXT("index"), OutputIndex);
+      OutputObj->SetStringField(TEXT("functionOutputId"), FunctionOutput.ExpressionOutputId.ToString());
+      bool bResolvedOutputName = false;
+      FString OutputName = McpGetOutputName(Expression, OutputIndex, bResolvedOutputName);
+      if (OutputName.IsEmpty() && FunctionOutput.ExpressionOutput)
+      {
+        OutputName = FunctionOutput.ExpressionOutput->OutputName.ToString();
+        bResolvedOutputName = !OutputName.IsEmpty();
+      }
+      if (!OutputName.IsEmpty())
+      {
+        OutputObj->SetStringField(TEXT("name"), OutputName);
+      }
+      OutputObj->SetBoolField(TEXT("nameResolved"), bResolvedOutputName);
+      FunctionOutputs.Add(MakeShared<FJsonValueObject>(OutputObj));
+    }
+    Resp->SetArrayField(TEXT("functionOutputs"), FunctionOutputs);
+  }
+  else if (UMaterialExpressionNamedRerouteDeclaration* Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(Expression))
+  {
+    Resp->SetStringField(TEXT("rerouteName"), Declaration->Name.ToString());
+    Resp->SetStringField(TEXT("rerouteGuid"), Declaration->VariableGuid.ToString());
+    TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
+    McpAddConnectedExpressionInfo(Owner, &Declaration->Input, InputObj.ToSharedRef());
+    Resp->SetObjectField(TEXT("declarationInput"), InputObj);
+  }
+  else if (UMaterialExpressionNamedRerouteUsage* Usage = Cast<UMaterialExpressionNamedRerouteUsage>(Expression))
+  {
+    Resp->SetStringField(TEXT("declarationGuid"), Usage->DeclarationGuid.ToString());
+    if (Usage->Declaration)
+    {
+      Resp->SetObjectField(TEXT("declaration"), McpBuildExpressionRef(Owner, Usage->Declaration));
+      Resp->SetStringField(TEXT("declarationName"), Usage->Declaration->Name.ToString());
+    }
+  }
+  else if (UMaterialExpressionLandscapePhysicalMaterialOutput* PhysicalOutput = Cast<UMaterialExpressionLandscapePhysicalMaterialOutput>(Expression))
+  {
+    TArray<TSharedPtr<FJsonValue>> Inputs;
+    for (int32 InputIndex = 0; InputIndex < PhysicalOutput->Inputs.Num(); ++InputIndex)
+    {
+      const FPhysicalMaterialInput& Input = PhysicalOutput->Inputs[InputIndex];
+      TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
+      InputObj->SetNumberField(TEXT("index"), InputIndex);
+      if (Input.PhysicalMaterial)
+      {
+        InputObj->SetStringField(TEXT("physicalMaterial"), Input.PhysicalMaterial->GetPathName());
+      }
+      McpAddConnectedExpressionInfo(Owner, &Input.Input, InputObj.ToSharedRef());
+      Inputs.Add(MakeShared<FJsonValueObject>(InputObj));
+    }
+    Resp->SetArrayField(TEXT("physicalMaterialInputs"), Inputs);
+  }
+}
+
+static ALandscape* McpFindLandscapeActorByPayload(
+    const TSharedPtr<FJsonObject>& Payload)
+{
+  if (!Payload.IsValid() || !GEditor)
+  {
+    return nullptr;
+  }
+
+  UWorld* World = GEditor->GetEditorWorldContext().World();
+  if (!World)
+  {
+    return nullptr;
+  }
+
+  FString ActorPath;
+  Payload->TryGetStringField(TEXT("actorPath"), ActorPath);
+  if (ActorPath.IsEmpty())
+  {
+    Payload->TryGetStringField(TEXT("landscapePath"), ActorPath);
+  }
+
+  if (!ActorPath.IsEmpty())
+  {
+    if (ALandscape* Landscape = Cast<ALandscape>(StaticLoadObject(ALandscape::StaticClass(), nullptr, *ActorPath)))
+    {
+      return Landscape;
+    }
+    if (ALandscapeStreamingProxy* Proxy = Cast<ALandscapeStreamingProxy>(StaticLoadObject(ALandscapeStreamingProxy::StaticClass(), nullptr, *ActorPath)))
+    {
+      return Proxy->GetLandscapeActor();
+    }
+  }
+
+  FString ActorName;
+  Payload->TryGetStringField(TEXT("actorName"), ActorName);
+  if (ActorName.IsEmpty())
+  {
+    Payload->TryGetStringField(TEXT("landscapeName"), ActorName);
+  }
+
+  if (!ActorName.IsEmpty())
+  {
+    for (TActorIterator<ALandscape> It(World); It; ++It)
+    {
+      ALandscape* Landscape = *It;
+      if (Landscape &&
+          (Landscape->GetActorLabel().Equals(ActorName, ESearchCase::IgnoreCase) ||
+           Landscape->GetName().Equals(ActorName, ESearchCase::IgnoreCase)))
+      {
+        return Landscape;
+      }
+    }
+  }
+
+  return nullptr;
+}
 } // namespace
 #endif
 
@@ -640,6 +1149,18 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
     return HandleDoesAssetExist(RequestId, Payload, RequestingSocket);
   if (Lower == TEXT("get_material_stats"))
     return HandleGetMaterialStats(RequestId, Payload, RequestingSocket);
+  if (Lower == TEXT("get_material_instance_info"))
+    return HandleGetMaterialInstanceInfo(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("find_material_expressions"))
+    return HandleFindMaterialExpressions(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("get_material_expression_details"))
+    return HandleGetMaterialExpressionDetails(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("get_material_expression_connections"))
+    return HandleGetMaterialExpressionConnections(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("get_landscape_material_context"))
+    return HandleGetLandscapeMaterialContext(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("compile_material_diagnostics"))
+    return HandleCompileMaterialDiagnostics(RequestId, Lower, Payload, RequestingSocket);
   
   // Search (CRITICAL: search_assets must be dispatched - was missing causing timeouts)
   if (Lower == TEXT("search_assets"))
@@ -5630,6 +6151,219 @@ bool UMcpAutomationBridgeSubsystem::HandleAlignMaterialNodes(
 #endif
 }
 
+bool UMcpAutomationBridgeSubsystem::HandleGetMaterialInstanceInfo(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("get_material_instance_info"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("get_material_instance_info payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString AssetPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), AssetPath)) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  const FString ValidatedPath = SanitizeProjectRelativePath(AssetPath);
+  if (ValidatedPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Invalid assetPath: %s"), *AssetPath),
+                        TEXT("INVALID_PATH"));
+    return true;
+  }
+
+  UMaterialInstanceConstant* Instance = LoadObject<UMaterialInstanceConstant>(nullptr, *ValidatedPath);
+  if (!Instance) {
+    UObject* Generic = LoadObject<UObject>(nullptr, *ValidatedPath);
+    SendAutomationError(Socket, RequestId,
+                        Generic
+                            ? FString::Printf(TEXT("Asset '%s' is not a MaterialInstanceConstant"), *ValidatedPath)
+                            : FString::Printf(TEXT("Asset not found: %s"), *ValidatedPath),
+                        Generic ? TEXT("INVALID_ASSET_TYPE") : TEXT("ASSET_NOT_FOUND"));
+    return true;
+  }
+
+  bool bIncludeEffective = true;
+  bool bOverriddenOnly = false;
+  Payload->TryGetBoolField(TEXT("includeEffective"), bIncludeEffective);
+  Payload->TryGetBoolField(TEXT("overriddenOnly"), bOverriddenOnly);
+
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Result, Instance);
+  Result->SetStringField(TEXT("assetPath"), ValidatedPath);
+  McpCollectMaterialInstanceInfo(Instance, Result.ToSharedRef(), bIncludeEffective, bOverriddenOnly);
+  Result->SetBoolField(TEXT("includeEffective"), bIncludeEffective);
+  Result->SetBoolField(TEXT("overriddenOnly"), bOverriddenOnly);
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Material instance diagnostics retrieved"), Result, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("get_material_instance_info requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleFindMaterialExpressions(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("find_material_expressions"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("find_material_expressions payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString AssetPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), AssetPath)) {
+    SendAutomationError(Socket, RequestId, TEXT("assetPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(AssetPath, GraphOwner, GraphOwnerError)) {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found"))
+                            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+
+  const TArray<TObjectPtr<UMaterialExpression>>* Expressions = McpGetGraphExpressions(GraphOwner);
+  TArray<TSharedPtr<FJsonValue>> Matches;
+  if (Expressions) {
+    for (int32 Index = 0; Index < Expressions->Num(); ++Index) {
+      UMaterialExpression* Expr = (*Expressions)[Index];
+      if (!McpExpressionMatchesFilters(GraphOwner, Expr, Index, Payload)) {
+        continue;
+      }
+      TSharedPtr<FJsonObject> Match = McpBuildExpressionRef(GraphOwner, Expr);
+      if (Expr) {
+        Match->SetStringField(TEXT("className"), Expr->GetClass()->GetName());
+        if (!Expr->Desc.IsEmpty()) {
+          Match->SetStringField(TEXT("desc"), Expr->Desc);
+        }
+        if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr)) {
+          Match->SetStringField(TEXT("parameterName"), Param->ParameterName.ToString());
+        }
+      }
+      Matches.Add(MakeShared<FJsonValueObject>(Match));
+    }
+  }
+
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Result, GraphOwner.Asset);
+  Result->SetStringField(TEXT("assetPath"), AssetPath);
+  Result->SetArrayField(TEXT("expressions"), Matches);
+  Result->SetNumberField(TEXT("matchCount"), Matches.Num());
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Material expressions found"), Result, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("find_material_expressions requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleGetMaterialExpressionDetails(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("get_material_expression_details"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+  return HandleGetMaterialNodeDetails(RequestId, TEXT("get_material_node_details"), Payload, Socket);
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleGetMaterialExpressionConnections(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("get_material_expression_connections"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("get_material_expression_connections payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString MaterialPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath or materialPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError))
+  {
+    SendAutomationError(Socket, RequestId, GraphOwnerError,
+                        GraphOwnerError.Contains(TEXT("not found"))
+                            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+
+  UMaterialExpression* Expression = McpFindGraphExpressionFromPayload(GraphOwner, Payload);
+  if (!Expression) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("expression reference is required"),
+                        TEXT("NODE_NOT_FOUND"));
+    return true;
+  }
+
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Result, GraphOwner.Asset);
+  McpAddExpressionIdentity(GraphOwner, Expression, McpExpressionIndex(GraphOwner, Expression), Result.ToSharedRef());
+  Result->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
+  Result->SetStringField(TEXT("className"), Expression->GetClass()->GetName());
+  Result->SetArrayField(TEXT("inputs"), McpBuildExpressionInputsArray(GraphOwner, Expression));
+  Result->SetArrayField(TEXT("consumers"), McpBuildExpressionConsumersArray(GraphOwner, Expression));
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Material expression connections retrieved"), Result, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("get_material_expression_connections requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
 bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
     const FString &RequestId, const FString &Action,
     const TSharedPtr<FJsonObject> &Payload,
@@ -5725,72 +6459,15 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
   Resp->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
   McpAddExpressionIdentity(GraphOwner, Expression, McpExpressionIndex(GraphOwner, Expression), Resp.ToSharedRef());
   Resp->SetStringField(TEXT("class"), Expression->GetClass()->GetName());
+  Resp->SetStringField(TEXT("className"), Expression->GetClass()->GetName());
   Resp->SetStringField(TEXT("classPath"), Expression->GetClass()->GetPathName());
   if (!Expression->Desc.IsEmpty()) {
     Resp->SetStringField(TEXT("desc"), Expression->Desc);
   }
 
-  // Get inputs
-  TArray<TSharedPtr<FJsonValue>> InputsArray;
-  for (FProperty *Property = Expression->GetClass()->PropertyLink; Property;
-       Property = Property->PropertyLinkNext) {
-    if (FStructProperty *StructProp = CastField<FStructProperty>(Property)) {
-      if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput"))) {
-        FExpressionInput *Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
-        TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
-        InputObj->SetStringField(TEXT("name"), Property->GetName());
-        InputObj->SetBoolField(TEXT("isConnected"), Input->Expression != nullptr);
-        if (Input->Expression) {
-          InputObj->SetStringField(TEXT("connectedToId"), Input->Expression->MaterialExpressionGuid.ToString());
-          InputObj->SetStringField(TEXT("connectedToExpressionGuid"), Input->Expression->MaterialExpressionGuid.ToString());
-          InputObj->SetStringField(TEXT("connectedToExpressionPath"), Input->Expression->GetPathName());
-          InputObj->SetNumberField(TEXT("connectedToIndex"), McpExpressionIndex(GraphOwner, Input->Expression));
-          InputObj->SetStringField(TEXT("connectedToName"), Input->Expression->GetName());
-        }
-        InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
-      }
-    }
-  }
-  Resp->SetArrayField(TEXT("inputs"), InputsArray);
-
-  // Get specific properties based on expression type
-  if (UMaterialExpressionConstant *Const = Cast<UMaterialExpressionConstant>(Expression)) {
-    Resp->SetNumberField(TEXT("value"), Const->R);
-  } else if (UMaterialExpressionConstant2Vector *Const2 = Cast<UMaterialExpressionConstant2Vector>(Expression)) {
-    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
-    ValueObj->SetNumberField(TEXT("r"), Const2->R);
-    ValueObj->SetNumberField(TEXT("g"), Const2->G);
-    Resp->SetObjectField(TEXT("value"), ValueObj);
-  } else if (UMaterialExpressionConstant3Vector *Const3 = Cast<UMaterialExpressionConstant3Vector>(Expression)) {
-    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
-    ValueObj->SetNumberField(TEXT("r"), Const3->Constant.R);
-    ValueObj->SetNumberField(TEXT("g"), Const3->Constant.G);
-    ValueObj->SetNumberField(TEXT("b"), Const3->Constant.B);
-    Resp->SetObjectField(TEXT("value"), ValueObj);
-  } else if (UMaterialExpressionConstant4Vector *Const4 = Cast<UMaterialExpressionConstant4Vector>(Expression)) {
-    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
-    ValueObj->SetNumberField(TEXT("r"), Const4->Constant.R);
-    ValueObj->SetNumberField(TEXT("g"), Const4->Constant.G);
-    ValueObj->SetNumberField(TEXT("b"), Const4->Constant.B);
-    ValueObj->SetNumberField(TEXT("a"), Const4->Constant.A);
-    Resp->SetObjectField(TEXT("value"), ValueObj);
-  } else if (UMaterialExpressionTextureSample *TexSample = Cast<UMaterialExpressionTextureSample>(Expression)) {
-    if (TexSample->Texture) {
-      Resp->SetStringField(TEXT("texture"), TexSample->Texture->GetPathName());
-      Resp->SetStringField(TEXT("textureName"), TexSample->Texture->GetName());
-    }
-  } else if (UMaterialExpressionScalarParameter *ScalarParam = Cast<UMaterialExpressionScalarParameter>(Expression)) {
-    Resp->SetStringField(TEXT("parameterName"), ScalarParam->ParameterName.ToString());
-    Resp->SetNumberField(TEXT("defaultValue"), ScalarParam->DefaultValue);
-  } else if (UMaterialExpressionVectorParameter *VectorParam = Cast<UMaterialExpressionVectorParameter>(Expression)) {
-    Resp->SetStringField(TEXT("parameterName"), VectorParam->ParameterName.ToString());
-    TSharedPtr<FJsonObject> DefaultObj = McpHandlerUtils::CreateResultObject();
-    DefaultObj->SetNumberField(TEXT("r"), VectorParam->DefaultValue.R);
-    DefaultObj->SetNumberField(TEXT("g"), VectorParam->DefaultValue.G);
-    DefaultObj->SetNumberField(TEXT("b"), VectorParam->DefaultValue.B);
-    DefaultObj->SetNumberField(TEXT("a"), VectorParam->DefaultValue.A);
-    Resp->SetObjectField(TEXT("defaultValue"), DefaultObj);
-  }
+  Resp->SetArrayField(TEXT("inputs"), McpBuildExpressionInputsArray(GraphOwner, Expression));
+  Resp->SetArrayField(TEXT("consumers"), McpBuildExpressionConsumersArray(GraphOwner, Expression));
+  McpAppendTypedExpressionDetails(GraphOwner, Expression, Resp.ToSharedRef());
 
   SendAutomationResponse(Socket, RequestId, true,
                          TEXT("Material node details retrieved"), Resp, FString());
@@ -5798,6 +6475,222 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
 #else
   SendAutomationResponse(Socket, RequestId, false,
                          TEXT("get_material_node_details requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleGetLandscapeMaterialContext(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("get_landscape_material_context"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("get_landscape_material_context payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  ALandscape* Landscape = McpFindLandscapeActorByPayload(Payload);
+  if (!Landscape) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("Could not resolve a loaded landscape actor from actorName/actorPath/landscapeName/landscapePath"),
+                        TEXT("LANDSCAPE_NOT_FOUND"));
+    return true;
+  }
+
+  ULandscapeInfo* LandscapeInfo = Landscape->GetLandscapeInfo();
+  if (!LandscapeInfo) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("Resolved landscape actor has no LandscapeInfo"),
+                        TEXT("UNSUPPORTED_STATE"));
+    return true;
+  }
+
+  UMaterialInterface* AssignedMaterial = Landscape->LandscapeMaterial;
+  FString MaterialAssetPath;
+  FMcpMaterialGraphOwner GraphOwner;
+  FString GraphOwnerError;
+  bool bHasGraphOwner = false;
+  if (AssignedMaterial) {
+    MaterialAssetPath = AssignedMaterial->GetPathName();
+    bHasGraphOwner = McpResolveMaterialGraphOwner(MaterialAssetPath, GraphOwner, GraphOwnerError);
+    if (!bHasGraphOwner) {
+      if (UMaterialInstance* MaterialInstance = Cast<UMaterialInstance>(AssignedMaterial)) {
+        if (MaterialInstance->Parent) {
+          MaterialAssetPath = MaterialInstance->Parent->GetPathName();
+          bHasGraphOwner = McpResolveMaterialGraphOwner(MaterialAssetPath, GraphOwner, GraphOwnerError);
+        }
+      }
+    }
+  }
+
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Result, Landscape);
+  Result->SetStringField(TEXT("actorName"), Landscape->GetActorLabel());
+  Result->SetStringField(TEXT("actorPath"), Landscape->GetPathName());
+  if (AssignedMaterial) {
+    Result->SetStringField(TEXT("assignedMaterialPath"), AssignedMaterial->GetPathName());
+    Result->SetStringField(TEXT("assignedMaterialClass"), AssignedMaterial->GetClass()->GetName());
+    if (!MaterialAssetPath.IsEmpty()) {
+      Result->SetStringField(TEXT("graphMaterialPath"), MaterialAssetPath);
+    }
+  }
+
+  TArray<TSharedPtr<FJsonValue>> TargetLayers;
+  for (const FLandscapeInfoLayerSettings& LayerSettings : LandscapeInfo->Layers) {
+    TSharedPtr<FJsonObject> LayerObj = McpHandlerUtils::CreateResultObject();
+    const FName LayerName = LayerSettings.GetLayerName();
+    LayerObj->SetStringField(TEXT("name"), LayerName.ToString());
+    if (LayerSettings.LayerInfoObj) {
+      LayerObj->SetStringField(TEXT("layerInfoPath"), LayerSettings.LayerInfoObj->GetPathName());
+      if (UPhysicalMaterial* PhysicalMaterial = LayerSettings.LayerInfoObj->GetPhysicalMaterial().Get()) {
+        LayerObj->SetStringField(TEXT("physicalMaterialPath"), PhysicalMaterial->GetPathName());
+      }
+    }
+
+    if (bHasGraphOwner) {
+      const TArray<TObjectPtr<UMaterialExpression>>* Expressions = McpGetGraphExpressions(GraphOwner);
+      if (Expressions) {
+        for (int32 Index = 0; Index < Expressions->Num(); ++Index) {
+          UMaterialExpression* Expr = (*Expressions)[Index];
+          if (UMaterialExpressionLandscapeLayerWeight* LayerWeight = Cast<UMaterialExpressionLandscapeLayerWeight>(Expr)) {
+            if (LayerWeight->ParameterName == LayerName) {
+              LayerObj->SetObjectField(TEXT("matchedExpression"), McpBuildExpressionRef(GraphOwner, Expr));
+              LayerObj->SetStringField(TEXT("matchedExpressionType"), TEXT("LandscapeLayerWeight"));
+              break;
+            }
+          } else if (UMaterialExpressionLandscapeLayerBlend* LayerBlend = Cast<UMaterialExpressionLandscapeLayerBlend>(Expr)) {
+            for (const FLayerBlendInput& BlendInput : LayerBlend->Layers) {
+              if (BlendInput.LayerName == LayerName) {
+                LayerObj->SetObjectField(TEXT("matchedExpression"), McpBuildExpressionRef(GraphOwner, Expr));
+                LayerObj->SetStringField(TEXT("matchedExpressionType"), TEXT("LandscapeLayerBlend"));
+                break;
+              }
+            }
+            if (LayerObj->HasField(TEXT("matchedExpression"))) {
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    TargetLayers.Add(MakeShared<FJsonValueObject>(LayerObj));
+  }
+  Result->SetArrayField(TEXT("targetLayers"), TargetLayers);
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Landscape material context retrieved"), Result, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("get_landscape_material_context requires editor build"),
+                         nullptr, TEXT("NOT_IMPLEMENTED"));
+  return true;
+#endif
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleCompileMaterialDiagnostics(
+    const FString &RequestId, const FString &Action,
+    const TSharedPtr<FJsonObject> &Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+  const FString Lower = Action.ToLower();
+  if (!Lower.Equals(TEXT("compile_material_diagnostics"), ESearchCase::IgnoreCase)) {
+    return false;
+  }
+
+#if WITH_EDITOR
+  if (!Payload.IsValid()) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("compile_material_diagnostics payload missing"),
+                        TEXT("INVALID_PAYLOAD"));
+    return true;
+  }
+
+  FString AssetPath;
+  if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) &&
+      !Payload->TryGetStringField(TEXT("materialPath"), AssetPath)) {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("assetPath is required"),
+                        TEXT("INVALID_ARGUMENT"));
+    return true;
+  }
+
+  const FString ValidatedPath = SanitizeProjectRelativePath(AssetPath);
+  if (ValidatedPath.IsEmpty()) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Invalid assetPath: %s"), *AssetPath),
+                        TEXT("INVALID_PATH"));
+    return true;
+  }
+
+  bool bSave = false;
+  Payload->TryGetBoolField(TEXT("save"), bSave);
+
+  UMaterialInterface* MaterialInterface = LoadObject<UMaterialInterface>(nullptr, *ValidatedPath);
+  if (!MaterialInterface) {
+    SendAutomationError(Socket, RequestId,
+                        FString::Printf(TEXT("Could not load material-family asset: %s"), *ValidatedPath),
+                        TEXT("ASSET_NOT_FOUND"));
+    return true;
+  }
+
+  const double StartTime = FPlatformTime::Seconds();
+  if (UMaterial* Material = Cast<UMaterial>(MaterialInterface)) {
+    Material->PreEditChange(nullptr);
+    Material->PostEditChange();
+    Material->MarkPackageDirty();
+    if (bSave) {
+      UEditorAssetLibrary::SaveLoadedAsset(Material);
+    }
+  } else if (UMaterialInstanceConstant* Instance = Cast<UMaterialInstanceConstant>(MaterialInterface)) {
+    Instance->PreEditChange(nullptr);
+    Instance->PostEditChange();
+    Instance->MarkPackageDirty();
+    if (bSave) {
+      UEditorAssetLibrary::SaveLoadedAsset(Instance);
+    }
+  } else {
+    SendAutomationError(Socket, RequestId,
+                        TEXT("compile_material_diagnostics currently supports UMaterial and UMaterialInstanceConstant"),
+                        TEXT("UNSUPPORTED_ASSET_TYPE"));
+    return true;
+  }
+
+  MaterialInterface->EnsureIsComplete();
+  const FMaterialResource* Resource = MaterialInterface->GetMaterialResource(GMaxRHIShaderPlatform);
+  TArray<TSharedPtr<FJsonValue>> Errors;
+  if (Resource) {
+    for (const FString& Error : Resource->GetCompileErrors()) {
+      Errors.Add(MakeShared<FJsonValueString>(Error));
+    }
+  }
+
+  const double EndTime = FPlatformTime::Seconds();
+  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+  McpHandlerUtils::AddVerification(Result, MaterialInterface);
+  Result->SetStringField(TEXT("assetPath"), ValidatedPath);
+  Result->SetStringField(TEXT("assetClass"), MaterialInterface->GetClass()->GetName());
+  Result->SetBoolField(TEXT("compiled"), true);
+  Result->SetBoolField(TEXT("saved"), bSave);
+  Result->SetArrayField(TEXT("errors"), Errors);
+  Result->SetArrayField(TEXT("warnings"), TArray<TSharedPtr<FJsonValue>>());
+  Result->SetNumberField(TEXT("messageCount"), Errors.Num());
+  Result->SetNumberField(TEXT("durationMs"), (EndTime - StartTime) * 1000.0);
+
+  SendAutomationResponse(Socket, RequestId, true,
+                         TEXT("Material compile diagnostics retrieved"), Result, FString());
+  return true;
+#else
+  SendAutomationResponse(Socket, RequestId, false,
+                         TEXT("compile_material_diagnostics requires editor build"),
                          nullptr, TEXT("NOT_IMPLEMENTED"));
   return true;
 #endif

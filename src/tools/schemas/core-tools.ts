@@ -91,6 +91,8 @@ export const coreToolDefinitions: ToolDefinition[] = [
             'get_dependencies', 'get_source_control_state', 'analyze_graph', 'get_asset_graph', 'create_thumbnail', 'set_tags', 'get_metadata', 'set_metadata', 'validate', 'fixup_redirectors', 'find_by_tag', 'generate_report',
             'create_material', 'create_material_instance', 'create_render_target', 'generate_lods', 'add_material_parameter', 'list_instances', 'reset_instance_parameters', 'exists', 'get_material_stats',
             'nanite_rebuild_mesh', 'bulk_rename', 'bulk_delete', 'source_control_checkout', 'source_control_submit',
+            'get_material_instance_info', 'find_material_expressions', 'get_material_expression_details', 'get_material_expression_connections',
+            'get_landscape_material_context', 'compile_material_diagnostics',
             'add_material_node', 'connect_material_pins', 'remove_material_node', 'break_material_connections', 'get_material_node_details', 'rebuild_material',
             'set_material_node_position', 'move_material_node', 'bulk_set_material_node_positions', 'bulk_move_material_nodes',
             'create_material_comment', 'wrap_material_nodes_in_comment',

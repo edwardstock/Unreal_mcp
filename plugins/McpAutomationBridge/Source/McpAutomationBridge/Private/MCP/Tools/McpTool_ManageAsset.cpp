@@ -56,6 +56,12 @@ public:
 				TEXT("reset_instance_parameters"),
 				TEXT("exists"),
 				TEXT("get_material_stats"),
+				TEXT("get_material_instance_info"),
+				TEXT("find_material_expressions"),
+				TEXT("get_material_expression_details"),
+				TEXT("get_material_expression_connections"),
+				TEXT("get_landscape_material_context"),
+				TEXT("compile_material_diagnostics"),
 				TEXT("nanite_rebuild_mesh"),
 				TEXT("bulk_rename"),
 				TEXT("bulk_delete"),
@@ -116,6 +122,8 @@ public:
 			.String(TEXT("nodeId"), TEXT("ID of the node."))
 			.String(TEXT("expressionPath"), TEXT("Material expression path."))
 			.String(TEXT("expressionName"), TEXT("Material expression object name."))
+			.String(TEXT("expressionGuid"), TEXT("Material expression GUID."))
+			.String(TEXT("className"), TEXT("Material expression class name."))
 			.Number(TEXT("sourceExpressionIndex"), TEXT("Source expression index."))
 			.Number(TEXT("targetExpressionIndex"), TEXT("Target expression index."))
 			.String(TEXT("sourceExpressionPath"), TEXT("Source expression path."))
@@ -169,6 +177,13 @@ public:
 			.String(TEXT("parameterType"), TEXT(""))
 			.ArrayOfObjects(TEXT("nodes"), TEXT(""))
 			.Array(TEXT("tags"), TEXT(""))
+			.String(TEXT("actorName"), TEXT("Actor name for landscape context diagnostics."))
+			.String(TEXT("actorPath"), TEXT("Actor object path for landscape context diagnostics."))
+			.String(TEXT("landscapeName"), TEXT("Landscape actor name."))
+			.String(TEXT("landscapePath"), TEXT("Landscape actor object path."))
+			.Bool(TEXT("includeEffective"), TEXT("Include effective inherited parameter values."))
+			.Bool(TEXT("overriddenOnly"), TEXT("Restrict diagnostics to explicitly overridden parameters."))
+			.Bool(TEXT("includeConsumers"), TEXT("Include downstream consumers in expression connection diagnostics."))
 			.String(TEXT("folderPath"), TEXT("Path to a directory."))
 			.String(TEXT("sourceNode"), TEXT("ID of the source node."))
 			.String(TEXT("targetNode"), TEXT("ID of the target node."))

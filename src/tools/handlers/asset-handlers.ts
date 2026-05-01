@@ -30,6 +30,8 @@ const VALID_ASSET_ACTIONS = new Set([
   'create_material_comment', 'wrap_material_nodes_in_comment',
   'create_named_reroute', 'use_named_reroute', 'replace_long_connection_with_named_reroute',
   'align_material_nodes',
+  'get_material_instance_info', 'find_material_expressions', 'get_material_expression_details',
+  'get_material_expression_connections', 'get_landscape_material_context', 'compile_material_diagnostics',
   // Source control
   'source_control_checkout', 'source_control_submit', 'source_control_enable', 'get_source_control_state',
   // Graph analysis
@@ -121,6 +123,7 @@ interface AssetOperationResponse {
   success?: boolean;
   message?: string;
   error?: string;
+  errorCode?: string;
   tags?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   [key: string]: unknown;
@@ -973,6 +976,97 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
           expressionName
         });
         return ResponseFactory.success(res, 'Material node details retrieved');
+      }
+      case 'get_material_instance_info': {
+        const params = normalizeArgs(args, [
+          { key: 'assetPath', aliases: ['materialPath'], required: true },
+          { key: 'includeEffective', default: true },
+          { key: 'overriddenOnly', default: false }
+        ]);
+        const assetPath = extractString(params, 'assetPath');
+        const includeEffective = extractOptionalBoolean(params, 'includeEffective') ?? true;
+        const overriddenOnly = extractOptionalBoolean(params, 'overriddenOnly') ?? false;
+        const res = await executeAutomationRequest(tools, 'get_material_instance_info', {
+          assetPath,
+          includeEffective,
+          overriddenOnly
+        }) as AssetOperationResponse;
+        if (res.success === false) {
+          return ResponseFactory.errorWithCode(res.errorCode ?? res.error ?? 'OPERATION_FAILED', res.message ?? 'Failed to get material instance diagnostics');
+        }
+        return ResponseFactory.success(res, 'Material instance diagnostics retrieved');
+      }
+      case 'find_material_expressions': {
+        const params = normalizeArgs(args, [
+          { key: 'assetPath', aliases: ['materialPath'], required: true },
+          { key: 'className', aliases: ['expressionClass'] },
+          { key: 'parameterName' },
+          { key: 'expressionName' },
+          { key: 'expressionPath' },
+          { key: 'expressionGuid' },
+          { key: 'nodeId' },
+          { key: 'desc' }
+        ]);
+        const res = await executeAutomationRequest(tools, 'find_material_expressions', {
+          ...params
+        }) as AssetOperationResponse;
+        if (res.success === false) {
+          return ResponseFactory.errorWithCode(res.errorCode ?? res.error ?? 'OPERATION_FAILED', res.message ?? 'Failed to find material expressions');
+        }
+        return ResponseFactory.success(res, 'Material expressions found');
+      }
+      case 'get_material_expression_details':
+      case 'get_material_expression_connections': {
+        const params = normalizeArgs(args, [
+          { key: 'assetPath', aliases: ['materialPath'], required: true },
+          { key: 'nodeId' },
+          { key: 'expressionIndex' },
+          { key: 'expressionPath' },
+          { key: 'expressionName' },
+          { key: 'expressionGuid' },
+          { key: 'parameterName' },
+          { key: 'className', aliases: ['expressionClass'] },
+          { key: 'includeConsumers', default: action === 'get_material_expression_connections' }
+        ]);
+        const res = await executeAutomationRequest(tools, action, {
+          ...params
+        }) as AssetOperationResponse;
+        if (res.success === false) {
+          return ResponseFactory.errorWithCode(res.errorCode ?? res.error ?? 'OPERATION_FAILED', res.message ?? `Failed to execute ${action}`);
+        }
+        return ResponseFactory.success(res, action === 'get_material_expression_connections'
+          ? 'Material expression connections retrieved'
+          : 'Material expression details retrieved');
+      }
+      case 'get_landscape_material_context': {
+        const params = normalizeArgs(args, [
+          { key: 'assetPath', aliases: ['materialPath'] },
+          { key: 'actorName', aliases: ['landscapeName'] },
+          { key: 'actorPath', aliases: ['landscapePath'] }
+        ]);
+        const res = await executeAutomationRequest(tools, 'get_landscape_material_context', {
+          ...params
+        }) as AssetOperationResponse;
+        if (res.success === false) {
+          return ResponseFactory.errorWithCode(res.errorCode ?? res.error ?? 'OPERATION_FAILED', res.message ?? 'Failed to get landscape material context');
+        }
+        return ResponseFactory.success(res, 'Landscape material context retrieved');
+      }
+      case 'compile_material_diagnostics': {
+        const params = normalizeArgs(args, [
+          { key: 'assetPath', aliases: ['materialPath'], required: true },
+          { key: 'save', default: false }
+        ]);
+        const assetPath = extractString(params, 'assetPath');
+        const save = extractOptionalBoolean(params, 'save') ?? false;
+        const res = await executeAutomationRequest(tools, 'compile_material_diagnostics', {
+          assetPath,
+          save
+        }) as AssetOperationResponse;
+        if (res.success === false) {
+          return ResponseFactory.errorWithCode(res.errorCode ?? res.error ?? 'OPERATION_FAILED', res.message ?? 'Failed to compile material diagnostics');
+        }
+        return ResponseFactory.success(res, 'Material compile diagnostics retrieved');
       }
       case 'rebuild_material': {
         const params = normalizeArgs(args, [

@@ -2713,27 +2713,24 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
       Result->SetBoolField(TEXT("exposedToLibrary"), Func->bExposeToLibrary != 0);
       Result->SetNumberField(TEXT("nodeCount"), Expressions ? Expressions->Num() : 0);
 
-      // function inputs/outputs
-      TArray<FFunctionExpressionInput>  FuncInputs;
-      TArray<FFunctionExpressionOutput> FuncOutputs;
-      Func->GetInputsAndOutputs(FuncInputs, FuncOutputs);
-
       TArray<TSharedPtr<FJsonValue>> InputsArr;
-      for (const FFunctionExpressionInput& In : FuncInputs)
-      {
-        TSharedPtr<FJsonObject> Obj = McpHandlerUtils::CreateResultObject();
-        Obj->SetStringField(TEXT("name"), In.Input.InputName.ToString());
-        InputsArr.Add(MakeShared<FJsonValueObject>(Obj));
+      TArray<TSharedPtr<FJsonValue>> OutputsArr;
+      if (Expressions) {
+        for (UMaterialExpression* Expr : *Expressions) {
+          if (UMaterialExpressionFunctionInput* InputExpr = Cast<UMaterialExpressionFunctionInput>(Expr)) {
+            TSharedPtr<FJsonObject> Obj = McpHandlerUtils::CreateResultObject();
+            Obj->SetStringField(TEXT("name"), InputExpr->InputName.ToString());
+            Obj->SetStringField(TEXT("id"), InputExpr->Id.ToString());
+            InputsArr.Add(MakeShared<FJsonValueObject>(Obj));
+          } else if (UMaterialExpressionFunctionOutput* OutputExpr = Cast<UMaterialExpressionFunctionOutput>(Expr)) {
+            TSharedPtr<FJsonObject> Obj = McpHandlerUtils::CreateResultObject();
+            Obj->SetStringField(TEXT("name"), OutputExpr->OutputName.ToString());
+            Obj->SetStringField(TEXT("id"), OutputExpr->Id.ToString());
+            OutputsArr.Add(MakeShared<FJsonValueObject>(Obj));
+          }
+        }
       }
       Result->SetArrayField(TEXT("inputs"), InputsArr);
-
-      TArray<TSharedPtr<FJsonValue>> OutputsArr;
-      for (const FFunctionExpressionOutput& Out : FuncOutputs)
-      {
-        TSharedPtr<FJsonObject> Obj = McpHandlerUtils::CreateResultObject();
-        Obj->SetStringField(TEXT("name"), Out.Output.OutputName.ToString());
-        OutputsArr.Add(MakeShared<FJsonValueObject>(Obj));
-      }
       Result->SetArrayField(TEXT("outputs"), OutputsArr);
 
       // parameters
@@ -2777,9 +2774,18 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
       return true;
     }
 
+    if (UMaterialInstanceConstant* MaterialInstance = LoadObject<UMaterialInstanceConstant>(nullptr, *AssetPath))
+    {
+      TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+      Result->SetStringField(TEXT("assetClass"), MaterialInstance->GetClass()->GetName());
+      McpCollectMaterialInstanceInfo(MaterialInstance, Result.ToSharedRef(), true, false);
+      SendAutomationResponse(Socket, RequestId, true, TEXT("Material instance info retrieved."), Result);
+      return true;
+    }
+
     UMaterial *Material = LoadObject<UMaterial>(nullptr, *AssetPath);
     if (!Material) {
-      SendAutomationError(Socket, RequestId, TEXT("Could not load Material, MaterialFunction, or MaterialFunctionInstance."),
+      SendAutomationError(Socket, RequestId, TEXT("Could not load Material, MaterialInstanceConstant, MaterialFunction, or MaterialFunctionInstance."),
                           TEXT("ASSET_NOT_FOUND"));
       return true;
     }

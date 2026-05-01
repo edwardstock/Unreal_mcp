@@ -555,6 +555,26 @@ private:
                                TSharedPtr<FMcpBridgeWebSocket>
                                    RequestingSocket);
   bool
+  HandleGetMaterialInstanceInfo(const FString &RequestId, const FString &Action,
+                                const TSharedPtr<FJsonObject> &Payload,
+                                TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleFindMaterialExpressions(const FString &RequestId, const FString &Action,
+                                const TSharedPtr<FJsonObject> &Payload,
+                                TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleGetMaterialExpressionDetails(const FString &RequestId, const FString &Action,
+                                     const TSharedPtr<FJsonObject> &Payload,
+                                     TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleGetMaterialExpressionConnections(const FString &RequestId, const FString &Action,
+                                         const TSharedPtr<FJsonObject> &Payload,
+                                         TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleGetLandscapeMaterialContext(const FString &RequestId, const FString &Action,
+                                    const TSharedPtr<FJsonObject> &Payload,
+                                    TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
   HandleCreateMaterialComment(const FString &RequestId, const FString &Action,
                               const TSharedPtr<FJsonObject> &Payload,
                               TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
@@ -582,6 +602,10 @@ private:
   HandleRebuildMaterial(const FString &RequestId, const FString &Action,
                         const TSharedPtr<FJsonObject> &Payload,
                         TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleCompileMaterialDiagnostics(const FString &RequestId, const FString &Action,
+                                   const TSharedPtr<FJsonObject> &Payload,
+                                   TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
   // Landscape, foliage, and Niagara handlers
   bool HandleCreateLandscape(const FString &RequestId, const FString &Action,
                              const TSharedPtr<FJsonObject> &Payload,
