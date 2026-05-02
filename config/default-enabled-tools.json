@@ -1,0 +1,15 @@
+{
+  "$schema": "Tool names must match generated/tool-manifest.json. Run npm run gen:tool-defs after C++ changes.",
+  "enabled": [
+    "manage_asset",
+    "manage_level",
+    "control_editor",
+    "inspect",
+    "system_control",
+    "manage_pipeline",
+    "manage_tools",
+    "manage_material_authoring",
+    "manage_texture",
+    "manage_lighting"
+  ]
+}

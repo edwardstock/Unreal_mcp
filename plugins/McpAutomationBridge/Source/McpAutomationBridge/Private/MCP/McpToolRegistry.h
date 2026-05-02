@@ -16,7 +16,7 @@ class FMcpToolDefinition;
  * Thread safety: CacheMutex protects Tools, ToolsByName, CachedToolSchemas,
  * and bCacheValid. Register() and all read operations acquire CacheMutex.
  */
-class FMcpToolRegistry
+class MCPAUTOMATIONBRIDGE_API FMcpToolRegistry
 {
 public:
 	/** Get the singleton instance (Meyer's singleton). */
@@ -48,6 +48,13 @@ public:
 	 * Caches per-tool JSON objects on first call.
 	 */
 	TSharedPtr<FJsonObject> GetFilteredToolsResponse(const TSet<FString>& EnabledTools);
+
+	/**
+	 * Build the full tool manifest (one JSON object per registered tool) for
+	 * codegen / debug dumps. Reuses the per-tool cached schemas built by
+	 * EnsureCache, so this is cheap on repeat calls.
+	 */
+	TArray<TSharedPtr<FJsonObject>> BuildToolManifest();
 
 	/** Invalidate cached schemas (e.g. if tools are dynamically added at runtime). */
 	void InvalidateCache();

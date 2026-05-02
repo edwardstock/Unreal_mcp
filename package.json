@@ -20,6 +20,9 @@
   "scripts": {
     "build:core": "tsc -p tsconfig.json",
     "build": "npm run clean && npm run build:core",
+    "gen:tool-defs": "node scripts/generate-tool-defs.mjs",
+    "lint:tool-defs": "node scripts/lint-tool-defs.mjs",
+    "mcp:rebuild": "node scripts/rebuild-mcp.mjs",
     "build:watch": "tsc -p tsconfig.json --watch",
     "start": "node dist/cli.js",
     "dev": "ts-node-esm src/cli.ts",

@@ -172,6 +172,11 @@ FMcpSchemaBuilder& FMcpSchemaBuilder::FreeformObject(const FString& Name,
 	{
 		Prop->SetStringField(TEXT("description"), Description);
 	}
+	// Mark this as an intentionally any-shape object. JSON Schema-compliant
+	// (additionalProperties:true means any extra properties are allowed) and
+	// also lets the lint:tool-defs audit distinguish "freeform by design" from
+	// "Object() called without a sub-builder by mistake".
+	Prop->SetBoolField(TEXT("additionalProperties"), true);
 	AddProperty(Name, Prop);
 	return *this;
 }

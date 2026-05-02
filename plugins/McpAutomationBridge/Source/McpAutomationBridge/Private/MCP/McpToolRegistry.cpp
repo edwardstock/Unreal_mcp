@@ -107,6 +107,23 @@ TSharedPtr<FJsonObject> FMcpToolRegistry::BuildToolJson(FMcpToolDefinition* Tool
 	return ToolObj;
 }
 
+TArray<TSharedPtr<FJsonObject>> FMcpToolRegistry::BuildToolManifest()
+{
+	FScopeLock Lock(&CacheMutex);
+	EnsureCache();
+
+	TArray<TSharedPtr<FJsonObject>> Result;
+	Result.Reserve(Tools.Num());
+	for (const FMcpToolDefinition* Tool : Tools)
+	{
+		if (const TSharedPtr<FJsonObject>* Cached = CachedToolSchemas.Find(Tool->GetName()))
+		{
+			Result.Add(*Cached);
+		}
+	}
+	return Result;
+}
+
 void FMcpToolRegistry::InvalidateCache()
 {
 	FScopeLock Lock(&CacheMutex);
