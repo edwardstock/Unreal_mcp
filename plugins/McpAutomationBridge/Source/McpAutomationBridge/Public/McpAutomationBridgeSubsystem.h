@@ -606,6 +606,10 @@ private:
   HandleCompileMaterialDiagnostics(const FString &RequestId, const FString &Action,
                                    const TSharedPtr<FJsonObject> &Payload,
                                    TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  bool
+  HandleManageMaterialDiagnosticsAction(const FString &RequestId, const FString &Action,
+                                        const TSharedPtr<FJsonObject> &Payload,
+                                        TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
   // Landscape, foliage, and Niagara handlers
   bool HandleCreateLandscape(const FString &RequestId, const FString &Action,
                              const TSharedPtr<FJsonObject> &Payload,
@@ -866,6 +870,52 @@ private:
       const FString &RequestId, const FString &Action,
       const TSharedPtr<FJsonObject> &Payload,
       TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+
+  // Phase 8: Material Authoring per-domain dispatchers. Each method handles
+  // its own subset of subActions; returns true if it consumed the request,
+  // false to let the next domain dispatcher try. Implementations live in
+  // sibling McpAutomationBridge_MaterialAuthoring_*.cpp files.
+  bool HandleAuthoring_NodeOps(
+      const FString &SubAction, const FString &RequestId,
+      const TSharedPtr<FJsonObject> &Payload,
+      TSharedPtr<FMcpBridgeWebSocket> Socket);
+  bool HandleAuthoring_MaterialCreation(
+      const FString &SubAction, const FString &RequestId,
+      const TSharedPtr<FJsonObject> &Payload,
+      TSharedPtr<FMcpBridgeWebSocket> Socket);
+  bool HandleAuthoring_MaterialProperties(
+      const FString &SubAction, const FString &RequestId,
+      const TSharedPtr<FJsonObject> &Payload,
+      TSharedPtr<FMcpBridgeWebSocket> Socket);
+  bool HandleAuthoring_TextureNodes(
+      const FString &SubAction, const FString &RequestId,
+      const TSharedPtr<FJsonObject> &Payload,
+      TSharedPtr<FMcpBridgeWebSocket> Socket);
+  bool HandleAuthoring_ParameterNodes(
+      const FString &SubAction, const FString &RequestId,
+      const TSharedPtr<FJsonObject> &Payload,
+      TSharedPtr<FMcpBridgeWebSocket> Socket);
+  bool HandleAuthoring_AdvancedNodes(
+      const FString &SubAction, const FString &RequestId,
+      const TSharedPtr<FJsonObject> &Payload,
+      TSharedPtr<FMcpBridgeWebSocket> Socket);
+  bool HandleAuthoring_FunctionAuthoring(
+      const FString &SubAction, const FString &RequestId,
+      const TSharedPtr<FJsonObject> &Payload,
+      TSharedPtr<FMcpBridgeWebSocket> Socket);
+  bool HandleAuthoring_SpecializedMaterials(
+      const FString &SubAction, const FString &RequestId,
+      const TSharedPtr<FJsonObject> &Payload,
+      TSharedPtr<FMcpBridgeWebSocket> Socket);
+  bool HandleAuthoring_MaterialInstances(
+      const FString &SubAction, const FString &RequestId,
+      const TSharedPtr<FJsonObject> &Payload,
+      TSharedPtr<FMcpBridgeWebSocket> Socket);
+  bool HandleAuthoring_FunctionInstances(
+      const FString &SubAction, const FString &RequestId,
+      const TSharedPtr<FJsonObject> &Payload,
+      TSharedPtr<FMcpBridgeWebSocket> Socket);
+
   // Phase 9: Texture handlers
   bool HandleManageTextureAction(
       const FString &RequestId, const FString &Action,

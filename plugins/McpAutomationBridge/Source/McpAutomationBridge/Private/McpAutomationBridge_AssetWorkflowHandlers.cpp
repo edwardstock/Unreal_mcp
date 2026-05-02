@@ -84,6 +84,8 @@
 #include "Materials/MaterialExpressionTextureSample.h"
 #include "Materials/MaterialExpressionTime.h"
 #include "Materials/MaterialExpressionVertexColor.h"
+#include "Materials/MaterialExpressionMakeMaterialAttributes.h"
+#include "Materials/MaterialExpressionBreakMaterialAttributes.h"
 
 #if WITH_EDITOR
 
@@ -2923,8 +2925,8 @@ bool UMcpAutomationBridgeSubsystem::HandleCreateFolder(
     TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
     Resp->SetBoolField(TEXT("success"), true);
     Resp->SetStringField(TEXT("path"), SafePath);
-    // Add verification data
-    VerifyAssetExists(Resp, SafePath);
+    // verifiedPath/existsAfter must reflect folder existence, not asset existence
+    VerifyDirectoryExists(Resp, SafePath);
     SendAutomationResponse(Socket, RequestId, true, TEXT("Folder created"),
                            Resp, FString());
   } else {
@@ -4053,24 +4055,41 @@ bool UMcpAutomationBridgeSubsystem::HandleDoesAssetExist(
     const FString &RequestId, const TSharedPtr<FJsonObject> &Payload,
     TSharedPtr<FMcpBridgeWebSocket> Socket) {
 #if WITH_EDITOR
-  FString AssetPath;
-  Payload->TryGetStringField(TEXT("assetPath"), AssetPath);
-  if (AssetPath.IsEmpty()) {
-    SendAutomationResponse(Socket, RequestId, false, TEXT("assetPath required"),
-                           nullptr, TEXT("INVALID_ARGUMENT"));
+  // Accept both 'assetPath' (legacy) and 'path' (canonical for the tool); sibling
+  // actions like delete and create_folder already accept both. See SMOKE_BUGS.md bug #3.
+  FString InputPath;
+  Payload->TryGetStringField(TEXT("assetPath"), InputPath);
+  if (InputPath.IsEmpty()) {
+    Payload->TryGetStringField(TEXT("path"), InputPath);
+  }
+  if (InputPath.IsEmpty()) {
+    SendAutomationResponse(Socket, RequestId, false,
+                           TEXT("path (or assetPath) required"), nullptr,
+                           TEXT("INVALID_ARGUMENT"));
     return true;
   }
 
-  bool bExists = UEditorAssetLibrary::DoesAssetExist(AssetPath);
+  const bool bAssetExists = UEditorAssetLibrary::DoesAssetExist(InputPath);
+  const bool bDirectoryExists =
+      !bAssetExists && UEditorAssetLibrary::DoesDirectoryExist(InputPath);
+  const bool bExists = bAssetExists || bDirectoryExists;
 
   TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   Resp->SetBoolField(TEXT("success"), true);
   Resp->SetBoolField(TEXT("exists"), bExists);
-  Resp->SetStringField(TEXT("assetPath"), AssetPath);
-  SendAutomationResponse(Socket, RequestId, true,
-                         bExists ? TEXT("Asset exists")
-                                 : TEXT("Asset does not exist"),
-                         Resp, FString());
+  Resp->SetBoolField(TEXT("isDirectory"), bDirectoryExists);
+  Resp->SetStringField(TEXT("path"), InputPath);
+  // echo back assetPath for callers that key off the legacy field name
+  Resp->SetStringField(TEXT("assetPath"), InputPath);
+
+  const TCHAR* Message = TEXT("Asset does not exist");
+  if (bAssetExists) {
+    Message = TEXT("Asset exists");
+  } else if (bDirectoryExists) {
+    Message = TEXT("Directory exists");
+  }
+
+  SendAutomationResponse(Socket, RequestId, true, Message, Resp, FString());
   return true;
 #else
   SendAutomationError(RequestingSocket, RequestId, TEXT("Editor build required"), TEXT("NOT_SUPPORTED"));
@@ -4786,6 +4805,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
     ExpressionClass = UMaterialExpressionTime::StaticClass();
   } else if (NodeType.Equals(TEXT("VertexColor"), ESearchCase::IgnoreCase)) {
     ExpressionClass = UMaterialExpressionVertexColor::StaticClass();
+  } else if (NodeType.Equals(TEXT("MakeMaterialAttributes"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionMakeMaterialAttributes::StaticClass();
+  } else if (NodeType.Equals(TEXT("BreakMaterialAttributes"), ESearchCase::IgnoreCase)) {
+    ExpressionClass = UMaterialExpressionBreakMaterialAttributes::StaticClass();
   } else {
     // Try to find the class dynamically
     FString FullClassName = FString::Printf(TEXT("/Script/Engine.MaterialExpression%s"), *NodeType);
@@ -5075,32 +5098,104 @@ bool UMcpAutomationBridgeSubsystem::HandleConnectMaterialPins(
   const TArray<TObjectPtr<UMaterialExpression>>& Expressions = ExpressionsPtr ? *ExpressionsPtr : EmptyExprs;
 
   // Accept sourceNodeId/targetNodeId, sourceExpressionPath/targetExpressionPath, and fromExpression/toExpression indices.
+  // Also accept spec-style sourceExpression object, target object with kind/expression/inputName.
   FString SourceNodeId, TargetNodeId;
   int32 FromExpressionIndex = -1, ToExpressionIndex = -1;
 
   UMaterialExpression *FromExpression = nullptr;
   UMaterialExpression *ToExpression = nullptr;
 
-  FromExpression = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("sourceExpressionIndex"), TEXT("sourceNodeId"), TEXT("sourceExpressionPath"));
-  ToExpression = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("targetExpressionIndex"), TEXT("targetNodeId"), TEXT("targetExpressionPath"));
+  // Spec-style: sourceExpression as object or string
+  const TSharedPtr<FJsonObject>* SrcExprObj = nullptr;
+  if (Payload->TryGetObjectField(TEXT("sourceExpression"), SrcExprObj) && SrcExprObj)
+  {
+    int32 SrcIdx = INDEX_NONE;
+    FString SrcPath, SrcGuidStr, SrcName;
+    if ((*SrcExprObj)->TryGetNumberField(TEXT("expressionIndex"), SrcIdx))
+      FromExpression = McpFindGraphExpression(GraphOwner, FString(), SrcIdx);
+    else if ((*SrcExprObj)->TryGetStringField(TEXT("expressionPath"), SrcPath) && !SrcPath.IsEmpty())
+      FromExpression = McpFindGraphExpression(GraphOwner, SrcPath);
+    else if ((*SrcExprObj)->TryGetStringField(TEXT("expressionName"), SrcName) && !SrcName.IsEmpty())
+      FromExpression = McpFindGraphExpression(GraphOwner, SrcName);
+  }
+  else
+  {
+    FString SrcExprStr;
+    if (Payload->TryGetStringField(TEXT("sourceExpression"), SrcExprStr) && !SrcExprStr.IsEmpty())
+      FromExpression = McpFindGraphExpression(GraphOwner, SrcExprStr);
+  }
+
+  if (!FromExpression)
+    FromExpression = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("sourceExpressionIndex"), TEXT("sourceNodeId"), TEXT("sourceExpressionPath"));
+
   Payload->TryGetStringField(TEXT("sourceNodeId"), SourceNodeId);
   Payload->TryGetStringField(TEXT("targetNodeId"), TargetNodeId);
 
   if (!FromExpression && Payload->TryGetNumberField(TEXT("fromExpression"), FromExpressionIndex))
     FromExpression = McpFindGraphExpression(GraphOwner, FString(), FromExpressionIndex);
+
+  // Spec-style: target as object with kind, expression, inputName
+  FString TargetKind;
+  FString InputName;
+  const TSharedPtr<FJsonObject>* TargetObj = nullptr;
+  if (Payload->TryGetObjectField(TEXT("target"), TargetObj) && TargetObj)
+  {
+    (*TargetObj)->TryGetStringField(TEXT("kind"), TargetKind);
+    (*TargetObj)->TryGetStringField(TEXT("inputName"), InputName);
+    const TSharedPtr<FJsonObject>* TgtExprObj = nullptr;
+    if ((*TargetObj)->TryGetObjectField(TEXT("expression"), TgtExprObj) && TgtExprObj && !ToExpression)
+    {
+      int32 TgtIdx = INDEX_NONE;
+      FString TgtPath, TgtName;
+      if ((*TgtExprObj)->TryGetNumberField(TEXT("expressionIndex"), TgtIdx))
+        ToExpression = McpFindGraphExpression(GraphOwner, FString(), TgtIdx);
+      else if ((*TgtExprObj)->TryGetStringField(TEXT("expressionPath"), TgtPath) && !TgtPath.IsEmpty())
+        ToExpression = McpFindGraphExpression(GraphOwner, TgtPath);
+      else if ((*TgtExprObj)->TryGetStringField(TEXT("expressionName"), TgtName) && !TgtName.IsEmpty())
+        ToExpression = McpFindGraphExpression(GraphOwner, TgtName);
+    }
+  }
+
+  if (!ToExpression)
+    ToExpression = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("targetExpressionIndex"), TEXT("targetNodeId"), TEXT("targetExpressionPath"));
   if (!ToExpression && Payload->TryGetNumberField(TEXT("toExpression"), ToExpressionIndex))
     ToExpression = McpFindGraphExpression(GraphOwner, FString(), ToExpressionIndex);
 
-  FString InputName;
-  Payload->TryGetStringField(TEXT("inputName"), InputName);
+  if (InputName.IsEmpty()) Payload->TryGetStringField(TEXT("inputName"), InputName);
   if (InputName.IsEmpty()) Payload->TryGetStringField(TEXT("targetPin"), InputName);
   if (InputName.IsEmpty()) Payload->TryGetStringField(TEXT("sourcePin"), InputName);
 
+  // Resolve sourceOutputIndex from explicit field or by name lookup on source outputs
+  int32 SourceOutputIndex = 0;
+  {
+    double SrcOutIdx = 0;
+    if (Payload->TryGetNumberField(TEXT("sourceOutputIndex"), SrcOutIdx))
+      SourceOutputIndex = (int32)SrcOutIdx;
+    else
+    {
+      FString SrcOutName;
+      if (Payload->TryGetStringField(TEXT("sourceOutputName"), SrcOutName) && !SrcOutName.IsEmpty() && FromExpression)
+      {
+        const TArray<FExpressionOutput>& Outputs = FromExpression->GetOutputs();
+        for (int32 OIdx = 0; OIdx < Outputs.Num(); ++OIdx)
+        {
+          if (Outputs[OIdx].OutputName.ToString().Equals(SrcOutName, ESearchCase::IgnoreCase))
+          {
+            SourceOutputIndex = OIdx;
+            break;
+          }
+        }
+      }
+    }
+  }
+
   // Handle connection to main material node (only for UMaterial)
   bool bConnectToMainNode = false;
-  if (!ToExpression && (TargetNodeId.IsEmpty() || TargetNodeId == TEXT("Main")) && !InputName.IsEmpty())
+  if (TargetKind == TEXT("mainMaterialPin"))
     bConnectToMainNode = true;
-  else if (!ToExpression && !InputName.IsEmpty())
+  else if (!ToExpression && (TargetNodeId.IsEmpty() || TargetNodeId == TEXT("Main")) && !InputName.IsEmpty())
+    bConnectToMainNode = true;
+  else if (!ToExpression && !InputName.IsEmpty() && TargetKind.IsEmpty())
     bConnectToMainNode = true;
 
   if (bConnectToMainNode && FromExpression)
@@ -5203,12 +5298,14 @@ bool UMcpAutomationBridgeSubsystem::HandleConnectMaterialPins(
   }
 
   TargetInput->Expression = FromExpression;
+  TargetInput->OutputIndex = SourceOutputIndex;
   FString RebuildErr;
   McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
 
   TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
   McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
   Resp->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
+  Resp->SetNumberField(TEXT("sourceOutputIndex"), SourceOutputIndex);
   Resp->SetStringField(TEXT("sourceNodeId"), FromExpression->MaterialExpressionGuid.ToString());
   Resp->SetStringField(TEXT("targetNodeId"), ToExpression->MaterialExpressionGuid.ToString());
   Resp->SetStringField(TEXT("inputName"), InputName);

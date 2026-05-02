@@ -98,6 +98,12 @@ TSharedPtr<FJsonObject> FMcpToolRegistry::BuildToolJson(FMcpToolDefinition* Tool
 		ToolObj->SetObjectField(TEXT("inputSchema"), InputSchema);
 	}
 
+	TSharedPtr<FJsonObject> Annotations = Tool->BuildAnnotations();
+	if (Annotations.IsValid() && Annotations->Values.Num() > 0)
+	{
+		ToolObj->SetObjectField(TEXT("annotations"), Annotations);
+	}
+
 	return ToolObj;
 }
 

@@ -20,8 +20,7 @@ public:
 
 	TSharedPtr<FJsonObject> BuildInputSchema() const override
 	{
-		return FMcpSchemaBuilder()
-			.StringEnum(TEXT("action"), {
+		const TArray<FString> AuthoringActions = {
 				TEXT("create_material"),
 				TEXT("set_blend_mode"),
 				TEXT("set_shading_model"),
@@ -60,11 +59,45 @@ public:
 				TEXT("add_landscape_layer"),
 				TEXT("configure_layer_blend"),
 				TEXT("compile_material"),
-				TEXT("get_material_info")
-			}, TEXT("Material authoring action to perform"))
+				TEXT("get_material_info"),
+				TEXT("add_material_node"),
+				TEXT("update_function_input"),
+				TEXT("update_function_output"),
+				TEXT("add_material_function_call"),
+				TEXT("update_material_function_call"),
+				TEXT("add_texture_object"),
+				TEXT("add_texture_object_parameter"),
+				TEXT("add_texture_sample_parameter"),
+				TEXT("disconnect_input_pin"),
+				TEXT("remove_material_node"),
+				TEXT("move_material_node"),
+				TEXT("set_material_attributes_mode"),
+				TEXT("get_material_instance_info"),
+				TEXT("set_material_instance_parent"),
+				TEXT("get_material_instance_parameters"),
+				TEXT("set_material_instance_parameter"),
+				TEXT("reset_material_instance_parameter"),
+				TEXT("clear_material_instance_parameters"),
+				TEXT("bulk_set_material_instance_parameters"),
+				TEXT("create_material_function_instance"),
+				TEXT("get_material_function_instance_info"),
+				TEXT("set_material_function_instance_parent"),
+				TEXT("get_material_function_instance_parameters"),
+				TEXT("set_material_function_instance_parameter"),
+				TEXT("reset_material_function_instance_parameter"),
+				TEXT("clear_material_function_instance_parameters"),
+				TEXT("bulk_set_material_function_instance_parameters")
+			};
+
+		return FMcpSchemaBuilder()
+			.StringEnum(TEXT("subAction"), AuthoringActions, TEXT("Canonical material authoring sub-action to perform."))
+			.StringEnum(TEXT("action"), AuthoringActions, TEXT("Compatibility alias for subAction. New callers should use subAction."))
 			.String(TEXT("assetPath"), TEXT("Asset path (e.g., /Game/Path/Asset)."))
 			.String(TEXT("name"), TEXT("Name identifier."))
 			.String(TEXT("path"), TEXT("Directory path for asset creation."))
+			.String(TEXT("parentPath"), TEXT("Parent material or material function interface path."))
+			.String(TEXT("parentMaterial"), TEXT("Compatibility parent material path for material instances."))
+			.String(TEXT("nodeType"), TEXT("Material expression node type or class name."))
 			.StringEnum(TEXT("materialDomain"), {
 				TEXT("Surface"),
 				TEXT("DeferredDecal"),
@@ -99,6 +132,10 @@ public:
 			.Number(TEXT("x"), TEXT("Node X position."))
 			.Number(TEXT("y"), TEXT("Node Y position."))
 			.String(TEXT("texturePath"), TEXT("Texture asset path."))
+			.String(TEXT("runtimeVirtualTexturePath"), TEXT("Runtime virtual texture asset path."))
+			.String(TEXT("sparseVolumeTexturePath"), TEXT("Sparse volume texture asset path."))
+			.String(TEXT("fontPath"), TEXT("Font asset path."))
+			.Integer(TEXT("fontPage"), TEXT("Font page index."))
 			.StringEnum(TEXT("samplerType"), {
 				TEXT("Color"),
 				TEXT("LinearColor"),
@@ -112,11 +149,19 @@ public:
 			.Number(TEXT("uTiling"), TEXT("U tiling factor."))
 			.Number(TEXT("vTiling"), TEXT("V tiling factor."))
 			.String(TEXT("parameterName"), TEXT("Name of the parameter."))
+			.FreeformObject(TEXT("parameter"), TEXT("Material parameter identity: name, type, association, and index."))
 			.FreeformObject(TEXT("defaultValue"),
 				TEXT("Default value for parameter (number for scalar, object for vector, bool for switch)."))
+			.FreeformObject(TEXT("previewValue"), TEXT("Preview value for material function input authoring."))
 			.String(TEXT("group"), TEXT("Group name."))
+			.Integer(TEXT("sortPriority"), TEXT("Sort priority for function inputs and parameters."))
+			.Bool(TEXT("usePreviewValueAsDefault"), TEXT("Use preview value as default for function input."))
+			.StringEnum(TEXT("blendInputRelevance"), {
+				TEXT("General")
+			}, TEXT("Material function input relevance. Authoring currently accepts only General."))
 			.FreeformObject(TEXT("value"),
 				TEXT("Value to set (number, vector object, or texture path)."))
+			.ArrayOfObjects(TEXT("overrides"), TEXT("Bulk parameter override list."))
 			.StringEnum(TEXT("operation"), {
 				TEXT("Add"),
 				TEXT("Subtract"),
@@ -154,6 +199,14 @@ public:
 			.String(TEXT("description"),
 				TEXT("Description for custom expression or function."))
 			.String(TEXT("sourceNodeId"), TEXT("Source node ID for connection."))
+			.FreeformObject(TEXT("sourceExpression"), TEXT("ExpressionTarget object for source expression."))
+			.FreeformObject(TEXT("targetExpression"), TEXT("ExpressionTarget object for target expression."))
+			.FreeformObject(TEXT("expression"), TEXT("ExpressionTarget object."))
+			.FreeformObject(TEXT("target"), TEXT("Connection target object."))
+			.Integer(TEXT("sourceOutputIndex"), TEXT("Source expression output index."))
+			.String(TEXT("sourceOutputName"), TEXT("Source expression output name."))
+			.String(TEXT("targetInputName"), TEXT("Target expression input name."))
+			.String(TEXT("targetMaterialPin"), TEXT("Main material pin name."))
 			.String(TEXT("sourcePin"), TEXT("Source pin name (output)."))
 			.String(TEXT("targetNodeId"), TEXT("Target node ID for connection."))
 			.String(TEXT("targetPin"), TEXT("Target pin name (input)."))
@@ -163,6 +216,7 @@ public:
 			.Bool(TEXT("exposeToLibrary"),
 				TEXT("Expose function to material library."))
 			.String(TEXT("inputName"), TEXT("Name of the input."))
+			.String(TEXT("outputName"), TEXT("Name of the output."))
 			.StringEnum(TEXT("inputType"), {
 				TEXT("Float1"),
 				TEXT("Float2"),
@@ -175,6 +229,15 @@ public:
 			}, TEXT("Type of function input/output."))
 			.String(TEXT("parentMaterial"),
 				TEXT("Path to parent material for instances."))
+			.StringEnum(TEXT("instanceKind"), {
+				TEXT("function"),
+				TEXT("materialLayer"),
+				TEXT("materialLayerBlend")
+			}, TEXT("Material function instance kind."))
+			.ArrayOfObjects(TEXT("inputs"), TEXT("Custom expression input definitions."))
+			.ArrayOfObjects(TEXT("additionalOutputs"), TEXT("Custom expression additional output definitions."))
+			.ArrayOfObjects(TEXT("additionalDefines"), TEXT("Custom expression additional define definitions."))
+			.Array(TEXT("includeFilePaths"), TEXT("Custom expression include file paths."))
 			.String(TEXT("layerName"), TEXT("Name of the layer."))
 			.StringEnum(TEXT("blendType"), {
 				TEXT("LB_WeightBlend"),
@@ -184,7 +247,7 @@ public:
 			.ArrayOfObjects(TEXT("layers"),
 				TEXT("Array of layer configurations for layer blend."))
 			.Bool(TEXT("save"), TEXT("Save the asset(s) after the operation."))
-			.Required({TEXT("action")})
+			.Required({TEXT("subAction")})
 			.Build();
 	}
 };

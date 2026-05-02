@@ -1787,8 +1787,71 @@ inline int32 DeleteWorldPackagesByPath(const TArray<FAssetData>& WorldAssets)
 }
 
 /**
+ * Non-interactive registry+filesystem cleanup for an already-empty content folder.
+ *
+ * UEditorAssetLibrary::DeleteDirectory routes through the editor's content-data sources and
+ * can pop a confirmation dialog under some engine paths. This helper performs the pure
+ * registry/filesystem work that McpSafeDeleteFolder does in its tail (steps 9-10) so that the
+ * empty-folder fast path stays headless.
+ *
+ * Caller is responsible for ensuring the folder contains no remaining assets. Returns true if
+ * the folder is gone from both the asset registry and disk after the call.
+ */
+inline bool McpRemoveEmptyContentFolder(const FString& FolderPath)
+{
+    FAssetRegistryModule& AssetRegistryModule =
+        FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+    TArray<FString> SubPathsToRemove;
+    AssetRegistry.GetSubPaths(FolderPath, SubPathsToRemove, true);
+    SubPathsToRemove.Sort([](const FString& A, const FString& B)
+    {
+        return A.Len() > B.Len();
+    });
+    for (const FString& SubPath : SubPathsToRemove)
+    {
+        AssetRegistry.RemovePath(SubPath);
+    }
+    AssetRegistry.RemovePath(FolderPath);
+
+    FString LocalPath;
+    if (FPackageName::TryConvertLongPackageNameToFilename(FolderPath, LocalPath))
+    {
+        IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+        if (PlatformFile.DirectoryExists(*LocalPath))
+        {
+            PlatformFile.DeleteDirectoryRecursively(*LocalPath);
+            if (PlatformFile.DirectoryExists(*LocalPath))
+            {
+                FlushRenderingCommands();
+                if (GEditor)
+                {
+                    GEditor->ForceGarbageCollection(true);
+                }
+                FlushRenderingCommands();
+                FPlatformProcess::Sleep(0.05f);
+                PlatformFile.DeleteDirectoryRecursively(*LocalPath);
+            }
+        }
+    }
+
+    bool bDirectoryExistsOnDisk = false;
+    FString VerifyLocalPath;
+    if (FPackageName::TryConvertLongPackageNameToFilename(FolderPath, VerifyLocalPath))
+    {
+        bDirectoryExistsOnDisk = FPlatformFileManager::Get().GetPlatformFile().DirectoryExists(*VerifyLocalPath);
+    }
+
+    TArray<FString> RemainingSubPaths;
+    AssetRegistry.GetSubPaths(FolderPath, RemainingSubPaths, true);
+
+    return !bDirectoryExistsOnDisk && RemainingSubPaths.Num() == 0;
+}
+
+/**
  * Safely delete a folder and all its contents with proper cleanup.
- * 
+ *
  * CRITICAL FOR UE 5.7+:
  * This function prevents crashes during folder deletion by:
  * 1. Enumerating all assets using REGISTRY ONLY (no GetAsset/GetClass)
@@ -1821,8 +1884,11 @@ inline bool McpSafeDeleteFolder(const FString& FolderPath, bool bForce = true)
     if (AllAssets.Num() == 0)
     {
         UE_LOG(LogMcpSafeOperations, Log, TEXT("McpSafeDeleteFolder: No assets found in '%s'"), *FolderPath);
-        // No assets - just delete the empty folder
-        return UEditorAssetLibrary::DeleteDirectory(FolderPath);
+        // Important!
+        // Avoid UEditorAssetLibrary::DeleteDirectory here - that path can route through the
+        // content-data UI helpers and pop a confirmation under some UE 5.7 paths. The pure
+        // registry+filesystem helper keeps the call fully non-interactive.
+        return McpRemoveEmptyContentFolder(FolderPath);
     }
     
     UE_LOG(LogMcpSafeOperations, Log, TEXT("McpSafeDeleteFolder: Found %d assets in '%s'"), AllAssets.Num(), *FolderPath);
@@ -2024,12 +2090,44 @@ RiskyAnimationAssets.Num(), SafeAssets.Num(), WorldAssets.Num());
                 McpPreClearBlueprintActionDatabase(SafeObject);
             }
             
+            // Important!
+            // Use ObjectTools::DeleteObjects with bShowConfirmation=false to keep deletion fully
+            // non-interactive. AssetViewUtils::DeleteAssets() routes through the editor UI helper
+            // and pops a modal confirmation dialog, which deadlocks unattended automation
+            // (see openspec/changes/complete-material-authoring-mcp/SMOKE_BUGS.md bug #1).
             UE_LOG(LogMcpSafeOperations, Log,
-                TEXT("McpSafeDeleteFolder: Deleting %d file-backed safe assets via AssetViewUtils::DeleteAssets"),
+                TEXT("McpSafeDeleteFolder: Deleting %d file-backed safe assets via ObjectTools::DeleteObjects (headless)"),
                 SafeObjectsToDelete.Num());
 
-            AssetViewUtils::DeleteAssets(SafeObjectsToDelete);
-            
+            const int32 SafeAssetTotal = SafeObjectsToDelete.Num();
+            const int32 DeletedSafe = ObjectTools::DeleteObjects(SafeObjectsToDelete, /*bShowConfirmation=*/ false);
+            if (DeletedSafe < SafeAssetTotal)
+            {
+                // Escalate to ForceDeleteObjects for any remaining referenced assets; mirrors the
+                // risky-animation branch which already uses ObjectTools::ForceDeleteObjects.
+                UE_LOG(LogMcpSafeOperations, Warning,
+                    TEXT("McpSafeDeleteFolder: ObjectTools::DeleteObjects deleted %d/%d safe assets; escalating to ForceDeleteObjects"),
+                    DeletedSafe, SafeAssetTotal);
+
+                TArray<UObject*> RemainingSafeObjects;
+                RemainingSafeObjects.Reserve(SafeObjectsToDelete.Num());
+                for (UObject* SafeObject : SafeObjectsToDelete)
+                {
+                    if (IsValid(SafeObject))
+                    {
+                        RemainingSafeObjects.Add(SafeObject);
+                    }
+                }
+
+                if (RemainingSafeObjects.Num() > 0)
+                {
+                    const int32 ForceDeleted = ObjectTools::ForceDeleteObjects(RemainingSafeObjects, /*bShowConfirmation=*/ false);
+                    UE_LOG(LogMcpSafeOperations, Log,
+                        TEXT("McpSafeDeleteFolder: ForceDeleteObjects deleted %d/%d remaining safe assets"),
+                        ForceDeleted, RemainingSafeObjects.Num());
+                }
+            }
+
             // Post-deletion quiesce
             McpQuiesceAfterBatchDelete(SafeObjectsToDelete);
         }

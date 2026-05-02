@@ -18,6 +18,18 @@ public:
 
 	FString GetCategory() const override { return TEXT("core"); }
 
+	TSharedPtr<FJsonObject> BuildAnnotations() const override
+	{
+		// manage_asset can permanently delete and overwrite content (delete, delete_asset,
+		// delete_assets, bulk_delete, rename, move, fixup_redirectors, etc.). Mark the tool
+		// destructive so MCP clients (e.g. Claude Code) do not auto-approve calls and the
+		// user gets the standard Allow once / Allow always / Deny prompt before execution.
+		auto Annotations = MakeShared<FJsonObject>();
+		Annotations->SetBoolField(TEXT("destructiveHint"), true);
+		Annotations->SetBoolField(TEXT("idempotentHint"), false);
+		return Annotations;
+	}
+
 	TSharedPtr<FJsonObject> BuildInputSchema() const override
 	{
 		return FMcpSchemaBuilder()

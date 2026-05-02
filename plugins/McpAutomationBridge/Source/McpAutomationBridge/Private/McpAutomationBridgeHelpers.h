@@ -3369,6 +3369,21 @@ static inline bool VerifyAssetExists(TSharedPtr<FJsonObject> Response, const FSt
 }
 
 /**
+ * Verify a content-browser directory exists at the given path and add to response.
+ *
+ * UEditorAssetLibrary::DoesAssetExist() returns false for folders, so HandleCreateFolder must
+ * use this helper to populate existsAfter correctly (see openspec SMOKE_BUGS.md bug #2).
+ */
+static inline bool VerifyDirectoryExists(TSharedPtr<FJsonObject> Response, const FString& Path) {
+  bool bExists = UEditorAssetLibrary::DoesDirectoryExist(Path);
+  if (Response) {
+    Response->SetStringField(TEXT("verifiedPath"), Path);
+    Response->SetBoolField(TEXT("existsAfter"), bExists);
+  }
+  return bExists;
+}
+
+/**
  * Check if a UE asset directory path ACTUALLY exists on disk.
  * 
  * UEditorAssetLibrary::DoesDirectoryExist() uses the AssetRegistry cache which may
@@ -3470,6 +3485,11 @@ static inline bool DoesParentDirectoryExist(const FString& AssetPath) {
 #include "Materials/MaterialExpressionParameter.h"
 #include "Materials/MaterialInterface.h"
 #include "StaticParameterSet.h"
+#if __has_include("ScopedTransaction.h")
+#include "ScopedTransaction.h"
+#elif __has_include("Misc/ScopedTransaction.h")
+#include "Misc/ScopedTransaction.h"
+#endif
 #endif
 
 enum class EMcpMaterialGraphOwnerKind : uint8
@@ -3489,6 +3509,103 @@ struct FMcpMaterialGraphOwner
     // true for UMaterialFunctionInstance - edit ops must be rejected
     bool bReadOnly = false;
 };
+
+enum class EMcpMaterialFamilyAssetKind : uint8
+{
+    Material,
+    MaterialFunction,
+    MaterialInstance,
+    MaterialFunctionInstance,
+};
+
+struct FMcpMaterialFamilyAsset
+{
+    UObject* Asset = nullptr;
+    UObject* GraphOwner = nullptr;
+    UObject* OverrideOwner = nullptr;
+    EMcpMaterialFamilyAssetKind Kind = EMcpMaterialFamilyAssetKind::Material;
+    bool bHasEditableGraph = false;
+    bool bHasParameterOverrides = false;
+};
+
+static inline FString McpMaterialFamilyAssetKindToString(EMcpMaterialFamilyAssetKind Kind)
+{
+    switch (Kind)
+    {
+    case EMcpMaterialFamilyAssetKind::Material:
+        return TEXT("Material");
+    case EMcpMaterialFamilyAssetKind::MaterialFunction:
+        return TEXT("MaterialFunction");
+    case EMcpMaterialFamilyAssetKind::MaterialInstance:
+        return TEXT("MaterialInstance");
+    case EMcpMaterialFamilyAssetKind::MaterialFunctionInstance:
+        return TEXT("MaterialFunctionInstance");
+    default:
+        return TEXT("Unknown");
+    }
+}
+
+static inline bool McpResolveMaterialFamilyAsset(
+    const FString& AssetPath,
+    FMcpMaterialFamilyAsset& Out,
+    FString& OutError)
+{
+#if WITH_EDITOR
+    Out = FMcpMaterialFamilyAsset();
+
+    if (UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath))
+    {
+        Out.Asset = Mat;
+        Out.GraphOwner = Mat;
+        Out.Kind = EMcpMaterialFamilyAssetKind::Material;
+        Out.bHasEditableGraph = true;
+        return true;
+    }
+
+    if (UMaterialFunction* Func = LoadObject<UMaterialFunction>(nullptr, *AssetPath))
+    {
+        Out.Asset = Func;
+        Out.GraphOwner = Func;
+        Out.Kind = EMcpMaterialFamilyAssetKind::MaterialFunction;
+        Out.bHasEditableGraph = true;
+        return true;
+    }
+
+    if (UMaterialInstanceConstant* MatInst = LoadObject<UMaterialInstanceConstant>(nullptr, *AssetPath))
+    {
+        Out.Asset = MatInst;
+        Out.OverrideOwner = MatInst;
+        Out.Kind = EMcpMaterialFamilyAssetKind::MaterialInstance;
+        Out.bHasParameterOverrides = true;
+        return true;
+    }
+
+    if (UMaterialFunctionInstance* FuncInst = LoadObject<UMaterialFunctionInstance>(nullptr, *AssetPath))
+    {
+        Out.Asset = FuncInst;
+        Out.GraphOwner = FuncInst->GetBaseFunction();
+        Out.OverrideOwner = FuncInst;
+        Out.Kind = EMcpMaterialFamilyAssetKind::MaterialFunctionInstance;
+        Out.bHasParameterOverrides = true;
+        return true;
+    }
+
+    if (UObject* Generic = LoadObject<UObject>(nullptr, *AssetPath))
+    {
+        OutError = FString::Printf(
+            TEXT("Asset '%s' (class: %s) is not a supported material-family asset"),
+            *AssetPath,
+            *Generic->GetClass()->GetName());
+        return false;
+    }
+
+    OutError = FString::Printf(TEXT("Asset not found: %s"), *AssetPath);
+    return false;
+#else
+    OutError = TEXT("Material-family asset resolution requires an editor build");
+    return false;
+#endif
+}
 
 // Resolves assetPath to FMcpMaterialGraphOwner.
 // Returns false and fills OutError on failure.
@@ -3658,6 +3775,267 @@ static inline UMaterialExpression* McpFindGraphExpression(
     return nullptr;
 }
 
+static inline int32 McpGraphExpressionIndex(
+    const FMcpMaterialGraphOwner& Owner,
+    const UMaterialExpression* Expression)
+{
+#if WITH_EDITOR
+    const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+    if (!Exprs || !Expression)
+    {
+        return INDEX_NONE;
+    }
+    for (int32 Index = 0; Index < Exprs->Num(); ++Index)
+    {
+        if ((*Exprs)[Index] == Expression)
+        {
+            return Index;
+        }
+    }
+#endif
+    return INDEX_NONE;
+}
+
+static inline TSharedPtr<FJsonObject> McpBuildMaterialExpressionIdentity(
+    const FMcpMaterialGraphOwner& Owner,
+    UMaterialExpression* Expression,
+    int32 ExpressionIndex = INDEX_NONE)
+{
+    TSharedPtr<FJsonObject> Identity = MakeShared<FJsonObject>();
+#if WITH_EDITOR
+    if (ExpressionIndex == INDEX_NONE)
+    {
+        ExpressionIndex = McpGraphExpressionIndex(Owner, Expression);
+    }
+    Identity->SetNumberField(TEXT("expressionIndex"), ExpressionIndex);
+    if (Expression)
+    {
+        Identity->SetStringField(TEXT("expressionName"), Expression->GetName());
+        Identity->SetStringField(TEXT("expressionPath"), Expression->GetPathName());
+        Identity->SetStringField(TEXT("expressionGuid"), Expression->MaterialExpressionGuid.ToString());
+        Identity->SetStringField(TEXT("class"), Expression->GetClass()->GetName());
+    }
+    if (Owner.Asset)
+    {
+        Identity->SetStringField(TEXT("ownerPath"), Owner.Asset->GetPathName());
+    }
+#endif
+    return Identity;
+}
+
+static inline TSharedPtr<FJsonObject> McpBuildMaterialObjectReferenceSummary(UObject* Object)
+{
+    TSharedPtr<FJsonObject> Summary = MakeShared<FJsonObject>();
+#if WITH_EDITOR
+    Summary->SetBoolField(TEXT("isNull"), Object == nullptr);
+    if (Object)
+    {
+        Summary->SetStringField(TEXT("name"), Object->GetName());
+        Summary->SetStringField(TEXT("path"), Object->GetPathName());
+        Summary->SetStringField(TEXT("class"), Object->GetClass()->GetName());
+    }
+#endif
+    return Summary;
+}
+
+static inline TSharedPtr<FJsonObject> McpBuildBoundedMaterialObjectDump(
+    UObject* Object,
+    int32 MaxProperties,
+    const TArray<FString>& PropertyAllowList,
+    bool& bOutTruncated)
+{
+    TSharedPtr<FJsonObject> Dump = MakeShared<FJsonObject>();
+    bOutTruncated = false;
+#if WITH_EDITOR
+    if (!Object)
+    {
+        return Dump;
+    }
+
+    int32 AddedProperties = 0;
+    for (TFieldIterator<FProperty> It(Object->GetClass()); It; ++It)
+    {
+        FProperty* Property = *It;
+        if (!Property)
+        {
+            continue;
+        }
+
+        const FString PropertyName = Property->GetName();
+        if (PropertyAllowList.Num() > 0 && !PropertyAllowList.Contains(PropertyName))
+        {
+            continue;
+        }
+
+        if (AddedProperties >= MaxProperties)
+        {
+            bOutTruncated = true;
+            break;
+        }
+
+        if (FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
+        {
+            UObject* ReferencedObject = ObjectProperty->GetObjectPropertyValue_InContainer(Object);
+            Dump->SetObjectField(PropertyName, McpBuildMaterialObjectReferenceSummary(ReferencedObject));
+        }
+        else
+        {
+            FString TextValue;
+            const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Object);
+            MCP_PROPERTY_EXPORT_TEXT(Property, TextValue, ValuePtr, nullptr, Object, PPF_None);
+            Dump->SetStringField(PropertyName, TextValue);
+        }
+        ++AddedProperties;
+    }
+#endif
+    return Dump;
+}
+
+enum class EMcpMaterialTypedValueKind : uint8
+{
+    Scalar,
+    Vector,
+    DoubleVector,
+    Texture,
+    RuntimeVirtualTexture,
+    SparseVolumeTexture,
+    Font,
+    StaticSwitch,
+    StaticComponentMask,
+    Unknown,
+};
+
+struct FMcpMaterialTypedValue
+{
+    EMcpMaterialTypedValueKind Kind = EMcpMaterialTypedValueKind::Unknown;
+    double Scalar = 0.0;
+    FLinearColor Vector = FLinearColor::Transparent;
+    FVector4d DoubleVector = FVector4d(0.0, 0.0, 0.0, 0.0);
+    UObject* Object = nullptr;
+    int32 FontPage = 0;
+    bool bEnabled = false;
+    bool bMaskR = false;
+    bool bMaskG = false;
+    bool bMaskB = false;
+    bool bMaskA = false;
+};
+
+static inline EMcpMaterialTypedValueKind McpParseMaterialTypedValueKind(const FString& Type)
+{
+    if (Type.Equals(TEXT("Scalar"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::Scalar;
+    if (Type.Equals(TEXT("Vector"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::Vector;
+    if (Type.Equals(TEXT("DoubleVector"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::DoubleVector;
+    if (Type.Equals(TEXT("Texture"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::Texture;
+    if (Type.Equals(TEXT("RuntimeVirtualTexture"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::RuntimeVirtualTexture;
+    if (Type.Equals(TEXT("SparseVolumeTexture"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::SparseVolumeTexture;
+    if (Type.Equals(TEXT("Font"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::Font;
+    if (Type.Equals(TEXT("StaticSwitch"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::StaticSwitch;
+    if (Type.Equals(TEXT("StaticComponentMask"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::StaticComponentMask;
+    return EMcpMaterialTypedValueKind::Unknown;
+}
+
+static inline bool McpParseMaterialTypedValue(
+    const TSharedPtr<FJsonObject>& ParameterObject,
+    const TSharedPtr<FJsonObject>& ValueObject,
+    FMcpMaterialTypedValue& OutValue,
+    FString& OutError)
+{
+#if WITH_EDITOR
+    if (!ParameterObject.IsValid() || !ValueObject.IsValid())
+    {
+        OutError = TEXT("parameter and value objects are required");
+        return false;
+    }
+
+    FString Type;
+    if (!ParameterObject->TryGetStringField(TEXT("type"), Type) || Type.IsEmpty())
+    {
+        OutError = TEXT("parameter.type is required");
+        return false;
+    }
+
+    OutValue = FMcpMaterialTypedValue();
+    OutValue.Kind = McpParseMaterialTypedValueKind(Type);
+
+    switch (OutValue.Kind)
+    {
+    case EMcpMaterialTypedValueKind::Scalar:
+        if (!ValueObject->TryGetNumberField(TEXT("value"), OutValue.Scalar))
+        {
+            OutError = TEXT("Scalar value requires numeric value");
+            return false;
+        }
+        return true;
+    case EMcpMaterialTypedValueKind::Vector:
+        ValueObject->TryGetNumberField(TEXT("r"), OutValue.Vector.R);
+        ValueObject->TryGetNumberField(TEXT("g"), OutValue.Vector.G);
+        ValueObject->TryGetNumberField(TEXT("b"), OutValue.Vector.B);
+        ValueObject->TryGetNumberField(TEXT("a"), OutValue.Vector.A);
+        return true;
+    case EMcpMaterialTypedValueKind::DoubleVector:
+        ValueObject->TryGetNumberField(TEXT("x"), OutValue.DoubleVector.X);
+        ValueObject->TryGetNumberField(TEXT("y"), OutValue.DoubleVector.Y);
+        ValueObject->TryGetNumberField(TEXT("z"), OutValue.DoubleVector.Z);
+        ValueObject->TryGetNumberField(TEXT("w"), OutValue.DoubleVector.W);
+        return true;
+    case EMcpMaterialTypedValueKind::Texture:
+    case EMcpMaterialTypedValueKind::RuntimeVirtualTexture:
+    case EMcpMaterialTypedValueKind::SparseVolumeTexture:
+    {
+        FString AssetPath;
+        if (!ValueObject->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+        {
+            OutError = TEXT("Object value requires assetPath");
+            return false;
+        }
+        OutValue.Object = LoadObject<UObject>(nullptr, *AssetPath);
+        if (!OutValue.Object)
+        {
+            OutError = FString::Printf(TEXT("Could not load value asset: %s"), *AssetPath);
+            return false;
+        }
+        return true;
+    }
+    case EMcpMaterialTypedValueKind::Font:
+    {
+        FString FontPath;
+        if (!ValueObject->TryGetStringField(TEXT("fontPath"), FontPath) || FontPath.IsEmpty())
+        {
+            OutError = TEXT("Font value requires fontPath");
+            return false;
+        }
+        OutValue.Object = LoadObject<UObject>(nullptr, *FontPath);
+        ValueObject->TryGetNumberField(TEXT("fontPage"), OutValue.FontPage);
+        if (!OutValue.Object)
+        {
+            OutError = FString::Printf(TEXT("Could not load font asset: %s"), *FontPath);
+            return false;
+        }
+        return true;
+    }
+    case EMcpMaterialTypedValueKind::StaticSwitch:
+        if (!ValueObject->TryGetBoolField(TEXT("enabled"), OutValue.bEnabled))
+        {
+            OutError = TEXT("StaticSwitch value requires enabled");
+            return false;
+        }
+        return true;
+    case EMcpMaterialTypedValueKind::StaticComponentMask:
+        ValueObject->TryGetBoolField(TEXT("r"), OutValue.bMaskR);
+        ValueObject->TryGetBoolField(TEXT("g"), OutValue.bMaskG);
+        ValueObject->TryGetBoolField(TEXT("b"), OutValue.bMaskB);
+        ValueObject->TryGetBoolField(TEXT("a"), OutValue.bMaskA);
+        return true;
+    default:
+        OutError = FString::Printf(TEXT("Unsupported material typed value: %s"), *Type);
+        return false;
+    }
+#else
+    OutError = TEXT("Material typed value parsing requires an editor build");
+    return false;
+#endif
+}
+
 // Saves/rebuilds the material graph owner after edit operations.
 // Returns false with OutError when Owner.bReadOnly is true.
 static inline bool McpRebuildMaterialGraphOwner(
@@ -3696,6 +4074,112 @@ static inline bool McpRebuildMaterialGraphOwner(
     return false;
 #endif
 }
+
+struct FMcpMaterialMutationLifecycle
+{
+#if WITH_EDITOR
+    TUniquePtr<FScopedTransaction> Transaction;
+#endif
+    TArray<UObject*> MutatedObjects;
+    bool bSave = false;
+
+    explicit FMcpMaterialMutationLifecycle(const FText& TransactionText, bool bInSave = false)
+        : bSave(bInSave)
+    {
+#if WITH_EDITOR
+        Transaction = MakeUnique<FScopedTransaction>(TransactionText);
+#endif
+    }
+
+    void Modify(UObject* Object)
+    {
+#if WITH_EDITOR
+        if (Object && !MutatedObjects.Contains(Object))
+        {
+            Object->Modify();
+            MutatedObjects.Add(Object);
+        }
+#endif
+    }
+
+    bool FinalizeGraphOwner(
+        const FMcpMaterialGraphOwner& Owner,
+        bool& bOutSaved,
+        bool& bOutDirty,
+        FString& OutError)
+    {
+        bOutSaved = false;
+        bOutDirty = false;
+#if WITH_EDITOR
+        if (Owner.Asset)
+        {
+            Modify(Owner.Asset);
+        }
+        if (Owner.GraphSource && Owner.GraphSource != Owner.Asset)
+        {
+            Modify(Owner.GraphSource);
+        }
+
+        if (!McpRebuildMaterialGraphOwner(Owner, OutError))
+        {
+            return false;
+        }
+
+        UObject* DirtyObject = Owner.GraphSource ? Owner.GraphSource : Owner.Asset;
+        bOutDirty = DirtyObject && DirtyObject->GetOutermost() && DirtyObject->GetOutermost()->IsDirty();
+        if (bSave && DirtyObject)
+        {
+            bOutSaved = McpSafeAssetSave(DirtyObject);
+            if (!bOutSaved)
+            {
+                OutError = TEXT("save-failed");
+                return false;
+            }
+            bOutDirty = DirtyObject->GetOutermost() && DirtyObject->GetOutermost()->IsDirty();
+        }
+        return true;
+#else
+        OutError = TEXT("Material mutation lifecycle requires an editor build");
+        return false;
+#endif
+    }
+
+    bool FinalizeObject(
+        UObject* Object,
+        bool& bOutSaved,
+        bool& bOutDirty,
+        FString& OutError)
+    {
+        bOutSaved = false;
+        bOutDirty = false;
+#if WITH_EDITOR
+        if (!Object)
+        {
+            OutError = TEXT("invalid-asset");
+            return false;
+        }
+        Modify(Object);
+        Object->PreEditChange(nullptr);
+        Object->PostEditChange();
+        Object->MarkPackageDirty();
+        bOutDirty = Object->GetOutermost() && Object->GetOutermost()->IsDirty();
+        if (bSave)
+        {
+            bOutSaved = McpSafeAssetSave(Object);
+            if (!bOutSaved)
+            {
+                OutError = TEXT("save-failed");
+                return false;
+            }
+            bOutDirty = Object->GetOutermost() && Object->GetOutermost()->IsDirty();
+        }
+        return true;
+#else
+        OutError = TEXT("Material mutation lifecycle requires an editor build");
+        return false;
+#endif
+    }
+};
 
 // Adds function instance parameter overrides to a JSON object.
 // Used by get_material_info for MaterialFunctionInstance assets.
