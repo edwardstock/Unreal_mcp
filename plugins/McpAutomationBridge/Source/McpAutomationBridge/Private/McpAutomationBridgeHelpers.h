@@ -3718,6 +3718,53 @@ static inline TArray<TObjectPtr<UMaterialExpression>>* McpGetGraphExpressionsMut
         McpGetGraphExpressions(Owner));
 }
 
+// N6: infer sampler type from texture compression settings when samplerType not provided
+static inline EMaterialSamplerType McpInferSamplerTypeFromTexture(const UTexture* Texture)
+{
+    if (!Texture) return SAMPLERTYPE_Color;
+    switch (Texture->CompressionSettings)
+    {
+    case TC_Normalmap:
+        return SAMPLERTYPE_Normal;
+    case TC_Grayscale:
+    case TC_Alpha:
+    case TC_DistanceFieldFont:
+        return Texture->SRGB ? SAMPLERTYPE_Grayscale : SAMPLERTYPE_LinearGrayscale;
+    case TC_Masks:
+        return SAMPLERTYPE_Masks;
+    default:
+        return SAMPLERTYPE_Color;
+    }
+}
+
+static inline EMaterialSamplerType McpParseSamplerTypeString(const FString& SamplerTypeStr)
+{
+    if (SamplerTypeStr == TEXT("LinearColor")) return SAMPLERTYPE_LinearColor;
+    if (SamplerTypeStr == TEXT("Normal")) return SAMPLERTYPE_Normal;
+    if (SamplerTypeStr == TEXT("Masks")) return SAMPLERTYPE_Masks;
+    if (SamplerTypeStr == TEXT("Alpha")) return SAMPLERTYPE_Alpha;
+    if (SamplerTypeStr == TEXT("Grayscale")) return SAMPLERTYPE_Grayscale;
+    if (SamplerTypeStr == TEXT("LinearGrayscale")) return SAMPLERTYPE_LinearGrayscale;
+    return SAMPLERTYPE_Color;
+}
+
+// N10: find min/max X of all expressions to support smart default node placement
+static inline void McpFindExpressionsBoundingX(const FMcpMaterialGraphOwner& Owner, float& OutMinX, float& OutMaxX)
+{
+    OutMinX = 0.f;
+    OutMaxX = 0.f;
+    bool bFirst = true;
+    const TArray<TObjectPtr<UMaterialExpression>>* Expressions = McpGetGraphExpressions(Owner);
+    if (!Expressions) return;
+    for (UMaterialExpression* Expr : *Expressions)
+    {
+        if (!Expr) continue;
+        const float EX = static_cast<float>(Expr->MaterialExpressionEditorX);
+        if (bFirst) { OutMinX = OutMaxX = EX; bFirst = false; }
+        else { OutMinX = FMath::Min(OutMinX, EX); OutMaxX = FMath::Max(OutMaxX, EX); }
+    }
+}
+
 // Finds an expression inside Owner.GraphSource by GUID string, object name, path,
 // parameter name, or numeric string index. Returns nullptr if not found.
 static inline UMaterialExpression* McpFindGraphExpression(
@@ -4037,6 +4084,12 @@ static inline bool McpParseMaterialTypedValue(
 }
 
 // Saves/rebuilds the material graph owner after edit operations.
+// For MaterialFunction: uses PreEditChange/PostEditChange which updates the graph
+// and notifies dependents of structural changes (added/removed pins, etc.).
+// This is intentionally different from compile_material which uses
+// ForceRecompileForRendering - the heavier path that recompiles all dependent
+// material shaders. Graph edits only need the lightweight notification.
+// Also calls MarkPackageDirty() internally - callers do not need to repeat it.
 // Returns false with OutError when Owner.bReadOnly is true.
 static inline bool McpRebuildMaterialGraphOwner(
     const FMcpMaterialGraphOwner& Owner,

@@ -4837,8 +4837,16 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
 
   // Set node properties based on type
   if (UMaterialExpressionConstant *Const = Cast<UMaterialExpressionConstant>(NewExpression)) {
+    // N2: accept both bare number and { "value": N } object form
     double Value = 0;
-    Payload->TryGetNumberField(TEXT("value"), Value);
+    if (!Payload->TryGetNumberField(TEXT("value"), Value))
+    {
+      const TSharedPtr<FJsonObject>* ValueObj = nullptr;
+      if (Payload->TryGetObjectField(TEXT("value"), ValueObj) && ValueObj)
+      {
+        (*ValueObj)->TryGetNumberField(TEXT("value"), Value);
+      }
+    }
     Const->R = static_cast<float>(Value);
   } else if (UMaterialExpressionConstant3Vector *Const3 = Cast<UMaterialExpressionConstant3Vector>(NewExpression)) {
     double R = 0, G = 0, B = 0;
@@ -4855,6 +4863,16 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
       UTexture *Texture = LoadObject<UTexture>(nullptr, *TexturePath);
       if (Texture) {
         TexSample->Texture = Texture;
+        // N6: auto-detect samplerType from texture when not explicitly provided
+        FString SamplerTypeStr;
+        if (Payload->TryGetStringField(TEXT("samplerType"), SamplerTypeStr) && !SamplerTypeStr.IsEmpty())
+        {
+          TexSample->SamplerType = McpParseSamplerTypeString(SamplerTypeStr);
+        }
+        else
+        {
+          TexSample->SamplerType = McpInferSamplerTypeFromTexture(Texture);
+        }
       }
     }
   }

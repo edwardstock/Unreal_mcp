@@ -7,46 +7,6 @@ import { ResponseFactory } from '../../utils/response-factory.js';
 import { sanitizePath } from '../../utils/validation.js';
 
 /**
- * Valid actions for manage_asset tool.
- * Actions not in this list will return UNKNOWN_ACTION error immediately.
- */
-const VALID_ASSET_ACTIONS = new Set([
-  // Core asset operations
-  'list', 'import', 'duplicate', 'rename', 'move', 'delete',
-  'create_folder', 'search_assets', 'get_dependencies', 'validate',
-  'fixup_redirectors', 'find_by_tag', 'exists', 'bulk_rename', 'bulk_delete',
-  'duplicate_asset', 'rename_asset', 'move_asset', 'delete_asset', 'delete_assets',
-  // Asset metadata
-  'create_thumbnail', 'set_tags', 'get_metadata', 'set_metadata', 'generate_report',
-  // Material operations
-  'create_material', 'create_material_instance', 'create_render_target',
-  'generate_lods', 'add_material_parameter', 'list_instances',
-  'reset_instance_parameters', 'get_material_stats', 'nanite_rebuild_mesh',
-  // Material graph operations
-  'add_material_node', 'remove_material_node', 'rebuild_material',
-  'connect_material_pins', 'break_material_connections', 'get_material_node_details',
-  'set_material_node_position', 'move_material_node',
-  'bulk_set_material_node_positions', 'bulk_move_material_nodes',
-  'create_material_comment', 'wrap_material_nodes_in_comment',
-  'create_named_reroute', 'use_named_reroute', 'replace_long_connection_with_named_reroute',
-  'align_material_nodes',
-  'get_material_instance_info', 'find_material_expressions', 'get_material_expression_details',
-  'get_material_expression_connections', 'get_landscape_material_context', 'compile_material_diagnostics',
-  // Source control
-  'source_control_checkout', 'source_control_submit', 'source_control_enable', 'get_source_control_state',
-  // Graph analysis
-  'analyze_graph', 'get_asset_graph'
-]);
-
-/**
- * Check if an action is valid for the manage_asset tool.
- * Returns true if the action is recognized, false otherwise.
- */
-function isValidAssetAction(action: string): boolean {
-  return VALID_ASSET_ACTIONS.has(action);
-}
-
-/**
  * Detect path traversal attempts in user input.
  * Returns true if the path contains suspicious traversal patterns.
  */
@@ -1133,20 +1093,12 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         return ResponseFactory.success(res, 'Bulk delete completed');
       }
       default: {
-        // Validate action first - return error immediately for unknown actions
-        // This prevents sending invalid requests to C++ and avoids timeout issues
-        if (!isValidAssetAction(action)) {
-          return cleanObject({
-            success: false,
-            error: 'UNKNOWN_ACTION',
-            message: `Unknown asset action: ${action}. Valid actions are: ${Array.from(VALID_ASSET_ACTIONS).join(', ')}`,
-            action: action || 'manage_asset',
-            assetPath: (args as AssetArgs).assetPath ?? (args as AssetArgs).path
-          });
-        }
-        
-        // Pass all args through to C++ handler for actions that are valid but not explicitly handled
-        const res = await executeAutomationRequest(tools, action || 'manage_asset', { ...args, subAction: action }) as AssetOperationResponse;
+        // Pass through to C++ for any subAction. Native FMcpToolRegistry's
+        // manage_asset schema is the source of truth for valid actions; if
+        // the action is unsupported, C++ returns its own UNKNOWN_SUBACTION
+        // error. The old TS-side allowlist (VALID_ASSET_ACTIONS) silently
+        // rejected actions C++ DID support, so it's been removed.
+        const res = await executeAutomationRequest(tools, 'manage_asset', { ...args, subAction: action }) as AssetOperationResponse;
         const result = res ?? {};
         const errorCode = typeof result.error === 'string' ? result.error.toUpperCase() : '';
         const message = typeof result.message === 'string' ? result.message : '';

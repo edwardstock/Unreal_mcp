@@ -356,23 +356,44 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_FunctionAuthoring(
   // --------------------------------------------------------------------------
   if (SubAction == TEXT("add_function_input") ||
       SubAction == TEXT("add_function_output")) {
-    FString AssetPath, InputName, InputType;
+    FString AssetPath, PinName, PinType;
     if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) ||
         AssetPath.IsEmpty()) {
       SendAutomationError(Socket, RequestId, TEXT("Missing 'assetPath'."),
                           TEXT("INVALID_ARGUMENT"));
       return true;
     }
-    if (!Payload->TryGetStringField(TEXT("inputName"), InputName) ||
-        InputName.IsEmpty()) {
-      SendAutomationError(Socket, RequestId, TEXT("Missing 'inputName'."),
-                          TEXT("INVALID_ARGUMENT"));
-      return true;
+
+    // N7: for add_function_output, read outputName/outputType first, fall back to inputName/inputType
+    const bool bIsOutput = (SubAction == TEXT("add_function_output"));
+    if (bIsOutput)
+    {
+      if (!Payload->TryGetStringField(TEXT("outputName"), PinName) || PinName.IsEmpty())
+      {
+        if (!Payload->TryGetStringField(TEXT("inputName"), PinName) || PinName.IsEmpty())
+        {
+          SendAutomationError(Socket, RequestId, TEXT("Missing 'outputName'."),
+                              TEXT("INVALID_ARGUMENT"));
+          return true;
+        }
+      }
+      if (!Payload->TryGetStringField(TEXT("outputType"), PinType))
+        Payload->TryGetStringField(TEXT("inputType"), PinType);
     }
-    Payload->TryGetStringField(TEXT("inputType"), InputType);
+    else
+    {
+      if (!Payload->TryGetStringField(TEXT("inputName"), PinName) || PinName.IsEmpty())
+      {
+        SendAutomationError(Socket, RequestId, TEXT("Missing 'inputName'."),
+                            TEXT("INVALID_ARGUMENT"));
+        return true;
+      }
+      Payload->TryGetStringField(TEXT("inputType"), PinType);
+    }
 
     float X = 0.0f, Y = 0.0f;
-    Payload->TryGetNumberField(TEXT("x"), X);
+    const bool bHasX = Payload->HasField(TEXT("x"));
+    if (bHasX) Payload->TryGetNumberField(TEXT("x"), X);
     Payload->TryGetNumberField(TEXT("y"), Y);
 
     // SECURITY: Validate path BEFORE loading asset
@@ -394,29 +415,41 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_FunctionAuthoring(
       return true;
     }
 
+    // N10: when x not provided, place outputs right of graph, inputs left of graph
+    if (!bHasX)
+    {
+      FMcpMaterialGraphOwner TempOwner;
+      TempOwner.Asset = Func;
+      TempOwner.GraphSource = Func;
+      TempOwner.Kind = EMcpMaterialGraphOwnerKind::MaterialFunction;
+      TempOwner.bReadOnly = false;
+      float MinX, MaxX;
+      McpFindExpressionsBoundingX(TempOwner, MinX, MaxX);
+      X = bIsOutput ? (MaxX + 400.f) : (MinX - 400.f);
+    }
+
     UMaterialExpression *NewExpr = nullptr;
     if (SubAction == TEXT("add_function_input")) {
       UMaterialExpressionFunctionInput *Input =
           NewObject<UMaterialExpressionFunctionInput>(
               Func, UMaterialExpressionFunctionInput::StaticClass(), NAME_None,
               RF_Transactional);
-      Input->InputName = FName(*InputName);
-      // Set input type
-      if (InputType == TEXT("Float1") || InputType == TEXT("Scalar"))
+      Input->InputName = FName(*PinName);
+      if (PinType == TEXT("Float1") || PinType == TEXT("Scalar"))
         Input->InputType = EFunctionInputType::FunctionInput_Scalar;
-      else if (InputType == TEXT("Float2") || InputType == TEXT("Vector2"))
+      else if (PinType == TEXT("Float2") || PinType == TEXT("Vector2"))
         Input->InputType = EFunctionInputType::FunctionInput_Vector2;
-      else if (InputType == TEXT("Float3") || InputType == TEXT("Vector3"))
+      else if (PinType == TEXT("Float3") || PinType == TEXT("Vector3"))
         Input->InputType = EFunctionInputType::FunctionInput_Vector3;
-      else if (InputType == TEXT("Float4") || InputType == TEXT("Vector4"))
+      else if (PinType == TEXT("Float4") || PinType == TEXT("Vector4"))
         Input->InputType = EFunctionInputType::FunctionInput_Vector4;
-      else if (InputType == TEXT("Texture2D"))
+      else if (PinType == TEXT("Texture2D"))
         Input->InputType = EFunctionInputType::FunctionInput_Texture2D;
-      else if (InputType == TEXT("TextureCube"))
+      else if (PinType == TEXT("TextureCube"))
         Input->InputType = EFunctionInputType::FunctionInput_TextureCube;
-      else if (InputType == TEXT("Bool"))
+      else if (PinType == TEXT("Bool"))
         Input->InputType = EFunctionInputType::FunctionInput_StaticBool;
-      else if (InputType == TEXT("MaterialAttributes"))
+      else if (PinType == TEXT("MaterialAttributes"))
         Input->InputType = EFunctionInputType::FunctionInput_MaterialAttributes;
       else
         Input->InputType = EFunctionInputType::FunctionInput_Vector3;
@@ -426,7 +459,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_FunctionAuthoring(
           NewObject<UMaterialExpressionFunctionOutput>(
               Func, UMaterialExpressionFunctionOutput::StaticClass(), NAME_None,
               RF_Transactional);
-      Output->OutputName = FName(*InputName);
+      Output->OutputName = FName(*PinName);
       NewExpr = Output;
     }
 
@@ -452,7 +485,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_FunctionAuthoring(
         FString::Printf(TEXT("Function %s '%s' added."),
                         SubAction == TEXT("add_function_input") ? TEXT("input")
                                                                  : TEXT("output"),
-                        *InputName),
+                        *PinName),
         Result);
     return true;
   }

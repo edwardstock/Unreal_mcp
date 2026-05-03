@@ -128,10 +128,19 @@
 
 #if WITH_EDITOR
 
-// Local copy of LOAD_MATERIAL_OR_RETURN. Mirrors the macro in
-// McpAutomationBridge_MaterialAuthoringHandlers.cpp so this domain can
-// keep its extracted blocks unchanged.
-#define LOAD_MATERIAL_OR_RETURN()                                              \
+// Local copy of LOAD_GRAPH_OWNER_OR_RETURN. Resolves through McpResolveMaterialGraphOwner
+// so UMaterial AND UMaterialFunction graphs both work. Exposes:
+//   FMcpMaterialGraphOwner GraphOwner
+//   UObject* Material      // alias for backward-compat: points at the graph-source
+//                          // UObject (UMaterial or UMaterialFunction). NewObject(),
+//                          // PostEditChange() and MarkPackageDirty() all work via
+//                          // virtual dispatch on UObject*. For expression-collection
+//                          // access use McpGetGraphExpressionsMutable(GraphOwner)
+//                          // (NOT MCP_GET_MATERIAL_EXPRESSIONS(Material) which only
+//                          // compiles for UMaterial).
+//   FString AssetPath
+//   float X, Y
+#define LOAD_GRAPH_OWNER_OR_RETURN()                                              \
   FString AssetPath;                                                           \
   if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) ||             \
       AssetPath.IsEmpty()) {                                                   \
@@ -139,21 +148,28 @@
                         TEXT("INVALID_ARGUMENT"));                             \
     return true;                                                               \
   }                                                                            \
-  /* SECURITY: Validate path BEFORE loading asset */                           \
-  FString ValidatedAssetPath = SanitizeProjectRelativePath(AssetPath);         \
-  if (ValidatedAssetPath.IsEmpty()) {                                          \
-    SendAutomationError(Socket, RequestId,                                     \
-                        FString::Printf(TEXT("Invalid path '%s': contains traversal sequences or invalid root"), *AssetPath), \
-                        TEXT("INVALID_PATH"));                                \
-    return true;                                                               \
+  {                                                                            \
+    FString Validated = SanitizeProjectRelativePath(AssetPath);                \
+    if (Validated.IsEmpty()) {                                                 \
+      SendAutomationError(Socket, RequestId,                                   \
+                          FString::Printf(TEXT("Invalid path '%s': contains traversal sequences or invalid root"), *AssetPath), \
+                          TEXT("INVALID_PATH"));                               \
+      return true;                                                             \
+    }                                                                          \
+    AssetPath = Validated;                                                     \
   }                                                                            \
-  AssetPath = ValidatedAssetPath;                                              \
-  UMaterial *Material = LoadObject<UMaterial>(nullptr, *AssetPath);            \
-  if (!Material) {                                                             \
-    SendAutomationError(Socket, RequestId, TEXT("Could not load Material."),   \
-                        TEXT("ASSET_NOT_FOUND"));                              \
-    return true;                                                               \
+  FMcpMaterialGraphOwner GraphOwner;                                           \
+  {                                                                            \
+    FString GraphOwnerError;                                                   \
+    if (!McpResolveMaterialGraphOwner(AssetPath, GraphOwner, GraphOwnerError) || \
+        GraphOwner.bReadOnly) {                                                \
+      SendAutomationError(Socket, RequestId,                                   \
+                          GraphOwnerError.IsEmpty() ? TEXT("Cannot mutate this asset.") : GraphOwnerError, \
+                          TEXT("ASSET_NOT_FOUND"));                            \
+      return true;                                                             \
+    }                                                                          \
   }                                                                            \
+  UObject* Material = GraphOwner.GraphSource ? GraphOwner.GraphSource : GraphOwner.Asset; \
   float X = 0.0f, Y = 0.0f;                                                    \
   Payload->TryGetNumberField(TEXT("x"), X);                                    \
   Payload->TryGetNumberField(TEXT("y"), Y)
@@ -168,7 +184,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
   // add_math_node
   // --------------------------------------------------------------------------
   if (SubAction == TEXT("add_math_node")) {
-    LOAD_MATERIAL_OR_RETURN();
+    LOAD_GRAPH_OWNER_OR_RETURN();
 
     FString Operation;
     if (!Payload->TryGetStringField(TEXT("operation"), Operation)) {
@@ -230,11 +246,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
     MathNode->MaterialExpressionEditorY = (int32)Y;
 
 #if WITH_EDITORONLY_DATA
-    MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(MathNode);
+    if (auto* ExprArr = McpGetGraphExpressionsMutable(GraphOwner)) ExprArr->Add(MathNode);
 #endif
 
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
+    { FString RebuildErr; McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr); }
 
     TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetStringField(TEXT("nodeId"),
@@ -256,7 +271,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
       SubAction == TEXT("add_reflection_vector") ||
       SubAction == TEXT("add_panner") || SubAction == TEXT("add_rotator") ||
       SubAction == TEXT("add_noise") || SubAction == TEXT("add_voronoi")) {
-    LOAD_MATERIAL_OR_RETURN();
+    LOAD_GRAPH_OWNER_OR_RETURN();
 
     UMaterialExpression *NewExpr = nullptr;
     FString NodeName;
@@ -324,10 +339,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
       NewExpr->MaterialExpressionEditorY = (int32)Y;
 
 #if WITH_EDITORONLY_DATA
-      MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(NewExpr);
+      if (auto* ExprArr = McpGetGraphExpressionsMutable(GraphOwner)) ExprArr->Add(NewExpr);
 #endif
 
-      Material->PostEditChange();
+      { FString __RErr; McpRebuildMaterialGraphOwner(GraphOwner, __RErr); }
       Material->MarkPackageDirty();
 
       TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
@@ -350,7 +365,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
   // add_if, add_switch
   // --------------------------------------------------------------------------
   if (SubAction == TEXT("add_if") || SubAction == TEXT("add_switch")) {
-    LOAD_MATERIAL_OR_RETURN();
+    LOAD_GRAPH_OWNER_OR_RETURN();
 
     UMaterialExpression *NewExpr = nullptr;
     FString NodeName;
@@ -372,11 +387,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
     NewExpr->MaterialExpressionEditorY = (int32)Y;
 
 #if WITH_EDITORONLY_DATA
-    MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(NewExpr);
+    if (auto* ExprArr = McpGetGraphExpressionsMutable(GraphOwner)) ExprArr->Add(NewExpr);
 #endif
 
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
+    { FString RebuildErr; McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr); }
 
     TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetStringField(TEXT("nodeId"),
@@ -392,7 +406,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
   // add_component_mask
   // --------------------------------------------------------------------------
   if (SubAction == TEXT("add_component_mask")) {
-    LOAD_MATERIAL_OR_RETURN();
+    LOAD_GRAPH_OWNER_OR_RETURN();
 
     bool bR = true, bG = true, bB = true, bA = false;
     Payload->TryGetBoolField(TEXT("r"), bR);
@@ -412,11 +426,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
     MaskExpr->MaterialExpressionEditorY = (int32)Y;
 
 #if WITH_EDITORONLY_DATA
-    MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(MaskExpr);
+    if (auto* ExprArr = McpGetGraphExpressionsMutable(GraphOwner)) ExprArr->Add(MaskExpr);
 #endif
 
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
+    { FString RebuildErr; McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr); }
 
     TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetStringField(TEXT("nodeId"),
@@ -431,7 +444,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
   // add_dot_product
   // --------------------------------------------------------------------------
   if (SubAction == TEXT("add_dot_product")) {
-    LOAD_MATERIAL_OR_RETURN();
+    LOAD_GRAPH_OWNER_OR_RETURN();
 
     UMaterialExpressionDotProduct *DotExpr =
         NewObject<UMaterialExpressionDotProduct>(
@@ -441,11 +454,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
     DotExpr->MaterialExpressionEditorY = (int32)Y;
 
 #if WITH_EDITORONLY_DATA
-    MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(DotExpr);
+    if (auto* ExprArr = McpGetGraphExpressionsMutable(GraphOwner)) ExprArr->Add(DotExpr);
 #endif
 
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
+    { FString RebuildErr; McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr); }
 
     TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetStringField(TEXT("nodeId"),
@@ -460,7 +472,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
   // add_cross_product
   // --------------------------------------------------------------------------
   if (SubAction == TEXT("add_cross_product")) {
-    LOAD_MATERIAL_OR_RETURN();
+    LOAD_GRAPH_OWNER_OR_RETURN();
 
     UMaterialExpressionCrossProduct *CrossExpr =
         NewObject<UMaterialExpressionCrossProduct>(
@@ -470,11 +482,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
     CrossExpr->MaterialExpressionEditorY = (int32)Y;
 
 #if WITH_EDITORONLY_DATA
-    MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(CrossExpr);
+    if (auto* ExprArr = McpGetGraphExpressionsMutable(GraphOwner)) ExprArr->Add(CrossExpr);
 #endif
 
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
+    { FString RebuildErr; McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr); }
 
     TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetStringField(TEXT("nodeId"),
@@ -489,7 +500,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
   // add_desaturation
   // --------------------------------------------------------------------------
   if (SubAction == TEXT("add_desaturation")) {
-    LOAD_MATERIAL_OR_RETURN();
+    LOAD_GRAPH_OWNER_OR_RETURN();
 
     UMaterialExpressionDesaturation *DesatExpr =
         NewObject<UMaterialExpressionDesaturation>(
@@ -510,11 +521,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
     DesatExpr->MaterialExpressionEditorY = (int32)Y;
 
 #if WITH_EDITORONLY_DATA
-    MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(DesatExpr);
+    if (auto* ExprArr = McpGetGraphExpressionsMutable(GraphOwner)) ExprArr->Add(DesatExpr);
 #endif
 
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
+    { FString RebuildErr; McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr); }
 
     TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetStringField(TEXT("nodeId"),
@@ -529,7 +539,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
   // add_append (dedicated handler for convenience)
   // --------------------------------------------------------------------------
   if (SubAction == TEXT("add_append")) {
-    LOAD_MATERIAL_OR_RETURN();
+    LOAD_GRAPH_OWNER_OR_RETURN();
 
     UMaterialExpressionAppendVector *AppendExpr =
         NewObject<UMaterialExpressionAppendVector>(
@@ -539,11 +549,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
     AppendExpr->MaterialExpressionEditorY = (int32)Y;
 
 #if WITH_EDITORONLY_DATA
-    MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(AppendExpr);
+    if (auto* ExprArr = McpGetGraphExpressionsMutable(GraphOwner)) ExprArr->Add(AppendExpr);
 #endif
 
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
+    { FString RebuildErr; McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr); }
 
     TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetStringField(TEXT("nodeId"),
@@ -689,7 +698,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
   return false;
 }
 
-#undef LOAD_MATERIAL_OR_RETURN
+#undef LOAD_GRAPH_OWNER_OR_RETURN
 
 #else // !WITH_EDITOR
 

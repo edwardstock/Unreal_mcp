@@ -7,7 +7,6 @@ import { ITools } from '../../types/tool-interfaces.js';
 import type { LightingArgs } from '../../types/handler-types.js';
 import { executeAutomationRequest, normalizeLocation, executeBatchConsoleCommands } from './common-handlers.js';
 import { toNumber, toBoolean, toString, toColor3, toLocationObj, toRotationObj, normalizeName } from '../../utils/type-coercion.js';
-import { ResponseFactory } from '../../utils/response-factory.js';
 import { TOOL_ACTIONS } from '../../utils/action-constants.js';
 
 
@@ -716,7 +715,15 @@ export async function handleLightingTools(action: string, args: LightingArgs, to
     case 'list_light_types':
       return cleanObject(await listLightTypes(tools));
 
-    default:
-      return ResponseFactory.error(`Unknown lighting action: ${action}`);
+    default: {
+      // Passthrough: native C++ manage_lighting schema is the source of truth
+      // for valid subActions. Unknown action returns whatever C++ returns
+      // (likely UNKNOWN_SUBACTION).
+      const res = await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_LIGHTING, {
+        subAction: action,
+        ...(args as Record<string, unknown>),
+      });
+      return cleanObject(res as Record<string, unknown>);
+    }
   }
 }

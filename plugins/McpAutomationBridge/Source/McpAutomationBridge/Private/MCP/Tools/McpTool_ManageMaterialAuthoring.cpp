@@ -149,6 +149,8 @@ public:
 			.Number(TEXT("uTiling"), TEXT("U tiling factor."))
 			.Number(TEXT("vTiling"), TEXT("V tiling factor."))
 			.String(TEXT("parameterName"), TEXT("Name of the parameter."))
+			.FreeformObject(TEXT("channelNames"),
+				TEXT("Vector parameter channel names. Available keys: r, g, b, a."))
 			.FreeformObject(TEXT("parameter"), TEXT("Material parameter identity: name, type, association, and index."))
 			.FreeformObject(TEXT("defaultValue"),
 				TEXT("Default value for parameter (number for scalar, object for vector, bool for switch)."))

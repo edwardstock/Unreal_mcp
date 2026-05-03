@@ -23,201 +23,284 @@
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionStaticSwitchParameter.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
+#include "ScopedTransaction.h"
 
-// Local copy of LOAD_MATERIAL_OR_RETURN. Mirrors the macro in
-// McpAutomationBridge_MaterialAuthoringHandlers.cpp (validates assetPath,
-// loads UMaterial, reads x/y) so each domain dispatcher can keep its
-// inline blocks unchanged.
-#define LOAD_MATERIAL_OR_RETURN()                                              \
-  FString AssetPath;                                                           \
-  if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) ||             \
-      AssetPath.IsEmpty()) {                                                   \
-    SendAutomationError(Socket, RequestId, TEXT("Missing 'assetPath'."),       \
-                        TEXT("INVALID_ARGUMENT"));                             \
-    return true;                                                               \
-  }                                                                            \
-  FString ValidatedAssetPath = SanitizeProjectRelativePath(AssetPath);         \
-  if (ValidatedAssetPath.IsEmpty()) {                                          \
-    SendAutomationError(Socket, RequestId,                                     \
-                        FString::Printf(TEXT("Invalid path '%s': contains traversal sequences or invalid root"), *AssetPath), \
-                        TEXT("INVALID_PATH"));                                 \
-    return true;                                                               \
-  }                                                                            \
-  AssetPath = ValidatedAssetPath;                                              \
-  UMaterial *Material = LoadObject<UMaterial>(nullptr, *AssetPath);            \
-  if (!Material) {                                                             \
-    SendAutomationError(Socket, RequestId, TEXT("Could not load Material."),   \
-                        TEXT("ASSET_NOT_FOUND"));                              \
-    return true;                                                               \
-  }                                                                            \
-  float X = 0.0f, Y = 0.0f;                                                    \
-  Payload->TryGetNumberField(TEXT("x"), X);                                    \
+// Local macro: validates assetPath, resolves it through McpResolveMaterialGraphOwner
+// (so UMaterial AND UMaterialFunction graphs both work), reads x/y. Exposes:
+//   FMcpMaterialGraphOwner GraphOwner;
+//   FString AssetPath;
+//   float X, Y;
+// Refuses read-only graphs (e.g., UMaterialFunctionInstance) with a clear error.
+#define LOAD_GRAPH_OWNER_OR_RETURN()                                            \
+  FString AssetPath;                                                            \
+  if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) ||              \
+      AssetPath.IsEmpty()) {                                                    \
+    SendAutomationError(Socket, RequestId, TEXT("Missing 'assetPath'."),        \
+                        TEXT("INVALID_ARGUMENT"));                              \
+    return true;                                                                \
+  }                                                                             \
+  {                                                                             \
+    FString Validated = SanitizeProjectRelativePath(AssetPath);                 \
+    if (Validated.IsEmpty()) {                                                  \
+      SendAutomationError(Socket, RequestId,                                    \
+                          FString::Printf(TEXT("Invalid path '%s': contains traversal sequences or invalid root"), *AssetPath), \
+                          TEXT("INVALID_PATH"));                                \
+      return true;                                                              \
+    }                                                                           \
+    AssetPath = Validated;                                                      \
+  }                                                                             \
+  FMcpMaterialGraphOwner GraphOwner;                                            \
+  {                                                                             \
+    FString GraphOwnerError;                                                    \
+    if (!McpResolveMaterialGraphOwner(AssetPath, GraphOwner, GraphOwnerError) || \
+        GraphOwner.bReadOnly) {                                                 \
+      SendAutomationError(Socket, RequestId,                                    \
+                          GraphOwnerError.IsEmpty() ? TEXT("Cannot mutate this asset.") : GraphOwnerError, \
+                          TEXT("ASSET_NOT_FOUND"));                             \
+      return true;                                                              \
+    }                                                                           \
+  }                                                                             \
+  float X = 0.0f, Y = 0.0f;                                                     \
+  Payload->TryGetNumberField(TEXT("x"), X);                                     \
   Payload->TryGetNumberField(TEXT("y"), Y)
 
 bool UMcpAutomationBridgeSubsystem::HandleAuthoring_ParameterNodes(
-    const FString& SubAction, const FString& RequestId,
+    const FString& SubAction,
+    const FString& RequestId,
     const TSharedPtr<FJsonObject>& Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket)
-{
-  // --------------------------------------------------------------------------
-  // add_scalar_parameter
-  // --------------------------------------------------------------------------
-  if (SubAction == TEXT("add_scalar_parameter")) {
-    LOAD_MATERIAL_OR_RETURN();
+    TSharedPtr<FMcpBridgeWebSocket> Socket) {
+    // --------------------------------------------------------------------------
+    // add_scalar_parameter
+    // --------------------------------------------------------------------------
+    if (SubAction == TEXT("add_scalar_parameter")) {
+        LOAD_GRAPH_OWNER_OR_RETURN();
 
-    FString ParamName, Group;
-    double DefaultValue = 0.0;
-    if (!Payload->TryGetStringField(TEXT("parameterName"), ParamName) ||
-        ParamName.IsEmpty()) {
-      SendAutomationError(Socket, RequestId, TEXT("Missing 'parameterName'."),
-                          TEXT("INVALID_ARGUMENT"));
-      return true;
-    }
-    Payload->TryGetNumberField(TEXT("defaultValue"), DefaultValue);
-    Payload->TryGetStringField(TEXT("group"), Group);
+        FString ParamName, Group;
+        double DefaultValue = 0.0;
+        if (!Payload->TryGetStringField(TEXT("parameterName"), ParamName) ||
+            ParamName.IsEmpty()) {
+            SendAutomationError(Socket,
+                RequestId,
+                TEXT("Missing 'parameterName'."),
+                TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+        if (!Payload->TryGetNumberField(TEXT("defaultValue"), DefaultValue)) {
+            const TSharedPtr<FJsonObject>* DefObj = nullptr;
+            if (Payload->TryGetObjectField(TEXT("defaultValue"), DefObj) && DefObj && DefObj->IsValid())
+                (*DefObj)->TryGetNumberField(TEXT("value"), DefaultValue);
+        }
+        Payload->TryGetStringField(TEXT("group"), Group);
 
-    UMaterialExpressionScalarParameter *ScalarParam =
-        NewObject<UMaterialExpressionScalarParameter>(
-            Material, UMaterialExpressionScalarParameter::StaticClass(),
-            NAME_None, RF_Transactional);
-    ScalarParam->ParameterName = FName(*ParamName);
-    ScalarParam->DefaultValue = DefaultValue;
-    if (!Group.IsEmpty()) {
-      ScalarParam->Group = FName(*Group);
-    }
-    ScalarParam->MaterialExpressionEditorX = (int32)X;
-    ScalarParam->MaterialExpressionEditorY = (int32)Y;
+        FScopedTransaction Transaction(NSLOCTEXT("McpAutomationBridge",
+            "AddScalarParameter",
+            "MCP add scalar parameter"));
+        GraphOwner.Asset->Modify();
 
-#if WITH_EDITORONLY_DATA
-    MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(ScalarParam);
-#endif
+        UObject* Outer = GraphOwner.GraphSource ? GraphOwner.GraphSource : GraphOwner.Asset;
+        UMaterialExpressionScalarParameter* ScalarParam =
+            NewObject<UMaterialExpressionScalarParameter>(
+                Outer,
+                UMaterialExpressionScalarParameter::StaticClass(),
+                NAME_None,
+                RF_Transactional);
+        ScalarParam->ParameterName = FName(*ParamName);
+        ScalarParam->DefaultValue = DefaultValue;
+        if (!Group.IsEmpty()) {
+            ScalarParam->Group = FName(*Group);
+        }
+        ScalarParam->MaterialExpressionEditorX = (int32)X;
+        ScalarParam->MaterialExpressionEditorY = (int32)Y;
+        ScalarParam->MaterialExpressionGuid = FGuid::NewGuid();
 
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
+        if (TArray<TObjectPtr<UMaterialExpression>>* Exprs =
+            McpGetGraphExpressionsMutable(GraphOwner)) {
+            Exprs->Add(ScalarParam);
+        }
 
-    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
-    Result->SetStringField(TEXT("nodeId"),
-                           ScalarParam->MaterialExpressionGuid.ToString());
-    SendAutomationResponse(
-        Socket, RequestId, true,
-        FString::Printf(TEXT("Scalar parameter '%s' added."), *ParamName),
-        Result);
-    return true;
-  }
+        FString RebuildErr;
+        McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
 
-  // --------------------------------------------------------------------------
-  // add_vector_parameter
-  // --------------------------------------------------------------------------
-  if (SubAction == TEXT("add_vector_parameter")) {
-    LOAD_MATERIAL_OR_RETURN();
-
-    FString ParamName, Group;
-    if (!Payload->TryGetStringField(TEXT("parameterName"), ParamName) ||
-        ParamName.IsEmpty()) {
-      SendAutomationError(Socket, RequestId, TEXT("Missing 'parameterName'."),
-                          TEXT("INVALID_ARGUMENT"));
-      return true;
-    }
-    Payload->TryGetStringField(TEXT("group"), Group);
-
-    UMaterialExpressionVectorParameter *VecParam =
-        NewObject<UMaterialExpressionVectorParameter>(
-            Material, UMaterialExpressionVectorParameter::StaticClass(),
-            NAME_None, RF_Transactional);
-    VecParam->ParameterName = FName(*ParamName);
-    if (!Group.IsEmpty()) {
-      VecParam->Group = FName(*Group);
+        TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+        Result->SetStringField(TEXT("nodeId"),
+            ScalarParam->MaterialExpressionGuid.ToString());
+        SendAutomationResponse(
+            Socket,
+            RequestId,
+            true,
+            FString::Printf(TEXT("Scalar parameter '%s' added."), *ParamName),
+            Result);
+        return true;
     }
 
-    // Parse default value
-    const TSharedPtr<FJsonObject> *DefaultObj;
-    if (Payload->TryGetObjectField(TEXT("defaultValue"), DefaultObj)) {
-      double R = 1.0, G = 1.0, B = 1.0, A = 1.0;
-      (*DefaultObj)->TryGetNumberField(TEXT("r"), R);
-      (*DefaultObj)->TryGetNumberField(TEXT("g"), G);
-      (*DefaultObj)->TryGetNumberField(TEXT("b"), B);
-      (*DefaultObj)->TryGetNumberField(TEXT("a"), A);
-      VecParam->DefaultValue = FLinearColor(R, G, B, A);
+    // --------------------------------------------------------------------------
+    // add_vector_parameter
+    // --------------------------------------------------------------------------
+    if (SubAction == TEXT("add_vector_parameter")) {
+        LOAD_GRAPH_OWNER_OR_RETURN();
+
+        FString ParamName, Group;
+        if (!Payload->TryGetStringField(TEXT("parameterName"), ParamName) ||
+            ParamName.IsEmpty()) {
+            SendAutomationError(Socket,
+                RequestId,
+                TEXT("Missing 'parameterName'."),
+                TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+        Payload->TryGetStringField(TEXT("group"), Group);
+
+        FScopedTransaction Transaction(NSLOCTEXT("McpAutomationBridge",
+            "AddVectorParameter",
+            "MCP add vector parameter"));
+        GraphOwner.Asset->Modify();
+
+        UObject* Outer = GraphOwner.GraphSource ? GraphOwner.GraphSource : GraphOwner.Asset;
+        UMaterialExpressionVectorParameter* VecParam =
+            NewObject<UMaterialExpressionVectorParameter>(
+                Outer,
+                UMaterialExpressionVectorParameter::StaticClass(),
+                NAME_None,
+                RF_Transactional
+            );
+        VecParam->ParameterName = FName(*ParamName);
+
+
+        const TSharedPtr<FJsonObject>* ChannelNameValues;
+        if (Payload->TryGetObjectField(TEXT("channelNames"), ChannelNameValues)) {
+            FParameterChannelNames ChannelNames = VecParam->ChannelNames;
+            FString R, G, B, A;
+            if ((*ChannelNameValues)->TryGetStringField(TEXT("r"), R)) {
+                ChannelNames.R = FText::FromString(R);
+            }
+            if ((*ChannelNameValues)->TryGetStringField(TEXT("g"), G)) {
+                ChannelNames.G = FText::FromString(G);
+            }
+            if ((*ChannelNameValues)->TryGetStringField(TEXT("b"), B)) {
+                ChannelNames.B = FText::FromString(B);
+            }
+            if ((*ChannelNameValues)->TryGetStringField(TEXT("a"), A)) {
+                ChannelNames.A = FText::FromString(A);
+            }
+            VecParam->ChannelNames = ChannelNames;
+        }
+
+        if (!Group.IsEmpty()) {
+            VecParam->Group = FName(*Group);
+        }
+
+        // Parse default value
+        const TSharedPtr<FJsonObject>* DefaultObj;
+        if (Payload->TryGetObjectField(TEXT("defaultValue"), DefaultObj)) {
+            double R = 1.0, G = 1.0, B = 1.0, A = 1.0;
+            (*DefaultObj)->TryGetNumberField(TEXT("r"), R);
+            (*DefaultObj)->TryGetNumberField(TEXT("g"), G);
+            (*DefaultObj)->TryGetNumberField(TEXT("b"), B);
+            (*DefaultObj)->TryGetNumberField(TEXT("a"), A);
+            VecParam->DefaultValue = FLinearColor(R, G, B, A);
+        }
+
+        VecParam->MaterialExpressionEditorX = (int32)X;
+        VecParam->MaterialExpressionEditorY = (int32)Y;
+        VecParam->MaterialExpressionGuid = FGuid::NewGuid();
+
+        if (TArray<TObjectPtr<UMaterialExpression>>* Exprs =
+            McpGetGraphExpressionsMutable(GraphOwner)) {
+            Exprs->Add(VecParam);
+        }
+
+        FString RebuildErr;
+        McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+
+        TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+        Result->SetStringField(TEXT("nodeId"),
+            VecParam->MaterialExpressionGuid.ToString());
+        SendAutomationResponse(
+            Socket,
+            RequestId,
+            true,
+            FString::Printf(TEXT("Vector parameter '%s' added."), *ParamName),
+            Result);
+        return true;
     }
 
-    VecParam->MaterialExpressionEditorX = (int32)X;
-    VecParam->MaterialExpressionEditorY = (int32)Y;
+    // --------------------------------------------------------------------------
+    // add_static_switch_parameter
+    // --------------------------------------------------------------------------
+    if (SubAction == TEXT("add_static_switch_parameter")) {
+        LOAD_GRAPH_OWNER_OR_RETURN();
 
-#if WITH_EDITORONLY_DATA
-    MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(VecParam);
-#endif
+        FString ParamName, Group;
+        bool DefaultValue = false;
+        if (!Payload->TryGetStringField(TEXT("parameterName"), ParamName) ||
+            ParamName.IsEmpty()) {
+            SendAutomationError(Socket,
+                RequestId,
+                TEXT("Missing 'parameterName'."),
+                TEXT("INVALID_ARGUMENT"));
+            return true;
+        }
+        if (!Payload->TryGetBoolField(TEXT("defaultValue"), DefaultValue)) {
+            const TSharedPtr<FJsonObject>* DefObj = nullptr;
+            if (Payload->TryGetObjectField(TEXT("defaultValue"), DefObj) && DefObj && DefObj->IsValid())
+                (*DefObj)->TryGetBoolField(TEXT("value"), DefaultValue);
+        }
+        Payload->TryGetStringField(TEXT("group"), Group);
 
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
+        FScopedTransaction Transaction(NSLOCTEXT("McpAutomationBridge",
+            "AddStaticSwitchParameter",
+            "MCP add static switch parameter"));
+        GraphOwner.Asset->Modify();
 
-    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
-    Result->SetStringField(TEXT("nodeId"),
-                           VecParam->MaterialExpressionGuid.ToString());
-    SendAutomationResponse(
-        Socket, RequestId, true,
-        FString::Printf(TEXT("Vector parameter '%s' added."), *ParamName),
-        Result);
-    return true;
-  }
+        UObject* Outer = GraphOwner.GraphSource ? GraphOwner.GraphSource : GraphOwner.Asset;
+        UMaterialExpressionStaticSwitchParameter* SwitchParam =
+            NewObject<UMaterialExpressionStaticSwitchParameter>(
+                Outer,
+                UMaterialExpressionStaticSwitchParameter::StaticClass(),
+                NAME_None,
+                RF_Transactional);
+        SwitchParam->ParameterName = FName(*ParamName);
+        SwitchParam->DefaultValue = DefaultValue;
+        if (!Group.IsEmpty()) {
+            SwitchParam->Group = FName(*Group);
+        }
+        SwitchParam->MaterialExpressionEditorX = (int32)X;
+        SwitchParam->MaterialExpressionEditorY = (int32)Y;
+        SwitchParam->MaterialExpressionGuid = FGuid::NewGuid();
 
-  // --------------------------------------------------------------------------
-  // add_static_switch_parameter
-  // --------------------------------------------------------------------------
-  if (SubAction == TEXT("add_static_switch_parameter")) {
-    LOAD_MATERIAL_OR_RETURN();
+        if (TArray<TObjectPtr<UMaterialExpression>>* Exprs =
+            McpGetGraphExpressionsMutable(GraphOwner)) {
+            Exprs->Add(SwitchParam);
+        }
 
-    FString ParamName, Group;
-    bool DefaultValue = false;
-    if (!Payload->TryGetStringField(TEXT("parameterName"), ParamName) ||
-        ParamName.IsEmpty()) {
-      SendAutomationError(Socket, RequestId, TEXT("Missing 'parameterName'."),
-                          TEXT("INVALID_ARGUMENT"));
-      return true;
+        FString RebuildErr;
+        McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
+
+        TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+        Result->SetStringField(TEXT("nodeId"),
+            SwitchParam->MaterialExpressionGuid.ToString());
+        SendAutomationResponse(
+            Socket,
+            RequestId,
+            true,
+            FString::Printf(TEXT("Static switch '%s' added."), *ParamName),
+            Result);
+        return true;
     }
-    Payload->TryGetBoolField(TEXT("defaultValue"), DefaultValue);
-    Payload->TryGetStringField(TEXT("group"), Group);
 
-    UMaterialExpressionStaticSwitchParameter *SwitchParam =
-        NewObject<UMaterialExpressionStaticSwitchParameter>(
-            Material, UMaterialExpressionStaticSwitchParameter::StaticClass(),
-            NAME_None, RF_Transactional);
-    SwitchParam->ParameterName = FName(*ParamName);
-    SwitchParam->DefaultValue = DefaultValue;
-    if (!Group.IsEmpty()) {
-      SwitchParam->Group = FName(*Group);
-    }
-    SwitchParam->MaterialExpressionEditorX = (int32)X;
-    SwitchParam->MaterialExpressionEditorY = (int32)Y;
-
-#if WITH_EDITORONLY_DATA
-    MCP_GET_MATERIAL_EXPRESSIONS(Material).Add(SwitchParam);
-#endif
-
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
-
-    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
-    Result->SetStringField(TEXT("nodeId"),
-                           SwitchParam->MaterialExpressionGuid.ToString());
-    SendAutomationResponse(
-        Socket, RequestId, true,
-        FString::Printf(TEXT("Static switch '%s' added."), *ParamName), Result);
-    return true;
-  }
-
-  return false;
+    return false;
 }
 
-#undef LOAD_MATERIAL_OR_RETURN
+#undef LOAD_GRAPH_OWNER_OR_RETURN
 
 #else // !WITH_EDITOR
 
 bool UMcpAutomationBridgeSubsystem::HandleAuthoring_ParameterNodes(
-    const FString& /*SubAction*/, const FString& /*RequestId*/,
+    const FString& /*SubAction*/,
+    const FString& /*RequestId*/,
     const TSharedPtr<FJsonObject>& /*Payload*/,
-    TSharedPtr<FMcpBridgeWebSocket> /*Socket*/)
-{
-  return false;
+    TSharedPtr<FMcpBridgeWebSocket> /*Socket*/) {
+    return false;
 }
 
 #endif // WITH_EDITOR

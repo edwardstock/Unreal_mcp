@@ -45,6 +45,9 @@
 #include "MaterialDomain.h"
 #endif
 
+// FMaterialUpdateContext (needed for ForceRecompileForRendering)
+#include "MaterialShared.h"
+
 // Material Expressions (Basic)
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionAdd.h"
@@ -442,26 +445,48 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_MaterialProperties(
     }
     AssetPath = ValidatedPath;
 
-    UMaterial *Material = LoadObject<UMaterial>(nullptr, *AssetPath);
-    if (!Material) {
-      SendAutomationError(Socket, RequestId, TEXT("Could not load Material."),
+    // N1: support MaterialFunction in addition to UMaterial
+    FMcpMaterialGraphOwner GraphOwner;
+    FString GraphOwnerError;
+    if (!McpResolveMaterialGraphOwner(AssetPath, GraphOwner, GraphOwnerError))
+    {
+      SendAutomationError(Socket, RequestId,
+                          GraphOwnerError.IsEmpty() ? TEXT("Could not load asset.") : GraphOwnerError,
                           TEXT("ASSET_NOT_FOUND"));
       return true;
     }
+    if (GraphOwner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunctionInstance)
+    {
+      SendAutomationError(Socket, RequestId,
+                          TEXT("Cannot compile a MaterialFunctionInstance directly. Compile the base MaterialFunction instead."),
+                          TEXT("UNSUPPORTED_OPERATION"));
+      return true;
+    }
 
-    // Force recompile
-    Material->PreEditChange(nullptr);
-    Material->PostEditChange();
-    Material->MarkPackageDirty();
+    if (GraphOwner.Kind == EMcpMaterialGraphOwnerKind::Material)
+    {
+      UMaterial* Material = CastChecked<UMaterial>(GraphOwner.Asset);
+      Material->PreEditChange(nullptr);
+      Material->PostEditChange();
+      Material->MarkPackageDirty();
+    }
+    else if (GraphOwner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunction)
+    {
+      UMaterialFunction* Func = CastChecked<UMaterialFunction>(GraphOwner.Asset);
+      FMaterialUpdateContext UpdateContext;
+      Func->ForceRecompileForRendering(UpdateContext, nullptr);
+      Func->MarkPackageDirty();
+    }
 
     bool bSave = true;
     Payload->TryGetBoolField(TEXT("save"), bSave);
     if (bSave) {
-      SaveMaterialAsset_MaterialProperties(Material);
+      McpSafeAssetSave(GraphOwner.Asset);
     }
 
     TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
     Result->SetStringField(TEXT("assetPath"), AssetPath);
+    Result->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
     Result->SetBoolField(TEXT("compiled"), true);
     Result->SetBoolField(TEXT("saved"), bSave);
     SendAutomationResponse(Socket, RequestId, true, TEXT("Material compiled."), Result);

@@ -8,6 +8,7 @@
 #include "Editor.h"
 #include "EditorAssetLibrary.h"
 #include "Materials/Material.h"
+#include "MaterialShared.h"
 #include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionCustom.h"
 #include "Materials/MaterialExpressionFunctionInput.h"
@@ -1173,8 +1174,9 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialDiagnosticsAction(
             TargetKind = GraphOwner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunctionInstance
                 ? TEXT("MaterialFunctionInstance")
                 : TEXT("MaterialFunction");
-            Function->PreEditChange(nullptr);
-            Function->PostEditChange();
+            // N1: use canonical compile path for MaterialFunction (updates I/O types and dependent materials)
+            FMaterialUpdateContext UpdateContext;
+            Function->ForceRecompileForRendering(UpdateContext, nullptr);
         }
 
         bool bPending = false;
