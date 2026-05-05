@@ -2212,6 +2212,11 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         "expressionIndex": {
           "type": "number",
           "description": "Material expression index."
+        },
+        "includeOutputPins": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, get_asset_graph emits a per-node outputs[] array listing each output pin (index, name, mask)."
         }
       },
       "required": [
