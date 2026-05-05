@@ -1685,7 +1685,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
   },
   {
     "name": "manage_asset",
-    "description": "Create, import, duplicate, rename, delete assets. Edit Material graphs and instances. Analyze dependencies.",
+    "description": "Create, import, duplicate, rename, delete assets. Edit Material graphs and instances. Analyze dependencies. Use bulk_get_material_expression_details to fetch details for a batch of expressions identified by indices, guids, or nodeIds.",
     "category": "core",
     "inputSchema": {
       "type": "object",
@@ -1755,7 +1755,8 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             "align_material_nodes",
             "get_material_node_details",
             "rebuild_material",
-            "get_set_material_attributes_overrides"
+            "get_set_material_attributes_overrides",
+            "bulk_get_material_expression_details"
           ]
         },
         "assetPath": {
@@ -2179,7 +2180,29 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         },
         "includeConsumers": {
           "type": "boolean",
-          "description": "Include downstream consumers in expression connection diagnostics."
+          "default": false,
+          "description": "Include downstream consumers in expression connection diagnostics (bulk_get_material_expression_details, get_material_expression_connections)."
+        },
+        "indices": {
+          "type": "array",
+          "description": "Array of expression indices for bulk_get_material_expression_details.",
+          "items": {
+            "type": "number"
+          }
+        },
+        "guids": {
+          "type": "array",
+          "description": "Array of expression GUIDs for bulk_get_material_expression_details.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nodeIds": {
+          "type": "array",
+          "description": "Array of node IDs for bulk_get_material_expression_details.",
+          "items": {
+            "type": "string"
+          }
         },
         "folderPath": {
           "type": "string",

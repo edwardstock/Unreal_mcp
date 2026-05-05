@@ -1103,6 +1103,19 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         }
         return ResponseFactory.success(res, res.message ?? `${action} succeeded`);
       }
+      // ===== R10: bulk_get_material_expression_details — identifier-kind validation + passthrough =====
+      case 'bulk_get_material_expression_details': {
+        const a = args as Record<string, unknown>;
+        const kinds = ['indices', 'guids', 'nodeIds'].filter(k => Array.isArray(a[k]) && (a[k] as unknown[]).length > 0);
+        if (kinds.length !== 1) {
+          throw new Error('bulk_get_material_expression_details: provide exactly one non-empty array of indices, guids, or nodeIds');
+        }
+        return await executeAutomationRequest(
+          tools,
+          'manage_asset',
+          { ...args, subAction: action }
+        ) as Record<string, unknown>;
+      }
       default: {
         // Pass through to C++ for any subAction. Native FMcpToolRegistry's
         // manage_asset schema is the source of truth for valid actions; if
