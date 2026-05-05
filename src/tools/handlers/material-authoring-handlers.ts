@@ -236,6 +236,22 @@ export async function handleMaterialAuthoringTools(
         return ResponseFactory.success(res, res.message ?? `Parameter '${parameterName}' set`);
       }
 
+      // ===== N1: get_custom_expression — passthrough to bridge =====
+      case 'get_custom_expression':
+      // ===== N2: get_parameter_defaults — passthrough to bridge =====
+      case 'get_parameter_defaults': {
+        const res = (await executeAutomationRequest(
+          tools,
+          TOOL_ACTIONS.MANAGE_MATERIAL_AUTHORING,
+          { subAction: action, ...(args as Record<string, unknown>) }
+        )) as AutomationResponse;
+
+        if (res.success === false) {
+          return ResponseFactory.error(res.error ?? `Failed: ${action}`, res.errorCode);
+        }
+        return ResponseFactory.success(res, res.message ?? `${action} succeeded`);
+      }
+
       // ===== Default: passthrough =====
       // The native C++ schema for manage_material_authoring is the source of
       // truth for which subActions are valid. Pass everything through as-is and

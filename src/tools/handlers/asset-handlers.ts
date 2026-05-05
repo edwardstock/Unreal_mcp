@@ -1092,6 +1092,17 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         });
         return ResponseFactory.success(res, 'Bulk delete completed');
       }
+      // ===== N3: get_set_material_attributes_overrides — passthrough to bridge =====
+      case 'get_set_material_attributes_overrides': {
+        const res = await executeAutomationRequest(tools, 'manage_asset', {
+          ...args,
+          subAction: action
+        }) as AssetOperationResponse;
+        if (res.success === false) {
+          return ResponseFactory.errorWithCode(res.errorCode ?? res.error ?? 'OPERATION_FAILED', res.message ?? `Failed: ${action}`);
+        }
+        return ResponseFactory.success(res, res.message ?? `${action} succeeded`);
+      }
       default: {
         // Pass through to C++ for any subAction. Native FMcpToolRegistry's
         // manage_asset schema is the source of truth for valid actions; if
