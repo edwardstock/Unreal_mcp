@@ -46,8 +46,9 @@ extern TSharedPtr<FJsonObject> McpBuildExpressionRef(
 
 namespace McpMaterialExpressionDetails
 {
-    // forward declaration so AppendTypedDetails can call it before the definition below
+    // forward declarations so AppendTypedDetails can call them before the definitions below
     void AppendCustomDetails(UMaterialExpressionCustom* Custom, const TSharedRef<FJsonObject>& Resp);
+    bool AppendParameterDetails(UMaterialExpression* Expression, const TSharedRef<FJsonObject>& Resp);
 
     bool AppendTypedDetails(
         const FMcpMaterialGraphOwner& Owner,
@@ -59,6 +60,11 @@ namespace McpMaterialExpressionDetails
         if (UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression))
         {
             AppendCustomDetails(Custom, Resp);
+            return true;
+        }
+
+        if (AppendParameterDetails(Expression, Resp))
+        {
             return true;
         }
 
@@ -101,29 +107,6 @@ namespace McpMaterialExpressionDetails
                 Resp->SetStringField(TEXT("texture"), TexSample->Texture->GetPathName());
                 Resp->SetStringField(TEXT("textureName"), TexSample->Texture->GetName());
             }
-            return true;
-        }
-        if (UMaterialExpressionScalarParameter* ScalarParam = Cast<UMaterialExpressionScalarParameter>(Expression))
-        {
-            Resp->SetStringField(TEXT("parameterName"), ScalarParam->ParameterName.ToString());
-            Resp->SetNumberField(TEXT("defaultValue"), ScalarParam->DefaultValue);
-            return true;
-        }
-        if (UMaterialExpressionVectorParameter* VectorParam = Cast<UMaterialExpressionVectorParameter>(Expression))
-        {
-            Resp->SetStringField(TEXT("parameterName"), VectorParam->ParameterName.ToString());
-            TSharedPtr<FJsonObject> DefaultObj = MakeShared<FJsonObject>();
-            DefaultObj->SetNumberField(TEXT("r"), VectorParam->DefaultValue.R);
-            DefaultObj->SetNumberField(TEXT("g"), VectorParam->DefaultValue.G);
-            DefaultObj->SetNumberField(TEXT("b"), VectorParam->DefaultValue.B);
-            DefaultObj->SetNumberField(TEXT("a"), VectorParam->DefaultValue.A);
-            Resp->SetObjectField(TEXT("defaultValue"), DefaultObj);
-            return true;
-        }
-        if (UMaterialExpressionStaticSwitchParameter* SwitchParam = Cast<UMaterialExpressionStaticSwitchParameter>(Expression))
-        {
-            Resp->SetStringField(TEXT("parameterName"), SwitchParam->ParameterName.ToString());
-            Resp->SetBoolField(TEXT("defaultValue"), SwitchParam->DefaultValue);
             return true;
         }
         if (UMaterialExpressionLandscapeLayerWeight* LayerWeight = Cast<UMaterialExpressionLandscapeLayerWeight>(Expression))
@@ -310,7 +293,96 @@ namespace McpMaterialExpressionDetails
         }
         Resp->SetArrayField(TEXT("additionalDefines"), Defines);
     }
-    bool AppendParameterDetails(UMaterialExpression*, const TSharedRef<FJsonObject>&) { return false; }
+    bool AppendParameterDetails(UMaterialExpression* Expression, const TSharedRef<FJsonObject>& Resp)
+    {
+        if (!Expression) return false;
+
+        if (auto* Tex2D = Cast<UMaterialExpressionTextureSampleParameter2D>(Expression))
+        {
+            Resp->SetStringField(TEXT("parameterName"), Tex2D->ParameterName.ToString());
+            Resp->SetStringField(TEXT("group"), Tex2D->Group.ToString());
+            Resp->SetNumberField(TEXT("sortPriority"), Tex2D->SortPriority);
+            if (Tex2D->Texture)
+            {
+                Resp->SetStringField(TEXT("texture"), Tex2D->Texture->GetPathName());
+            }
+            else
+            {
+                Resp->SetField(TEXT("texture"), MakeShared<FJsonValueNull>());
+            }
+            Resp->SetStringField(TEXT("samplerType"),
+                StaticEnum<EMaterialSamplerType>()
+                    ? StaticEnum<EMaterialSamplerType>()->GetNameStringByValue(static_cast<int64>(Tex2D->SamplerType))
+                    : FString());
+            return true;
+        }
+        if (auto* TexParam = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+        {
+            Resp->SetStringField(TEXT("parameterName"), TexParam->ParameterName.ToString());
+            Resp->SetStringField(TEXT("group"), TexParam->Group.ToString());
+            Resp->SetNumberField(TEXT("sortPriority"), TexParam->SortPriority);
+            if (TexParam->Texture)
+            {
+                Resp->SetStringField(TEXT("texture"), TexParam->Texture->GetPathName());
+            }
+            else
+            {
+                Resp->SetField(TEXT("texture"), MakeShared<FJsonValueNull>());
+            }
+            Resp->SetStringField(TEXT("samplerType"),
+                StaticEnum<EMaterialSamplerType>()
+                    ? StaticEnum<EMaterialSamplerType>()->GetNameStringByValue(static_cast<int64>(TexParam->SamplerType))
+                    : FString());
+            return true;
+        }
+        if (auto* TexObjParam = Cast<UMaterialExpressionTextureObjectParameter>(Expression))
+        {
+            Resp->SetStringField(TEXT("parameterName"), TexObjParam->ParameterName.ToString());
+            Resp->SetStringField(TEXT("group"), TexObjParam->Group.ToString());
+            Resp->SetNumberField(TEXT("sortPriority"), TexObjParam->SortPriority);
+            if (TexObjParam->Texture)
+            {
+                Resp->SetStringField(TEXT("texture"), TexObjParam->Texture->GetPathName());
+            }
+            else
+            {
+                Resp->SetField(TEXT("texture"), MakeShared<FJsonValueNull>());
+            }
+            return true;
+        }
+        if (auto* ScalarParam = Cast<UMaterialExpressionScalarParameter>(Expression))
+        {
+            Resp->SetStringField(TEXT("parameterName"), ScalarParam->ParameterName.ToString());
+            Resp->SetNumberField(TEXT("defaultValue"), ScalarParam->DefaultValue);
+            Resp->SetNumberField(TEXT("sliderMin"), ScalarParam->SliderMin);
+            Resp->SetNumberField(TEXT("sliderMax"), ScalarParam->SliderMax);
+            Resp->SetStringField(TEXT("group"), ScalarParam->Group.ToString());
+            Resp->SetNumberField(TEXT("sortPriority"), ScalarParam->SortPriority);
+            return true;
+        }
+        if (auto* VectorParam = Cast<UMaterialExpressionVectorParameter>(Expression))
+        {
+            Resp->SetStringField(TEXT("parameterName"), VectorParam->ParameterName.ToString());
+            TSharedPtr<FJsonObject> DefaultObj = MakeShared<FJsonObject>();
+            DefaultObj->SetNumberField(TEXT("r"), VectorParam->DefaultValue.R);
+            DefaultObj->SetNumberField(TEXT("g"), VectorParam->DefaultValue.G);
+            DefaultObj->SetNumberField(TEXT("b"), VectorParam->DefaultValue.B);
+            DefaultObj->SetNumberField(TEXT("a"), VectorParam->DefaultValue.A);
+            Resp->SetObjectField(TEXT("defaultValue"), DefaultObj);
+            Resp->SetStringField(TEXT("group"), VectorParam->Group.ToString());
+            Resp->SetNumberField(TEXT("sortPriority"), VectorParam->SortPriority);
+            return true;
+        }
+        if (auto* SwitchParam = Cast<UMaterialExpressionStaticSwitchParameter>(Expression))
+        {
+            Resp->SetStringField(TEXT("parameterName"), SwitchParam->ParameterName.ToString());
+            Resp->SetBoolField(TEXT("defaultValue"), SwitchParam->DefaultValue);
+            Resp->SetStringField(TEXT("group"), SwitchParam->Group.ToString());
+            Resp->SetNumberField(TEXT("sortPriority"), SwitchParam->SortPriority);
+            return true;
+        }
+        return false;
+    }
     void AppendAttributeSetDetails(const FMcpMaterialGraphOwner&, UMaterialExpressionSetMaterialAttributes*, const TSharedRef<FJsonObject>&) {}
     void AppendAttributeGetDetails(UMaterialExpressionGetMaterialAttributes*, const TSharedRef<FJsonObject>&) {}
     void AppendRerouteDeclarationUsages(const FMcpMaterialGraphOwner&, UMaterialExpressionNamedRerouteDeclaration*, const TSharedRef<FJsonObject>&) {}
