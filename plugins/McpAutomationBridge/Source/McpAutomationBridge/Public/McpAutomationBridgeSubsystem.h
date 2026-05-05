@@ -926,6 +926,11 @@ private:
                                   const TSharedPtr<FJsonObject>& Payload,
                                   TSharedPtr<FMcpBridgeWebSocket> Socket);
 
+  // N3: read-back action - returns all Set/GetMaterialAttributes expression overrides in a material
+  bool HandleGetSetMaterialAttributesOverrides(const FString& RequestId, const FString& Action,
+                                               const TSharedPtr<FJsonObject>& Payload,
+                                               TSharedPtr<FMcpBridgeWebSocket> Socket);
+
   // Phase 9: Texture handlers
   bool HandleManageTextureAction(
       const FString &RequestId, const FString &Action,

@@ -156,6 +156,9 @@ namespace McpHandlers
         MCP_DECLARE_HANDLER(AssetAction);
         MCP_DECLARE_HANDLER(GetAssetReferences);
         MCP_DECLARE_HANDLER(GetAssetDependencies);
+
+        // N3: read-back action - returns all Set/GetMaterialAttributes expression overrides in a material
+        MCP_DECLARE_HANDLER(GetSetMaterialAttributesOverrides);
     }
 
     // =========================================================================

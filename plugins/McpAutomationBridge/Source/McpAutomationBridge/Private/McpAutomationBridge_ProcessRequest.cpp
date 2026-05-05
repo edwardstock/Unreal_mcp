@@ -474,6 +474,11 @@ void UMcpAutomationBridgeSubsystem::ProcessAutomationRequest(
                                               RequestingSocket);
           }))
         return;
+      if (HandleAndLog(TEXT("HandleGetSetMaterialAttributesOverrides"), [&]() {
+            return HandleGetSetMaterialAttributesOverrides(RequestId, Action, Payload,
+                                                          RequestingSocket);
+          }))
+        return;
 
       // Phase 9: Texture Management
       if (HandleAndLog(TEXT("HandleManageTextureAction"), [&]() {

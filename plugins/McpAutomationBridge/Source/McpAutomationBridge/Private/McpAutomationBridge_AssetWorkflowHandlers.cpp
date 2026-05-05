@@ -122,6 +122,8 @@
 #include "Materials/MaterialExpressionFunctionInput.h"
 #include "Materials/MaterialExpressionFunctionOutput.h"
 #include "Materials/MaterialExpressionNamedReroute.h"
+#include "Materials/MaterialExpressionSetMaterialAttributes.h"
+#include "Materials/MaterialExpressionGetMaterialAttributes.h"
 #include "Materials/MaterialFunction.h"
 #include "Materials/MaterialFunctionInstance.h"
 #include "Materials/MaterialFunctionInterface.h"
@@ -7299,6 +7301,74 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
                          TEXT("get_asset_graph requires editor build"),
                          nullptr, TEXT("NOT_IMPLEMENTED"));
   return true;
+#endif
+}
+
+// ============================================================================
+// GET SET/GET MATERIAL ATTRIBUTES OVERRIDES (N3)
+// ============================================================================
+
+bool UMcpAutomationBridgeSubsystem::HandleGetSetMaterialAttributesOverrides(
+    const FString& RequestId, const FString& Action,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket)
+{
+    if (!Action.Equals(TEXT("get_set_material_attributes_overrides"), ESearchCase::IgnoreCase)) return false;
+
+#if WITH_EDITOR
+    if (!Payload.IsValid())
+    { SendAutomationError(Socket, RequestId, TEXT("payload missing"), TEXT("INVALID_PAYLOAD")); return true; }
+
+    FString AssetPath;
+    if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+    { SendAutomationError(Socket, RequestId, TEXT("assetPath required"), TEXT("INVALID_ARGUMENT")); return true; }
+
+    FMcpMaterialGraphOwner Owner;
+    FString Err;
+    if (!McpResolveMaterialGraphOwner(AssetPath, Owner, Err))
+    { SendAutomationError(Socket, RequestId, Err,
+        Err.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE")); return true; }
+
+    const TArray<TObjectPtr<UMaterialExpression>>* AllPtr = McpGetGraphExpressions(Owner);
+    static const TArray<TObjectPtr<UMaterialExpression>> Empty;
+    const auto& All = AllPtr ? *AllPtr : Empty;
+
+    TArray<TSharedPtr<FJsonValue>> Nodes;
+    for (int32 i = 0; i < All.Num(); ++i)
+    {
+        UMaterialExpression* Expr = All[i];
+        if (!Expr) continue;
+
+        TSharedPtr<FJsonObject> Item;
+        if (auto* Set = Cast<UMaterialExpressionSetMaterialAttributes>(Expr))
+        {
+            Item = MakeShared<FJsonObject>();
+            Item->SetStringField(TEXT("kind"), TEXT("SetMaterialAttributes"));
+            McpMaterialExpressionDetails::AppendAttributeSetDetails(Owner, Set, Item.ToSharedRef());
+        }
+        else if (auto* Get = Cast<UMaterialExpressionGetMaterialAttributes>(Expr))
+        {
+            Item = MakeShared<FJsonObject>();
+            Item->SetStringField(TEXT("kind"), TEXT("GetMaterialAttributes"));
+            McpMaterialExpressionDetails::AppendAttributeGetDetails(Get, Item.ToSharedRef());
+        }
+        if (Item.IsValid())
+        {
+            TSharedPtr<FJsonObject> Identity = MakeShared<FJsonObject>();
+            McpAddExpressionIdentity(Owner, Expr, i, Identity.ToSharedRef());
+            Item->SetObjectField(TEXT("nodeIdentity"), Identity);
+            Nodes.Add(MakeShared<FJsonValueObject>(Item));
+        }
+    }
+
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(Result, Owner.Asset);
+    Result->SetArrayField(TEXT("nodes"), Nodes);
+    SendAutomationResponse(Socket, RequestId, true, TEXT("Set/Get material attribute overrides retrieved"), Result, FString());
+    return true;
+#else
+    SendAutomationResponse(Socket, RequestId, false, TEXT("editor only"), nullptr, TEXT("NOT_IMPLEMENTED"));
+    return true;
 #endif
 }
 
