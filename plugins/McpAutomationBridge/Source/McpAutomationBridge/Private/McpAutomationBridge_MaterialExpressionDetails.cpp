@@ -5,6 +5,7 @@
 #include "McpAutomationBridgeGlobals.h"
 
 #if WITH_EDITOR
+#include "McpAutomationBridgeHelpers.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialFunction.h"
 #include "Materials/MaterialExpression.h"
@@ -222,7 +223,7 @@ namespace McpMaterialExpressionDetails
             TSharedPtr<FJsonObject> InputObj = MakeShared<FJsonObject>();
             ::McpAddConnectedExpressionInfo(Owner, &Declaration->Input, InputObj.ToSharedRef());
             Resp->SetObjectField(TEXT("declarationInput"), InputObj);
-            // usages[] backref is added by AppendRerouteDeclarationUsages in Phase B (R7).
+            AppendRerouteDeclarationUsages(Owner, Declaration, Resp);
             return true;
         }
         if (UMaterialExpressionNamedRerouteUsage* Usage = Cast<UMaterialExpressionNamedRerouteUsage>(Expression))
@@ -445,5 +446,31 @@ namespace McpMaterialExpressionDetails
         }
         Resp->SetArrayField(TEXT("attributeGetTypes"), Items);
     }
-    void AppendRerouteDeclarationUsages(const FMcpMaterialGraphOwner&, UMaterialExpressionNamedRerouteDeclaration*, const TSharedRef<FJsonObject>&) {}
+    void AppendRerouteDeclarationUsages(
+        const FMcpMaterialGraphOwner& Owner,
+        UMaterialExpressionNamedRerouteDeclaration* Decl,
+        const TSharedRef<FJsonObject>& Resp)
+    {
+        if (!Decl) return;
+        const TArray<TObjectPtr<UMaterialExpression>>* AllPtr = McpGetGraphExpressions(Owner);
+        if (!AllPtr) return;
+
+        TArray<TSharedPtr<FJsonValue>> Usages;
+        for (int32 Index = 0; Index < AllPtr->Num(); ++Index)
+        {
+            UMaterialExpression* Expr = (*AllPtr)[Index];
+            if (auto* Usage = Cast<UMaterialExpressionNamedRerouteUsage>(Expr))
+            {
+                if (Usage->DeclarationGuid == Decl->VariableGuid)
+                {
+                    TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+                    Item->SetNumberField(TEXT("index"), Index);
+                    Item->SetStringField(TEXT("guid"), Usage->MaterialExpressionGuid.ToString());
+                    Item->SetStringField(TEXT("expressionPath"), Usage->GetPathName());
+                    Usages.Add(MakeShared<FJsonValueObject>(Item));
+                }
+            }
+        }
+        Resp->SetArrayField(TEXT("usages"), Usages);
+    }
 }
