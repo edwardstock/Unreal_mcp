@@ -264,6 +264,19 @@ export async function handleInspectTools(action: string, args: HandlerArgs, tool
 
       return cleanObject(res);
     }
+    case 'dump_subobject': {
+      const SUBOBJECT_PATH = /^\/[^:]+\.[^:]+:[^\s:]+$/;
+      const path = (args as any).objectPath as string | undefined;
+      if (!path || !SUBOBJECT_PATH.test(path.trim())) {
+        throw new Error('inspect:dump_subobject requires a subobject path "/Game/X.Asset:SubName"');
+      }
+      const res = await executeAutomationRequest(
+        tools,
+        'inspect',
+        { action: 'inspect_object', objectPath: path.trim(), detailed: true }
+      ) as InspectResponse;
+      return cleanObject(res);
+    }
     case 'get_property': {
       const objectPath = await resolveObjectPath(args, tools);
 
