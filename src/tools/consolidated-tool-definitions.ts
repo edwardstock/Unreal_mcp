@@ -1753,7 +1753,8 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             "replace_long_connection_with_named_reroute",
             "align_material_nodes",
             "get_material_node_details",
-            "rebuild_material"
+            "rebuild_material",
+            "get_set_material_attributes_overrides"
           ]
         },
         "assetPath": {
@@ -7142,7 +7143,9 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             "set_material_function_instance_parameter",
             "reset_material_function_instance_parameter",
             "clear_material_function_instance_parameters",
-            "bulk_set_material_function_instance_parameters"
+            "bulk_set_material_function_instance_parameters",
+            "get_custom_expression",
+            "get_parameter_defaults"
           ]
         },
         "action": {
@@ -7214,7 +7217,9 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             "set_material_function_instance_parameter",
             "reset_material_function_instance_parameter",
             "clear_material_function_instance_parameters",
-            "bulk_set_material_function_instance_parameters"
+            "bulk_set_material_function_instance_parameters",
+            "get_custom_expression",
+            "get_parameter_defaults"
           ]
         },
         "assetPath": {
@@ -7591,6 +7596,18 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
           "items": {
             "type": "object"
           }
+        },
+        "expressionGuid": {
+          "type": "string",
+          "description": "Material expression GUID for node selection (get_custom_expression)."
+        },
+        "expressionIndex": {
+          "type": "number",
+          "description": "Material expression index for node selection (get_custom_expression)."
+        },
+        "expressionName": {
+          "type": "string",
+          "description": "Material expression object name for node selection (get_custom_expression)."
         },
         "save": {
           "type": "boolean",
