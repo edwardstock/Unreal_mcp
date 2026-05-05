@@ -63,6 +63,12 @@ namespace McpMaterialExpressionDetails
             return true;
         }
 
+        if (auto* SMA = Cast<UMaterialExpressionSetMaterialAttributes>(Expression))
+        {
+            AppendAttributeSetDetails(Owner, SMA, Resp);
+            return true;
+        }
+
         if (AppendParameterDetails(Expression, Resp))
         {
             return true;
@@ -383,7 +389,41 @@ namespace McpMaterialExpressionDetails
         }
         return false;
     }
-    void AppendAttributeSetDetails(const FMcpMaterialGraphOwner&, UMaterialExpressionSetMaterialAttributes*, const TSharedRef<FJsonObject>&) {}
+    void AppendAttributeSetDetails(
+        const FMcpMaterialGraphOwner& Owner,
+        UMaterialExpressionSetMaterialAttributes* Set,
+        const TSharedRef<FJsonObject>& Resp)
+    {
+        if (!Set) return;
+
+        TArray<TSharedPtr<FJsonValue>> Items;
+        for (int32 i = 0; i < Set->AttributeSetTypes.Num(); ++i)
+        {
+            const FGuid& Guid = Set->AttributeSetTypes[i];
+            TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+            Item->SetStringField(TEXT("guid"), Guid.ToString());
+            Item->SetStringField(TEXT("attribute"), FMaterialAttributeDefinitionMap::GetAttributeName(Guid));
+
+            // Inputs[0] is the carry-over "MaterialAttributes" pin; AttributeSetTypes[i] matches Inputs[i+1].
+            const int32 InputIndex = i + 1;
+            if (Set->Inputs.IsValidIndex(InputIndex))
+            {
+                const FExpressionInput& In = Set->Inputs[InputIndex];
+                const bool bConnected = In.Expression != nullptr;
+                Item->SetBoolField(TEXT("connected"), bConnected);
+                if (bConnected)
+                {
+                    ::McpAddConnectedExpressionInfo(Owner, &In, Item.ToSharedRef());
+                }
+            }
+            else
+            {
+                Item->SetBoolField(TEXT("connected"), false);
+            }
+            Items.Add(MakeShared<FJsonValueObject>(Item));
+        }
+        Resp->SetArrayField(TEXT("attributeSetTypes"), Items);
+    }
     void AppendAttributeGetDetails(UMaterialExpressionGetMaterialAttributes*, const TSharedRef<FJsonObject>&) {}
     void AppendRerouteDeclarationUsages(const FMcpMaterialGraphOwner&, UMaterialExpressionNamedRerouteDeclaration*, const TSharedRef<FJsonObject>&) {}
 }
