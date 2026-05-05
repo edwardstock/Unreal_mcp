@@ -845,6 +845,37 @@ static void McpAppendTypedExpressionDetails(
     McpMaterialExpressionDetails::AppendTypedDetails(Owner, Expression, Resp);
 }
 
+// Build the JSON object describing one material expression - assetClass, identity,
+// className/classPath/desc, inputs, consumers (optional), and type-specific details.
+// Used by HandleGetMaterialNodeDetails (single-node) and HandleBulkGetMaterialExpressionDetails.
+static TSharedPtr<FJsonObject> McpBuildExpressionDetailsObject(
+    const FMcpMaterialGraphOwner& Owner,
+    UMaterialExpression* Expression,
+    bool bIncludeConsumers)
+{
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+    if (!Expression) return Resp;
+
+    McpHandlerUtils::AddVerification(Resp, Owner.Asset);
+    Resp->SetStringField(TEXT("assetClass"), Owner.Asset->GetClass()->GetName());
+    McpAddExpressionIdentity(Owner, Expression, McpExpressionIndex(Owner, Expression), Resp.ToSharedRef());
+    Resp->SetStringField(TEXT("class"), Expression->GetClass()->GetName());
+    Resp->SetStringField(TEXT("className"), Expression->GetClass()->GetName());
+    Resp->SetStringField(TEXT("classPath"), Expression->GetClass()->GetPathName());
+    if (!Expression->Desc.IsEmpty())
+    {
+        Resp->SetStringField(TEXT("desc"), Expression->Desc);
+    }
+
+    Resp->SetArrayField(TEXT("inputs"), McpBuildExpressionInputsArray(Owner, Expression));
+    if (bIncludeConsumers)
+    {
+        Resp->SetArrayField(TEXT("consumers"), McpBuildExpressionConsumersArray(Owner, Expression));
+    }
+    McpAppendTypedExpressionDetails(Owner, Expression, Resp.ToSharedRef());
+    return Resp;
+}
+
 static ALandscape* McpFindLandscapeActorByPayload(
     const TSharedPtr<FJsonObject>& Payload)
 {
@@ -6394,21 +6425,8 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
   }
 
   // Build response for specific node
-  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
-  Resp->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
-  McpAddExpressionIdentity(GraphOwner, Expression, McpExpressionIndex(GraphOwner, Expression), Resp.ToSharedRef());
-  Resp->SetStringField(TEXT("class"), Expression->GetClass()->GetName());
-  Resp->SetStringField(TEXT("className"), Expression->GetClass()->GetName());
-  Resp->SetStringField(TEXT("classPath"), Expression->GetClass()->GetPathName());
-  if (!Expression->Desc.IsEmpty()) {
-    Resp->SetStringField(TEXT("desc"), Expression->Desc);
-  }
-
-  Resp->SetArrayField(TEXT("inputs"), McpBuildExpressionInputsArray(GraphOwner, Expression));
-  Resp->SetArrayField(TEXT("consumers"), McpBuildExpressionConsumersArray(GraphOwner, Expression));
-  McpAppendTypedExpressionDetails(GraphOwner, Expression, Resp.ToSharedRef());
-
+  const bool bIncludeConsumers = true;  // single-node endpoint always returned consumers
+  TSharedPtr<FJsonObject> Resp = McpBuildExpressionDetailsObject(GraphOwner, Expression, bIncludeConsumers);
   SendAutomationResponse(Socket, RequestId, true,
                          TEXT("Material node details retrieved"), Resp, FString());
   return true;
