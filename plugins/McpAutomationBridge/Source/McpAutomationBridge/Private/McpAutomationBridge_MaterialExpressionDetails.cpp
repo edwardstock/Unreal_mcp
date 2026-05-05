@@ -26,6 +26,8 @@
 #include "Materials/MaterialAttributeDefinitionMap.h"
 #include "Materials/MaterialExpressionLandscapeLayerWeight.h"
 #include "Materials/MaterialExpressionLandscapeLayerBlend.h"
+#include "Materials/MaterialExpressionMaterialFunctionCall.h"
+#include "Materials/MaterialExpressionLandscapePhysicalMaterialOutput.h"
 #endif
 
 #if WITH_EDITOR
@@ -35,6 +37,11 @@ extern void McpAddConnectedExpressionInfo(
     const TSharedRef<FJsonObject>& Obj);
 
 extern FString McpLandscapeBlendTypeToString(ELandscapeLayerBlendType BlendType);
+
+extern FString McpGetOutputName(UMaterialExpression* Expression, int32 OutputIndex, bool& bOutResolved);
+extern TSharedPtr<FJsonObject> McpBuildExpressionRef(
+    const FMcpMaterialGraphOwner& Owner,
+    UMaterialExpression* Expression);
 #endif
 
 namespace McpMaterialExpressionDetails
@@ -154,6 +161,92 @@ namespace McpMaterialExpressionDetails
                 LayersArray.Add(MakeShared<FJsonValueObject>(LayerObj));
             }
             Resp->SetArrayField(TEXT("layers"), LayersArray);
+            return true;
+        }
+        if (UMaterialExpressionMaterialFunctionCall* FuncCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expression))
+        {
+            if (FuncCall->MaterialFunction)
+            {
+                Resp->SetStringField(TEXT("functionPath"), FuncCall->MaterialFunction->GetPathName());
+                Resp->SetStringField(TEXT("functionName"), FuncCall->MaterialFunction->GetName());
+            }
+
+            TArray<TSharedPtr<FJsonValue>> FunctionInputs;
+            for (int32 InputIndex = 0; InputIndex < FuncCall->FunctionInputs.Num(); ++InputIndex)
+            {
+                const FFunctionExpressionInput& FunctionInput = FuncCall->FunctionInputs[InputIndex];
+                TSharedPtr<FJsonObject> InputObj = MakeShared<FJsonObject>();
+                InputObj->SetNumberField(TEXT("index"), InputIndex);
+                InputObj->SetStringField(TEXT("name"), FuncCall->GetInputName(InputIndex).ToString());
+                if (FunctionInput.ExpressionInput)
+                {
+                    InputObj->SetStringField(TEXT("functionInputId"), FunctionInput.ExpressionInput->Id.ToString());
+                }
+                ::McpAddConnectedExpressionInfo(Owner, &FunctionInput.Input, InputObj.ToSharedRef());
+                FunctionInputs.Add(MakeShared<FJsonValueObject>(InputObj));
+            }
+            Resp->SetArrayField(TEXT("functionInputs"), FunctionInputs);
+
+            TArray<TSharedPtr<FJsonValue>> FunctionOutputs;
+            for (int32 OutputIndex = 0; OutputIndex < FuncCall->FunctionOutputs.Num(); ++OutputIndex)
+            {
+                const FFunctionExpressionOutput& FunctionOutput = FuncCall->FunctionOutputs[OutputIndex];
+                TSharedPtr<FJsonObject> OutputObj = MakeShared<FJsonObject>();
+                OutputObj->SetNumberField(TEXT("index"), OutputIndex);
+                OutputObj->SetStringField(TEXT("functionOutputId"), FunctionOutput.ExpressionOutputId.ToString());
+                bool bResolvedOutputName = false;
+                FString OutputName = ::McpGetOutputName(Expression, OutputIndex, bResolvedOutputName);
+                if (OutputName.IsEmpty() && FunctionOutput.ExpressionOutput)
+                {
+                    OutputName = FunctionOutput.ExpressionOutput->OutputName.ToString();
+                    bResolvedOutputName = !OutputName.IsEmpty();
+                }
+                if (!OutputName.IsEmpty())
+                {
+                    OutputObj->SetStringField(TEXT("name"), OutputName);
+                }
+                OutputObj->SetBoolField(TEXT("nameResolved"), bResolvedOutputName);
+                FunctionOutputs.Add(MakeShared<FJsonValueObject>(OutputObj));
+            }
+            Resp->SetArrayField(TEXT("functionOutputs"), FunctionOutputs);
+            return true;
+        }
+        if (UMaterialExpressionNamedRerouteDeclaration* Declaration = Cast<UMaterialExpressionNamedRerouteDeclaration>(Expression))
+        {
+            Resp->SetStringField(TEXT("rerouteName"), Declaration->Name.ToString());
+            Resp->SetStringField(TEXT("rerouteGuid"), Declaration->VariableGuid.ToString());
+            TSharedPtr<FJsonObject> InputObj = MakeShared<FJsonObject>();
+            ::McpAddConnectedExpressionInfo(Owner, &Declaration->Input, InputObj.ToSharedRef());
+            Resp->SetObjectField(TEXT("declarationInput"), InputObj);
+            // usages[] backref is added by AppendRerouteDeclarationUsages in Phase B (R7).
+            return true;
+        }
+        if (UMaterialExpressionNamedRerouteUsage* Usage = Cast<UMaterialExpressionNamedRerouteUsage>(Expression))
+        {
+            Resp->SetStringField(TEXT("declarationGuid"), Usage->DeclarationGuid.ToString());
+            if (Usage->Declaration)
+            {
+                Resp->SetObjectField(TEXT("declaration"), ::McpBuildExpressionRef(Owner, Usage->Declaration));
+                Resp->SetStringField(TEXT("declarationName"), Usage->Declaration->Name.ToString());
+            }
+            return true;
+        }
+        if (UMaterialExpressionLandscapePhysicalMaterialOutput* PhysicalOutput = Cast<UMaterialExpressionLandscapePhysicalMaterialOutput>(Expression))
+        {
+            TArray<TSharedPtr<FJsonValue>> Inputs;
+            for (int32 InputIndex = 0; InputIndex < PhysicalOutput->Inputs.Num(); ++InputIndex)
+            {
+                const FPhysicalMaterialInput& Input = PhysicalOutput->Inputs[InputIndex];
+                TSharedPtr<FJsonObject> InputObj = MakeShared<FJsonObject>();
+                InputObj->SetNumberField(TEXT("index"), InputIndex);
+                if (Input.PhysicalMaterial)
+                {
+                    InputObj->SetStringField(TEXT("physicalMaterial"), Input.PhysicalMaterial->GetPathName());
+                }
+                ::McpAddConnectedExpressionInfo(Owner, &Input.Input, InputObj.ToSharedRef());
+                Inputs.Add(MakeShared<FJsonValueObject>(InputObj));
+            }
+            Resp->SetArrayField(TEXT("physicalMaterialInputs"), Inputs);
             return true;
         }
         return false;
