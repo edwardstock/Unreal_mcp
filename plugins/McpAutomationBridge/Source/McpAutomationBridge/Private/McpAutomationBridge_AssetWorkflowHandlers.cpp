@@ -47,6 +47,7 @@
 #include "Misc/Paths.h"
 #include "McpAutomationBridgeGlobals.h"
 #include "McpAutomationBridgeHelpers.h"
+#include "McpAutomationBridge_MaterialExpressionDetails.h"
 #include "McpSafeOperations.h"
 
 // -----------------------------------------------------------------------------
@@ -834,48 +835,10 @@ static void McpAppendTypedExpressionDetails(
     UMaterialExpression* Expression,
     const TSharedRef<FJsonObject>& Resp)
 {
-  if (!Expression)
-  {
-    return;
-  }
+  if (!Expression) return;
+  if (McpMaterialExpressionDetails::AppendTypedDetails(Owner, Expression, Resp)) return;
 
-  if (UMaterialExpressionConstant* Const = Cast<UMaterialExpressionConstant>(Expression))
-  {
-    Resp->SetNumberField(TEXT("value"), Const->R);
-  }
-  else if (UMaterialExpressionConstant2Vector* Const2 = Cast<UMaterialExpressionConstant2Vector>(Expression))
-  {
-    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
-    ValueObj->SetNumberField(TEXT("r"), Const2->R);
-    ValueObj->SetNumberField(TEXT("g"), Const2->G);
-    Resp->SetObjectField(TEXT("value"), ValueObj);
-  }
-  else if (UMaterialExpressionConstant3Vector* Const3 = Cast<UMaterialExpressionConstant3Vector>(Expression))
-  {
-    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
-    ValueObj->SetNumberField(TEXT("r"), Const3->Constant.R);
-    ValueObj->SetNumberField(TEXT("g"), Const3->Constant.G);
-    ValueObj->SetNumberField(TEXT("b"), Const3->Constant.B);
-    Resp->SetObjectField(TEXT("value"), ValueObj);
-  }
-  else if (UMaterialExpressionConstant4Vector* Const4 = Cast<UMaterialExpressionConstant4Vector>(Expression))
-  {
-    TSharedPtr<FJsonObject> ValueObj = McpHandlerUtils::CreateResultObject();
-    ValueObj->SetNumberField(TEXT("r"), Const4->Constant.R);
-    ValueObj->SetNumberField(TEXT("g"), Const4->Constant.G);
-    ValueObj->SetNumberField(TEXT("b"), Const4->Constant.B);
-    ValueObj->SetNumberField(TEXT("a"), Const4->Constant.A);
-    Resp->SetObjectField(TEXT("value"), ValueObj);
-  }
-  else if (UMaterialExpressionTextureSample* TexSample = Cast<UMaterialExpressionTextureSample>(Expression))
-  {
-    if (TexSample->Texture)
-    {
-      Resp->SetStringField(TEXT("texture"), TexSample->Texture->GetPathName());
-      Resp->SetStringField(TEXT("textureName"), TexSample->Texture->GetName());
-    }
-  }
-  else if (UMaterialExpressionScalarParameter* ScalarParam = Cast<UMaterialExpressionScalarParameter>(Expression))
+  if (UMaterialExpressionScalarParameter* ScalarParam = Cast<UMaterialExpressionScalarParameter>(Expression))
   {
     Resp->SetStringField(TEXT("parameterName"), ScalarParam->ParameterName.ToString());
     Resp->SetNumberField(TEXT("defaultValue"), ScalarParam->DefaultValue);
