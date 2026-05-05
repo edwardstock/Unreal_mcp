@@ -464,6 +464,11 @@ void UMcpAutomationBridgeSubsystem::ProcessAutomationRequest(
                                                          RequestingSocket);
           }))
         return;
+      if (HandleAndLog(TEXT("HandleGetCustomExpression"), [&]() {
+            return HandleGetCustomExpression(RequestId, Action, Payload,
+                                             RequestingSocket);
+          }))
+        return;
 
       // Phase 9: Texture Management
       if (HandleAndLog(TEXT("HandleManageTextureAction"), [&]() {

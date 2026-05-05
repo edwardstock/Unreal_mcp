@@ -916,6 +916,11 @@ private:
       const TSharedPtr<FJsonObject> &Payload,
       TSharedPtr<FMcpBridgeWebSocket> Socket);
 
+  // N1: read-back action - returns details for a single Custom HLSL expression node
+  bool HandleGetCustomExpression(const FString& RequestId, const FString& Action,
+                                 const TSharedPtr<FJsonObject>& Payload,
+                                 TSharedPtr<FMcpBridgeWebSocket> Socket);
+
   // Phase 9: Texture handlers
   bool HandleManageTextureAction(
       const FString &RequestId, const FString &Action,

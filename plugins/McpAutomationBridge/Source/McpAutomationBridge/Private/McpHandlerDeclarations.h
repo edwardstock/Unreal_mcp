@@ -822,6 +822,9 @@ namespace McpHandlers
             const TSharedPtr<FJsonObject>& Payload,
             TSharedPtr<FMcpBridgeWebSocket> Socket
         ));
+
+        // N1: read-back action - returns details for a single Custom HLSL expression node
+        MCP_DECLARE_HANDLER(GetCustomExpression);
     }
 
     // =========================================================================

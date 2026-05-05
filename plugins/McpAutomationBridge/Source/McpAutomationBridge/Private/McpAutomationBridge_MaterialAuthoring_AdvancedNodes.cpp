@@ -13,6 +13,7 @@
 #include "McpHandlerUtils.h"
 #include "McpAutomationBridgeHelpers.h"
 #include "McpVersionCompatibility.h"
+#include "McpAutomationBridge_MaterialExpressionDetails.h"
 
 // JSON & Serialization
 #include "Dom/JsonObject.h"
@@ -698,12 +699,78 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
   return false;
 }
 
+// helpers defined in McpAutomationBridge_AssetWorkflowHandlers.cpp (file-scope statics);
+// McpFindGraphExpressionFromPayload has three optional TCHAR* params with defaults - declare full signature
+extern UMaterialExpression* McpFindGraphExpressionFromPayload(const FMcpMaterialGraphOwner& Owner, const TSharedPtr<FJsonObject>& Payload,
+    const TCHAR* IndexField, const TCHAR* IdField, const TCHAR* PathField);
+extern int32 McpExpressionIndex(const FMcpMaterialGraphOwner& Owner, const UMaterialExpression* Expression);
+extern void McpAddExpressionIdentity(const FMcpMaterialGraphOwner& Owner, UMaterialExpression* Expression, int32 Index, const TSharedRef<FJsonObject>& Out);
+
+bool UMcpAutomationBridgeSubsystem::HandleGetCustomExpression(
+    const FString& RequestId, const FString& Action,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket)
+{
+    if (!Action.Equals(TEXT("get_custom_expression"), ESearchCase::IgnoreCase)) return false;
+
+    if (!Payload.IsValid())
+    {
+        SendAutomationError(Socket, RequestId, TEXT("payload missing"), TEXT("INVALID_PAYLOAD"));
+        return true;
+    }
+
+    FString AssetPath;
+    if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+    {
+        SendAutomationError(Socket, RequestId, TEXT("assetPath required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    FMcpMaterialGraphOwner Owner;
+    FString Err;
+    if (!McpResolveMaterialGraphOwner(AssetPath, Owner, Err))
+    {
+        SendAutomationError(Socket, RequestId, Err,
+            Err.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+        return true;
+    }
+
+    UMaterialExpression* Expr = McpFindGraphExpressionFromPayload(Owner, Payload,
+        TEXT("expressionIndex"), TEXT("nodeId"), TEXT("expressionPath"));
+    auto* Custom = Cast<UMaterialExpressionCustom>(Expr);
+    if (!Custom)
+    {
+        SendAutomationError(Socket, RequestId,
+            FString::Printf(TEXT("expected MaterialExpressionCustom, got %s"),
+                            Expr ? *Expr->GetClass()->GetName() : TEXT("<null>")),
+            TEXT("INVALID_NODE_TYPE"));
+        return true;
+    }
+
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(Result, Owner.Asset);
+    TSharedPtr<FJsonObject> Identity = MakeShared<FJsonObject>();
+    McpAddExpressionIdentity(Owner, Custom, McpExpressionIndex(Owner, Custom), Identity.ToSharedRef());
+    Result->SetObjectField(TEXT("nodeIdentity"), Identity);
+    McpMaterialExpressionDetails::AppendCustomDetails(Custom, Result.ToSharedRef());
+    SendAutomationResponse(Socket, RequestId, true, TEXT("Custom expression details retrieved"), Result, FString());
+    return true;
+}
+
 #undef LOAD_GRAPH_OWNER_OR_RETURN
 
 #else // !WITH_EDITOR
 
 bool UMcpAutomationBridgeSubsystem::HandleAuthoring_AdvancedNodes(
     const FString& /*SubAction*/, const FString& /*RequestId*/,
+    const TSharedPtr<FJsonObject>& /*Payload*/,
+    TSharedPtr<FMcpBridgeWebSocket> /*Socket*/)
+{
+  return false;
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleGetCustomExpression(
+    const FString& /*RequestId*/, const FString& /*Action*/,
     const TSharedPtr<FJsonObject>& /*Payload*/,
     TSharedPtr<FMcpBridgeWebSocket> /*Socket*/)
 {
