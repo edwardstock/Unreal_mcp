@@ -192,13 +192,13 @@ static FString McpExpressionPath(const UMaterialExpression* Expr)
   return Expr ? Expr->GetPathName() : FString();
 }
 
-static int32 McpExpressionIndex(const FMcpMaterialGraphOwner& Owner, const UMaterialExpression* Expr)
+int32 McpExpressionIndex(const FMcpMaterialGraphOwner& Owner, const UMaterialExpression* Expr)
 {
   const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
   return Exprs && Expr ? Exprs->IndexOfByKey(Expr) : INDEX_NONE;
 }
 
-static void McpAddExpressionIdentity(
+void McpAddExpressionIdentity(
     const FMcpMaterialGraphOwner& Owner,
     UMaterialExpression* Expr,
     int32 Index,
@@ -248,7 +248,7 @@ static void McpAddExpressionIdentity(
   }
 }
 
-static UMaterialExpression* McpFindGraphExpressionFromPayload(
+UMaterialExpression* McpFindGraphExpressionFromPayload(
     const FMcpMaterialGraphOwner& Owner,
     const TSharedPtr<FJsonObject>& Payload,
     const TCHAR* IndexField = TEXT("expressionIndex"),
@@ -590,7 +590,7 @@ static UMaterialExpressionNamedRerouteDeclaration* McpFindNamedRerouteDeclaratio
   return nullptr;
 }
 
-static FString McpLandscapeBlendTypeToString(ELandscapeLayerBlendType BlendType)
+FString McpLandscapeBlendTypeToString(ELandscapeLayerBlendType BlendType)
 {
   switch (BlendType)
   {
@@ -605,7 +605,7 @@ static FString McpLandscapeBlendTypeToString(ELandscapeLayerBlendType BlendType)
   }
 }
 
-static FString McpGetOutputName(UMaterialExpression* Expression, int32 OutputIndex, bool& bOutResolved)
+FString McpGetOutputName(UMaterialExpression* Expression, int32 OutputIndex, bool& bOutResolved)
 {
   bOutResolved = false;
   if (!Expression)
@@ -629,7 +629,7 @@ static FString McpGetOutputName(UMaterialExpression* Expression, int32 OutputInd
   return FString();
 }
 
-static TSharedPtr<FJsonObject> McpBuildExpressionRef(
+TSharedPtr<FJsonObject> McpBuildExpressionRef(
     const FMcpMaterialGraphOwner& Owner,
     UMaterialExpression* Expression)
 {
@@ -642,7 +642,7 @@ static TSharedPtr<FJsonObject> McpBuildExpressionRef(
   return Obj;
 }
 
-static void McpAddConnectedExpressionInfo(
+void McpAddConnectedExpressionInfo(
     const FMcpMaterialGraphOwner& Owner,
     const FExpressionInput* Input,
     const TSharedRef<FJsonObject>& Obj)
