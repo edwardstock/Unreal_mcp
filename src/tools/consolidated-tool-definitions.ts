@@ -1008,7 +1008,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
   },
   {
     "name": "inspect",
-    "description": "Inspect any UObject: read/write properties, list components, export snapshots, and query class info. Actions: inspect_cdo (Blueprint CDO properties + all components without spawning an actor; use blueprintPath, optional detailed/componentName/propertyNames), inspect_class (class metadata), inspect_object (world actor), get_property/set_property, get_components, list_objects, find_by_class, find_by_tag, runtime_report.",
+    "description": "Inspect any UObject: read/write properties, list components, export snapshots, and query class info. Actions: inspect_cdo (Blueprint CDO properties + all components without spawning an actor; use blueprintPath, optional detailed/componentName/propertyNames), inspect_class (class metadata), inspect_object (world actor), get_property/set_property, get_components, list_objects, find_by_class, find_by_tag, runtime_report, dump_subobject (strict alias - dumps every UProperty of a package subobject by full path \"/Game/X.Asset:SubName\"; refuses non-subobject paths).",
     "category": "core",
     "inputSchema": {
       "type": "object",
@@ -1051,7 +1051,8 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             "get_scene_stats",
             "get_performance_stats",
             "get_memory_stats",
-            "get_editor_settings"
+            "get_editor_settings",
+            "dump_subobject"
           ]
         },
         "objectPath": {
