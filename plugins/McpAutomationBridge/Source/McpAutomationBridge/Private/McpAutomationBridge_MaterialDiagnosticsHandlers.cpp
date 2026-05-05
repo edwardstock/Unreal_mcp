@@ -2,6 +2,7 @@
 
 #include "Dom/JsonObject.h"
 #include "McpAutomationBridgeHelpers.h"
+#include "McpAutomationBridge_MaterialExpressionDetails.h"
 #include "McpHandlerUtils.h"
 
 #if WITH_EDITOR
@@ -238,7 +239,7 @@ static TSharedPtr<FJsonObject> McpDiagnosticsDumpObjectProperties(
     return Properties;
 }
 
-static void McpDiagnosticsAppendTypedSummary(UMaterialExpression* Expression, TSharedRef<FJsonObject> Out)
+static void McpDiagnosticsAppendTypedSummary(const FMcpMaterialGraphOwner& GraphOwner, UMaterialExpression* Expression, TSharedRef<FJsonObject> Out)
 {
     if (!Expression)
     {
@@ -246,6 +247,8 @@ static void McpDiagnosticsAppendTypedSummary(UMaterialExpression* Expression, TS
     }
 
     TSharedPtr<FJsonObject> Typed = MakeShared<FJsonObject>();
+
+    // FunctionInput / FunctionOutput are diagnostics-unique; the shared helper does not cover them.
     if (UMaterialExpressionFunctionInput* Input = Cast<UMaterialExpressionFunctionInput>(Expression))
     {
         Typed->SetStringField(TEXT("kind"), TEXT("FunctionInput"));
@@ -262,20 +265,31 @@ static void McpDiagnosticsAppendTypedSummary(UMaterialExpression* Expression, TS
             default: BlendRel = TEXT("General"); break;
         }
         Typed->SetStringField(TEXT("blendInputRelevance"), BlendRel);
+        Out->SetObjectField(TEXT("typedSummary"), Typed);
+        return;
     }
-    else if (UMaterialExpressionFunctionOutput* Output = Cast<UMaterialExpressionFunctionOutput>(Expression))
+    if (UMaterialExpressionFunctionOutput* Output = Cast<UMaterialExpressionFunctionOutput>(Expression))
     {
         Typed->SetStringField(TEXT("kind"), TEXT("FunctionOutput"));
         Typed->SetStringField(TEXT("outputName"), Output->OutputName.ToString());
         Typed->SetStringField(TEXT("description"), Output->Description);
         Typed->SetStringField(TEXT("functionOutputId"), Output->Id.ToString());
+        Out->SetObjectField(TEXT("typedSummary"), Typed);
+        return;
     }
-    else if (UMaterialExpressionMaterialFunctionCall* Call = Cast<UMaterialExpressionMaterialFunctionCall>(Expression))
+
+    // Reuse the shared typed-detail emitter so both code paths cannot drift.
+    TSharedRef<FJsonObject> TypedRef = Typed.ToSharedRef();
+    const bool bDispatched = McpMaterialExpressionDetails::AppendTypedDetails(GraphOwner, Expression, TypedRef);
+
+    // Diagnostics-specific kind label + count fields that the helper does not emit.
+    if (UMaterialExpressionMaterialFunctionCall* Call = Cast<UMaterialExpressionMaterialFunctionCall>(Expression))
     {
         Typed->SetStringField(TEXT("kind"), TEXT("MaterialFunctionCall"));
-        Typed->SetStringField(TEXT("functionPath"), Call->MaterialFunction ? Call->MaterialFunction->GetPathName() : TEXT(""));
         Typed->SetNumberField(TEXT("functionInputCount"), (double)Call->FunctionInputs.Num());
         Typed->SetNumberField(TEXT("functionOutputCount"), (double)Call->FunctionOutputs.Num());
+        // Diagnostics-only id+name pin listing; the helper emits richer functionInputs/functionOutputs[]
+        // with connection info under different field names — both can coexist.
         TArray<TSharedPtr<FJsonValue>> FuncInputPins, FuncOutputPins;
         for (const FFunctionExpressionInput& FEI : Call->FunctionInputs) {
             TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
@@ -295,34 +309,19 @@ static void McpDiagnosticsAppendTypedSummary(UMaterialExpression* Expression, TS
     else if (UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression))
     {
         Typed->SetStringField(TEXT("kind"), TEXT("Custom"));
-        Typed->SetStringField(TEXT("code"), Custom->Code);
-        Typed->SetStringField(TEXT("outputType"), StaticEnum<ECustomMaterialOutputType>()->GetNameStringByValue(static_cast<int64>(Custom->OutputType)));
-        TArray<TSharedPtr<FJsonValue>> InputNames, OutputNames;
-        for (const FCustomInput& CI : Custom->Inputs) InputNames.Add(MakeShared<FJsonValueString>(CI.InputName.ToString()));
-        for (const FCustomOutput& CO : Custom->AdditionalOutputs) OutputNames.Add(MakeShared<FJsonValueString>(CO.OutputName.ToString()));
-        Typed->SetArrayField(TEXT("inputNames"), InputNames);
-        Typed->SetArrayField(TEXT("additionalOutputNames"), OutputNames);
         Typed->SetNumberField(TEXT("inputCount"), Custom->Inputs.Num());
         Typed->SetNumberField(TEXT("additionalOutputCount"), Custom->AdditionalOutputs.Num());
         Typed->SetNumberField(TEXT("additionalDefineCount"), Custom->AdditionalDefines.Num());
         Typed->SetNumberField(TEXT("includeFilePathCount"), Custom->IncludeFilePaths.Num());
     }
-    else if (UMaterialExpressionTextureSampleParameter* TexSampleParam = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+    else if (Cast<UMaterialExpressionTextureSampleParameter>(Expression))
     {
         Typed->SetStringField(TEXT("kind"), TEXT("TextureSampleParameter"));
-        Typed->SetStringField(TEXT("parameterName"), TexSampleParam->ParameterName.ToString());
-        Typed->SetStringField(TEXT("group"), TexSampleParam->Group.ToString());
-        Typed->SetNumberField(TEXT("sortPriority"), TexSampleParam->SortPriority);
-        Typed->SetStringField(TEXT("texturePath"), TexSampleParam->Texture ? TexSampleParam->Texture->GetPathName() : TEXT(""));
-        Typed->SetStringField(TEXT("samplerType"), StaticEnum<EMaterialSamplerType>() ?
-            StaticEnum<EMaterialSamplerType>()->GetNameStringByValue(static_cast<int64>(TexSampleParam->SamplerType)) : TEXT(""));
     }
     else if (UMaterialExpressionTextureObjectParameter* TexObjParam = Cast<UMaterialExpressionTextureObjectParameter>(Expression))
     {
         Typed->SetStringField(TEXT("kind"), TEXT("TextureObjectParameter"));
-        Typed->SetStringField(TEXT("parameterName"), TexObjParam->ParameterName.ToString());
-        Typed->SetStringField(TEXT("group"), TexObjParam->Group.ToString());
-        Typed->SetNumberField(TEXT("sortPriority"), TexObjParam->SortPriority);
+        // The diagnostics emits `texturePath` (distinct from helper's `texture`); preserve.
         Typed->SetStringField(TEXT("texturePath"), TexObjParam->Texture ? TexObjParam->Texture->GetPathName() : TEXT(""));
     }
     else if (UMaterialExpressionTextureObject* TexObj = Cast<UMaterialExpressionTextureObject>(Expression))
@@ -333,50 +332,16 @@ static void McpDiagnosticsAppendTypedSummary(UMaterialExpression* Expression, TS
     else if (UMaterialExpressionTextureSample* TexSample = Cast<UMaterialExpressionTextureSample>(Expression))
     {
         Typed->SetStringField(TEXT("kind"), TEXT("TextureSample"));
-        Typed->SetStringField(TEXT("texturePath"), TexSample->Texture ? TexSample->Texture->GetPathName() : TEXT(""));
         Typed->SetStringField(TEXT("samplerType"), StaticEnum<EMaterialSamplerType>() ?
             StaticEnum<EMaterialSamplerType>()->GetNameStringByValue(static_cast<int64>(TexSample->SamplerType)) : TEXT(""));
+        Typed->SetStringField(TEXT("texturePath"), TexSample->Texture ? TexSample->Texture->GetPathName() : TEXT(""));
     }
-    else if (UMaterialExpressionScalarParameter* ScalarParam = Cast<UMaterialExpressionScalarParameter>(Expression))
-    {
-        Typed->SetStringField(TEXT("kind"), TEXT("ScalarParameter"));
-        Typed->SetStringField(TEXT("parameterName"), ScalarParam->ParameterName.ToString());
-        Typed->SetStringField(TEXT("group"), ScalarParam->Group.ToString());
-        Typed->SetNumberField(TEXT("sortPriority"), ScalarParam->SortPriority);
-        Typed->SetNumberField(TEXT("defaultValue"), ScalarParam->DefaultValue);
-    }
-    else if (UMaterialExpressionVectorParameter* VectorParam = Cast<UMaterialExpressionVectorParameter>(Expression))
-    {
-        Typed->SetStringField(TEXT("kind"), TEXT("VectorParameter"));
-        Typed->SetStringField(TEXT("parameterName"), VectorParam->ParameterName.ToString());
-        Typed->SetStringField(TEXT("group"), VectorParam->Group.ToString());
-        Typed->SetNumberField(TEXT("sortPriority"), VectorParam->SortPriority);
-        TSharedPtr<FJsonObject> DefVal = MakeShared<FJsonObject>();
-        DefVal->SetNumberField(TEXT("r"), VectorParam->DefaultValue.R);
-        DefVal->SetNumberField(TEXT("g"), VectorParam->DefaultValue.G);
-        DefVal->SetNumberField(TEXT("b"), VectorParam->DefaultValue.B);
-        DefVal->SetNumberField(TEXT("a"), VectorParam->DefaultValue.A);
-        Typed->SetObjectField(TEXT("defaultValue"), DefVal);
-    }
-    else if (UMaterialExpressionStaticSwitchParameter* SwitchParam = Cast<UMaterialExpressionStaticSwitchParameter>(Expression))
-    {
-        Typed->SetStringField(TEXT("kind"), TEXT("StaticSwitchParameter"));
-        Typed->SetStringField(TEXT("parameterName"), SwitchParam->ParameterName.ToString());
-        Typed->SetStringField(TEXT("group"), SwitchParam->Group.ToString());
-        Typed->SetNumberField(TEXT("sortPriority"), SwitchParam->SortPriority);
-        Typed->SetBoolField(TEXT("defaultValue"), SwitchParam->DefaultValue);
-    }
-    else if (UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
-    {
-        Typed->SetStringField(TEXT("kind"), TEXT("Parameter"));
-        Typed->SetStringField(TEXT("parameterName"), Parameter->ParameterName.ToString());
-        Typed->SetStringField(TEXT("group"), Parameter->Group.ToString());
-        Typed->SetNumberField(TEXT("sortPriority"), Parameter->SortPriority);
-    }
-    else
-    {
-        Typed->SetStringField(TEXT("kind"), TEXT("Expression"));
-    }
+    else if (Cast<UMaterialExpressionScalarParameter>(Expression))    { Typed->SetStringField(TEXT("kind"), TEXT("ScalarParameter")); }
+    else if (Cast<UMaterialExpressionVectorParameter>(Expression))    { Typed->SetStringField(TEXT("kind"), TEXT("VectorParameter")); }
+    else if (Cast<UMaterialExpressionStaticSwitchParameter>(Expression)) { Typed->SetStringField(TEXT("kind"), TEXT("StaticSwitchParameter")); }
+    else if (Cast<UMaterialExpressionParameter>(Expression))           { Typed->SetStringField(TEXT("kind"), TEXT("Parameter")); }
+    else                                                                 { Typed->SetStringField(TEXT("kind"), TEXT("Expression")); }
+    (void)bDispatched;  // silence unused-var warning
 
     Out->SetObjectField(TEXT("typedSummary"), Typed);
 }
@@ -499,7 +464,7 @@ static TSharedPtr<FJsonObject> McpDiagnosticsBuildGraphSummary(
                         MaxDepth <= 1 ? 24 : 96,
                         bPropertyDumpTruncated));
                 bOutTruncated = bOutTruncated || bPropertyDumpTruncated;
-                McpDiagnosticsAppendTypedSummary(Expression, ExpressionObject.ToSharedRef());
+                McpDiagnosticsAppendTypedSummary(Owner, Expression, ExpressionObject.ToSharedRef());
             }
             ExpressionArray.Add(MakeShared<FJsonValueObject>(ExpressionObject));
         }
@@ -794,7 +759,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialDiagnosticsAction(
             McpDiagnosticsGetStringArray(Payload, TEXT("propertyAllowList")),
             MaxDepth <= 1 ? 24 : 128,
             bTruncated));
-        McpDiagnosticsAppendTypedSummary(Expression, Result.ToSharedRef());
+        McpDiagnosticsAppendTypedSummary(GraphOwner, Expression, Result.ToSharedRef());
         Result->SetBoolField(TEXT("truncated"), bTruncated);
         SendAutomationResponse(Socket, RequestId, true, TEXT("Raw material expression diagnostics dumped."), Result);
         return true;
