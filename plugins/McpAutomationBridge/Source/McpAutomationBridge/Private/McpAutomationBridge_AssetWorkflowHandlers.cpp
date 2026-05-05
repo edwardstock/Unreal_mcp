@@ -646,6 +646,43 @@ TSharedPtr<FJsonObject> McpBuildExpressionRef(
   return Obj;
 }
 
+// Single source of truth for "JSON describing one input pin".
+// `PinName` is the name of the input (e.g. property name from the property walk, or
+// the function input name for MaterialFunctionCall). When unconnected, only `name`
+// and `isConnected: false` are emitted; otherwise the full set of connection fields
+// is appended (matching the legacy McpAddConnectedExpressionInfo contract plus
+// sourceOutputIndex/sourceOutputName).
+void McpEmitInputPinJson(
+    const FMcpMaterialGraphOwner& Owner,
+    const FExpressionInput* Input,
+    const FString& PinName,
+    const TSharedRef<FJsonObject>& Out)
+{
+  Out->SetStringField(TEXT("name"), PinName);
+  if (!Input || !Input->Expression)
+  {
+    Out->SetBoolField(TEXT("isConnected"), false);
+    return;
+  }
+
+  Out->SetBoolField(TEXT("isConnected"), true);
+  Out->SetObjectField(TEXT("source"), McpBuildExpressionRef(Owner, Input->Expression));
+  Out->SetStringField(TEXT("connectedToId"), Input->Expression->MaterialExpressionGuid.ToString());
+  Out->SetStringField(TEXT("connectedToExpressionGuid"), Input->Expression->MaterialExpressionGuid.ToString());
+  Out->SetStringField(TEXT("connectedToExpressionPath"), Input->Expression->GetPathName());
+  Out->SetNumberField(TEXT("connectedToIndex"), McpExpressionIndex(Owner, Input->Expression));
+  Out->SetStringField(TEXT("connectedToName"), Input->Expression->GetName());
+  Out->SetNumberField(TEXT("sourceOutputIndex"), Input->OutputIndex);
+
+  bool bResolvedOutputName = false;
+  const FString OutputName = McpGetOutputName(Input->Expression, Input->OutputIndex, bResolvedOutputName);
+  if (!OutputName.IsEmpty())
+  {
+    Out->SetStringField(TEXT("sourceOutputName"), OutputName);
+  }
+  Out->SetBoolField(TEXT("sourceOutputNameResolved"), bResolvedOutputName);
+}
+
 void McpAddConnectedExpressionInfo(
     const FMcpMaterialGraphOwner& Owner,
     const FExpressionInput* Input,
