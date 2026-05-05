@@ -931,6 +931,11 @@ private:
                                                const TSharedPtr<FJsonObject>& Payload,
                                                TSharedPtr<FMcpBridgeWebSocket> Socket);
 
+  // R10: batch read-back action - fetch get_material_expression_details for many nodes in one request
+  bool HandleBulkGetMaterialExpressionDetails(const FString& RequestId, const FString& Action,
+                                              const TSharedPtr<FJsonObject>& Payload,
+                                              TSharedPtr<FMcpBridgeWebSocket> Socket);
+
   // Phase 9: Texture handlers
   bool HandleManageTextureAction(
       const FString &RequestId, const FString &Action,

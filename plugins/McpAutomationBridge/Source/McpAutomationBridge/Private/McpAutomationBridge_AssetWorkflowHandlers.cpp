@@ -7389,6 +7389,145 @@ bool UMcpAutomationBridgeSubsystem::HandleGetSetMaterialAttributesOverrides(
 }
 
 // ============================================================================
+// BULK GET MATERIAL EXPRESSION DETAILS (R10)
+// ============================================================================
+
+bool UMcpAutomationBridgeSubsystem::HandleBulkGetMaterialExpressionDetails(
+    const FString& RequestId, const FString& Action,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket)
+{
+    if (!Action.Equals(TEXT("bulk_get_material_expression_details"), ESearchCase::IgnoreCase)) return false;
+
+#if WITH_EDITOR
+    if (!Payload.IsValid())
+    { SendAutomationError(Socket, RequestId, TEXT("payload missing"), TEXT("INVALID_PAYLOAD")); return true; }
+
+    FString AssetPath;
+    if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+    { SendAutomationError(Socket, RequestId, TEXT("assetPath required"), TEXT("INVALID_ARGUMENT")); return true; }
+
+    FMcpMaterialGraphOwner Owner;
+    FString Err;
+    if (!McpResolveMaterialGraphOwner(AssetPath, Owner, Err))
+    { SendAutomationError(Socket, RequestId, Err,
+        Err.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE")); return true; }
+
+    bool bIncludeConsumers = false;
+    Payload->TryGetBoolField(TEXT("includeConsumers"), bIncludeConsumers);
+
+    const TArray<TSharedPtr<FJsonValue>>* IndicesPtr = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* GuidsPtr = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* NodeIdsPtr = nullptr;
+    Payload->TryGetArrayField(TEXT("indices"), IndicesPtr);
+    Payload->TryGetArrayField(TEXT("guids"), GuidsPtr);
+    Payload->TryGetArrayField(TEXT("nodeIds"), NodeIdsPtr);
+
+    int32 KindCount = (IndicesPtr ? 1 : 0) + (GuidsPtr ? 1 : 0) + (NodeIdsPtr ? 1 : 0);
+    if (KindCount != 1)
+    {
+        SendAutomationError(Socket, RequestId,
+                            TEXT("exactly one of indices/guids/nodeIds is required"),
+                            TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    auto AppendItem = [&](const TSharedPtr<FJsonObject>& Identifier, const TSharedPtr<FJsonObject>& SyntheticPayload, TArray<TSharedPtr<FJsonValue>>& Results, int32& OkCount, int32& ErrorCount)
+    {
+        UMaterialExpression* Expr = McpFindGraphExpressionFromPayload(Owner, SyntheticPayload);
+        TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+        Item->SetObjectField(TEXT("identifier"), Identifier);
+        if (!Expr)
+        {
+            Item->SetStringField(TEXT("error"), TEXT("NODE_NOT_FOUND"));
+            Item->SetStringField(TEXT("message"), TEXT("expression not found in graph"));
+            ++ErrorCount;
+        }
+        else
+        {
+            Item->SetObjectField(TEXT("details"),
+                                 McpBuildExpressionDetailsObject(Owner, Expr, bIncludeConsumers));
+            ++OkCount;
+        }
+        Results.Add(MakeShared<FJsonValueObject>(Item));
+    };
+
+    TArray<TSharedPtr<FJsonValue>> Results;
+    int32 OkCount = 0, ErrorCount = 0;
+
+    if (IndicesPtr)
+    {
+        if (IndicesPtr->Num() == 0)
+        { SendAutomationError(Socket, RequestId, TEXT("indices[] is empty"), TEXT("INVALID_ARGUMENT")); return true; }
+
+        for (const TSharedPtr<FJsonValue>& V : *IndicesPtr)
+        {
+            int32 Idx = INDEX_NONE;
+            if (V.IsValid() && V->TryGetNumber(Idx))
+            {
+                TSharedPtr<FJsonObject> Identifier = MakeShared<FJsonObject>();
+                Identifier->SetNumberField(TEXT("index"), Idx);
+
+                TSharedPtr<FJsonObject> Syn = MakeShared<FJsonObject>();
+                Syn->SetNumberField(TEXT("expressionIndex"), Idx);
+                AppendItem(Identifier, Syn, Results, OkCount, ErrorCount);
+            }
+        }
+    }
+    else if (GuidsPtr)
+    {
+        if (GuidsPtr->Num() == 0)
+        { SendAutomationError(Socket, RequestId, TEXT("guids[] is empty"), TEXT("INVALID_ARGUMENT")); return true; }
+
+        for (const TSharedPtr<FJsonValue>& V : *GuidsPtr)
+        {
+            FString Guid;
+            if (V.IsValid() && V->TryGetString(Guid))
+            {
+                TSharedPtr<FJsonObject> Identifier = MakeShared<FJsonObject>();
+                Identifier->SetStringField(TEXT("guid"), Guid);
+
+                TSharedPtr<FJsonObject> Syn = MakeShared<FJsonObject>();
+                Syn->SetStringField(TEXT("expressionGuid"), Guid);
+                AppendItem(Identifier, Syn, Results, OkCount, ErrorCount);
+            }
+        }
+    }
+    else // NodeIdsPtr
+    {
+        if (NodeIdsPtr->Num() == 0)
+        { SendAutomationError(Socket, RequestId, TEXT("nodeIds[] is empty"), TEXT("INVALID_ARGUMENT")); return true; }
+
+        for (const TSharedPtr<FJsonValue>& V : *NodeIdsPtr)
+        {
+            FString NodeId;
+            if (V.IsValid() && V->TryGetString(NodeId))
+            {
+                TSharedPtr<FJsonObject> Identifier = MakeShared<FJsonObject>();
+                Identifier->SetStringField(TEXT("nodeId"), NodeId);
+
+                TSharedPtr<FJsonObject> Syn = MakeShared<FJsonObject>();
+                Syn->SetStringField(TEXT("nodeId"), NodeId);
+                AppendItem(Identifier, Syn, Results, OkCount, ErrorCount);
+            }
+        }
+    }
+
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(Result, Owner.Asset);
+    Result->SetStringField(TEXT("assetPath"), AssetPath);
+    Result->SetArrayField(TEXT("results"), Results);
+    Result->SetNumberField(TEXT("okCount"), OkCount);
+    Result->SetNumberField(TEXT("errorCount"), ErrorCount);
+    SendAutomationResponse(Socket, RequestId, true, TEXT("Bulk material expression details retrieved"), Result, FString());
+    return true;
+#else
+    SendAutomationResponse(Socket, RequestId, false, TEXT("editor only"), nullptr, TEXT("NOT_IMPLEMENTED"));
+    return true;
+#endif
+}
+
+// ============================================================================
 // REBUILD MATERIAL
 // ============================================================================
 

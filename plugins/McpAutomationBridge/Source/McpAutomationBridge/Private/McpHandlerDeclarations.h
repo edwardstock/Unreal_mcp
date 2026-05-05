@@ -159,6 +159,9 @@ namespace McpHandlers
 
         // N3: read-back action - returns all Set/GetMaterialAttributes expression overrides in a material
         MCP_DECLARE_HANDLER(GetSetMaterialAttributesOverrides);
+
+        // R10: batch read-back action - fetch get_material_expression_details for many nodes in one request
+        MCP_DECLARE_HANDLER(BulkGetMaterialExpressionDetails);
     }
 
     // =========================================================================
