@@ -187,6 +187,7 @@ struct FMcpMaterialNodeRect
            Y + H + Padding > Other.Y;
   }
 };
+} // namespace
 
 static FString McpExpressionPath(const UMaterialExpression* Expr)
 {
@@ -671,6 +672,9 @@ void McpAddConnectedExpressionInfo(
   Obj->SetBoolField(TEXT("sourceOutputNameResolved"), bResolvedOutputName);
 }
 
+namespace
+{
+
 static TArray<TSharedPtr<FJsonValue>> McpBuildExpressionInputsArray(
     const FMcpMaterialGraphOwner& Owner,
     UMaterialExpression* Expression)
@@ -838,49 +842,7 @@ static void McpAppendTypedExpressionDetails(
   if (!Expression) return;
   if (McpMaterialExpressionDetails::AppendTypedDetails(Owner, Expression, Resp)) return;
 
-  if (UMaterialExpressionLandscapeLayerWeight* LayerWeight = Cast<UMaterialExpressionLandscapeLayerWeight>(Expression))
-  {
-    Resp->SetStringField(TEXT("parameterName"), LayerWeight->ParameterName.ToString());
-    Resp->SetNumberField(TEXT("previewWeight"), LayerWeight->PreviewWeight);
-    TSharedPtr<FJsonObject> BaseObj = McpHandlerUtils::CreateResultObject();
-    BaseObj->SetStringField(TEXT("name"), TEXT("Base"));
-    McpAddConnectedExpressionInfo(Owner, &LayerWeight->Base, BaseObj.ToSharedRef());
-    Resp->SetObjectField(TEXT("baseInput"), BaseObj);
-
-    TSharedPtr<FJsonObject> LayerObj = McpHandlerUtils::CreateResultObject();
-    LayerObj->SetStringField(TEXT("name"), TEXT("Layer"));
-    McpAddConnectedExpressionInfo(Owner, &LayerWeight->Layer, LayerObj.ToSharedRef());
-    Resp->SetObjectField(TEXT("layerInput"), LayerObj);
-  }
-  else if (UMaterialExpressionLandscapeLayerBlend* LayerBlend = Cast<UMaterialExpressionLandscapeLayerBlend>(Expression))
-  {
-    TArray<TSharedPtr<FJsonValue>> LayersArray;
-    for (const FLayerBlendInput& Layer : LayerBlend->Layers)
-    {
-      TSharedPtr<FJsonObject> LayerObj = McpHandlerUtils::CreateResultObject();
-      LayerObj->SetStringField(TEXT("name"), Layer.LayerName.ToString());
-      LayerObj->SetStringField(TEXT("blendType"), McpLandscapeBlendTypeToString(Layer.BlendType));
-      LayerObj->SetNumberField(TEXT("previewWeight"), Layer.PreviewWeight);
-      LayerObj->SetNumberField(TEXT("constHeightInput"), Layer.ConstHeightInput);
-      TSharedPtr<FJsonObject> ConstLayerInput = McpHandlerUtils::CreateResultObject();
-      ConstLayerInput->SetNumberField(TEXT("x"), Layer.ConstLayerInput.X);
-      ConstLayerInput->SetNumberField(TEXT("y"), Layer.ConstLayerInput.Y);
-      ConstLayerInput->SetNumberField(TEXT("z"), Layer.ConstLayerInput.Z);
-      LayerObj->SetObjectField(TEXT("constLayerInput"), ConstLayerInput);
-
-      TSharedPtr<FJsonObject> LayerInputObj = McpHandlerUtils::CreateResultObject();
-      McpAddConnectedExpressionInfo(Owner, &Layer.LayerInput, LayerInputObj.ToSharedRef());
-      LayerObj->SetObjectField(TEXT("layerInput"), LayerInputObj);
-
-      TSharedPtr<FJsonObject> HeightInputObj = McpHandlerUtils::CreateResultObject();
-      McpAddConnectedExpressionInfo(Owner, &Layer.HeightInput, HeightInputObj.ToSharedRef());
-      LayerObj->SetObjectField(TEXT("heightInput"), HeightInputObj);
-
-      LayersArray.Add(MakeShared<FJsonValueObject>(LayerObj));
-    }
-    Resp->SetArrayField(TEXT("layers"), LayersArray);
-  }
-  else if (UMaterialExpressionMaterialFunctionCall* FuncCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expression))
+  if (UMaterialExpressionMaterialFunctionCall* FuncCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expression))
   {
     if (FuncCall->MaterialFunction)
     {

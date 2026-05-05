@@ -24,12 +24,23 @@
 #include "Materials/MaterialExpressionGetMaterialAttributes.h"
 #include "Materials/MaterialExpressionNamedReroute.h"
 #include "Materials/MaterialAttributeDefinitionMap.h"
+#include "Materials/MaterialExpressionLandscapeLayerWeight.h"
+#include "Materials/MaterialExpressionLandscapeLayerBlend.h"
+#endif
+
+#if WITH_EDITOR
+extern void McpAddConnectedExpressionInfo(
+    const FMcpMaterialGraphOwner& Owner,
+    const struct FExpressionInput* Input,
+    const TSharedRef<FJsonObject>& Obj);
+
+extern FString McpLandscapeBlendTypeToString(ELandscapeLayerBlendType BlendType);
 #endif
 
 namespace McpMaterialExpressionDetails
 {
     bool AppendTypedDetails(
-        const FMcpMaterialGraphOwner& /*Owner*/,
+        const FMcpMaterialGraphOwner& Owner,
         UMaterialExpression* Expression,
         const TSharedRef<FJsonObject>& Resp)
     {
@@ -97,6 +108,52 @@ namespace McpMaterialExpressionDetails
         {
             Resp->SetStringField(TEXT("parameterName"), SwitchParam->ParameterName.ToString());
             Resp->SetBoolField(TEXT("defaultValue"), SwitchParam->DefaultValue);
+            return true;
+        }
+        if (UMaterialExpressionLandscapeLayerWeight* LayerWeight = Cast<UMaterialExpressionLandscapeLayerWeight>(Expression))
+        {
+            Resp->SetStringField(TEXT("parameterName"), LayerWeight->ParameterName.ToString());
+            Resp->SetNumberField(TEXT("previewWeight"), LayerWeight->PreviewWeight);
+
+            TSharedPtr<FJsonObject> BaseObj = MakeShared<FJsonObject>();
+            BaseObj->SetStringField(TEXT("name"), TEXT("Base"));
+            ::McpAddConnectedExpressionInfo(Owner, &LayerWeight->Base, BaseObj.ToSharedRef());
+            Resp->SetObjectField(TEXT("baseInput"), BaseObj);
+
+            TSharedPtr<FJsonObject> LayerObj = MakeShared<FJsonObject>();
+            LayerObj->SetStringField(TEXT("name"), TEXT("Layer"));
+            ::McpAddConnectedExpressionInfo(Owner, &LayerWeight->Layer, LayerObj.ToSharedRef());
+            Resp->SetObjectField(TEXT("layerInput"), LayerObj);
+            return true;
+        }
+        if (UMaterialExpressionLandscapeLayerBlend* LayerBlend = Cast<UMaterialExpressionLandscapeLayerBlend>(Expression))
+        {
+            TArray<TSharedPtr<FJsonValue>> LayersArray;
+            for (const FLayerBlendInput& Layer : LayerBlend->Layers)
+            {
+                TSharedPtr<FJsonObject> LayerObj = MakeShared<FJsonObject>();
+                LayerObj->SetStringField(TEXT("name"), Layer.LayerName.ToString());
+                LayerObj->SetStringField(TEXT("blendType"), ::McpLandscapeBlendTypeToString(Layer.BlendType));
+                LayerObj->SetNumberField(TEXT("previewWeight"), Layer.PreviewWeight);
+                LayerObj->SetNumberField(TEXT("constHeightInput"), Layer.ConstHeightInput);
+
+                TSharedPtr<FJsonObject> ConstLayerInput = MakeShared<FJsonObject>();
+                ConstLayerInput->SetNumberField(TEXT("x"), Layer.ConstLayerInput.X);
+                ConstLayerInput->SetNumberField(TEXT("y"), Layer.ConstLayerInput.Y);
+                ConstLayerInput->SetNumberField(TEXT("z"), Layer.ConstLayerInput.Z);
+                LayerObj->SetObjectField(TEXT("constLayerInput"), ConstLayerInput);
+
+                TSharedPtr<FJsonObject> LayerInputObj = MakeShared<FJsonObject>();
+                ::McpAddConnectedExpressionInfo(Owner, &Layer.LayerInput, LayerInputObj.ToSharedRef());
+                LayerObj->SetObjectField(TEXT("layerInput"), LayerInputObj);
+
+                TSharedPtr<FJsonObject> HeightInputObj = MakeShared<FJsonObject>();
+                ::McpAddConnectedExpressionInfo(Owner, &Layer.HeightInput, HeightInputObj.ToSharedRef());
+                LayerObj->SetObjectField(TEXT("heightInput"), HeightInputObj);
+
+                LayersArray.Add(MakeShared<FJsonValueObject>(LayerObj));
+            }
+            Resp->SetArrayField(TEXT("layers"), LayersArray);
             return true;
         }
         return false;
