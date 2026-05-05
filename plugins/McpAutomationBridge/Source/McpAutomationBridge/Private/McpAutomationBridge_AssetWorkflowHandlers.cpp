@@ -683,34 +683,6 @@ void McpEmitInputPinJson(
   Out->SetBoolField(TEXT("sourceOutputNameResolved"), bResolvedOutputName);
 }
 
-void McpAddConnectedExpressionInfo(
-    const FMcpMaterialGraphOwner& Owner,
-    const FExpressionInput* Input,
-    const TSharedRef<FJsonObject>& Obj)
-{
-  if (!Input || !Input->Expression)
-  {
-    Obj->SetBoolField(TEXT("isConnected"), false);
-    return;
-  }
-
-  Obj->SetBoolField(TEXT("isConnected"), true);
-  Obj->SetObjectField(TEXT("source"), McpBuildExpressionRef(Owner, Input->Expression));
-  Obj->SetStringField(TEXT("connectedToId"), Input->Expression->MaterialExpressionGuid.ToString());
-  Obj->SetStringField(TEXT("connectedToExpressionGuid"), Input->Expression->MaterialExpressionGuid.ToString());
-  Obj->SetStringField(TEXT("connectedToExpressionPath"), Input->Expression->GetPathName());
-  Obj->SetNumberField(TEXT("connectedToIndex"), McpExpressionIndex(Owner, Input->Expression));
-  Obj->SetStringField(TEXT("connectedToName"), Input->Expression->GetName());
-  Obj->SetNumberField(TEXT("sourceOutputIndex"), Input->OutputIndex);
-  bool bResolvedOutputName = false;
-  const FString OutputName = McpGetOutputName(Input->Expression, Input->OutputIndex, bResolvedOutputName);
-  if (!OutputName.IsEmpty())
-  {
-    Obj->SetStringField(TEXT("sourceOutputName"), OutputName);
-  }
-  Obj->SetBoolField(TEXT("sourceOutputNameResolved"), bResolvedOutputName);
-}
-
 namespace
 {
 
