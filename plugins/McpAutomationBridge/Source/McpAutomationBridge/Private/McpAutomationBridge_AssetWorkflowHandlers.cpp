@@ -7080,9 +7080,6 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
 
     // build node list (shared for Material and MaterialFunction)
     TArray<TSharedPtr<FJsonValue>> NodeList;
-    TMap<UMaterialExpression*, int32> NodeIndexMap;
-    for (int32 i = 0; i < Expressions.Num(); ++i)
-      NodeIndexMap.Add(Expressions[i], i);
 
     for (int32 i = 0; i < Expressions.Num(); ++i)
     {
@@ -7102,18 +7099,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
           {
             FExpressionInput* Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expr);
             TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
-            InputObj->SetStringField(TEXT("name"), Property->GetName());
-            InputObj->SetBoolField(TEXT("isConnected"), Input->Expression != nullptr);
-            if (Input->Expression)
-            {
-              int32* ConnectedIndex = NodeIndexMap.Find(Input->Expression);
-              if (ConnectedIndex)
-                InputObj->SetNumberField(TEXT("connectedToIndex"), *ConnectedIndex);
-              InputObj->SetStringField(TEXT("connectedToId"), Input->Expression->MaterialExpressionGuid.ToString());
-              InputObj->SetStringField(TEXT("connectedToExpressionGuid"), Input->Expression->MaterialExpressionGuid.ToString());
-              InputObj->SetStringField(TEXT("connectedToExpressionPath"), Input->Expression->GetPathName());
-              InputObj->SetStringField(TEXT("connectedToName"), Input->Expression->GetName());
-            }
+            McpEmitInputPinJson(GraphOwner, Input, Property->GetName(), InputObj.ToSharedRef());
             InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
           }
         }
