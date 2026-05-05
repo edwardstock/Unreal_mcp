@@ -76,6 +76,29 @@ namespace McpMaterialExpressionDetails
             }
             return true;
         }
+        if (UMaterialExpressionScalarParameter* ScalarParam = Cast<UMaterialExpressionScalarParameter>(Expression))
+        {
+            Resp->SetStringField(TEXT("parameterName"), ScalarParam->ParameterName.ToString());
+            Resp->SetNumberField(TEXT("defaultValue"), ScalarParam->DefaultValue);
+            return true;
+        }
+        if (UMaterialExpressionVectorParameter* VectorParam = Cast<UMaterialExpressionVectorParameter>(Expression))
+        {
+            Resp->SetStringField(TEXT("parameterName"), VectorParam->ParameterName.ToString());
+            TSharedPtr<FJsonObject> DefaultObj = MakeShared<FJsonObject>();
+            DefaultObj->SetNumberField(TEXT("r"), VectorParam->DefaultValue.R);
+            DefaultObj->SetNumberField(TEXT("g"), VectorParam->DefaultValue.G);
+            DefaultObj->SetNumberField(TEXT("b"), VectorParam->DefaultValue.B);
+            DefaultObj->SetNumberField(TEXT("a"), VectorParam->DefaultValue.A);
+            Resp->SetObjectField(TEXT("defaultValue"), DefaultObj);
+            return true;
+        }
+        if (UMaterialExpressionStaticSwitchParameter* SwitchParam = Cast<UMaterialExpressionStaticSwitchParameter>(Expression))
+        {
+            Resp->SetStringField(TEXT("parameterName"), SwitchParam->ParameterName.ToString());
+            Resp->SetBoolField(TEXT("defaultValue"), SwitchParam->DefaultValue);
+            return true;
+        }
         return false;
     }
 

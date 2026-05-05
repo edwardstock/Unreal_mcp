@@ -838,27 +838,7 @@ static void McpAppendTypedExpressionDetails(
   if (!Expression) return;
   if (McpMaterialExpressionDetails::AppendTypedDetails(Owner, Expression, Resp)) return;
 
-  if (UMaterialExpressionScalarParameter* ScalarParam = Cast<UMaterialExpressionScalarParameter>(Expression))
-  {
-    Resp->SetStringField(TEXT("parameterName"), ScalarParam->ParameterName.ToString());
-    Resp->SetNumberField(TEXT("defaultValue"), ScalarParam->DefaultValue);
-  }
-  else if (UMaterialExpressionVectorParameter* VectorParam = Cast<UMaterialExpressionVectorParameter>(Expression))
-  {
-    Resp->SetStringField(TEXT("parameterName"), VectorParam->ParameterName.ToString());
-    TSharedPtr<FJsonObject> DefaultObj = McpHandlerUtils::CreateResultObject();
-    DefaultObj->SetNumberField(TEXT("r"), VectorParam->DefaultValue.R);
-    DefaultObj->SetNumberField(TEXT("g"), VectorParam->DefaultValue.G);
-    DefaultObj->SetNumberField(TEXT("b"), VectorParam->DefaultValue.B);
-    DefaultObj->SetNumberField(TEXT("a"), VectorParam->DefaultValue.A);
-    Resp->SetObjectField(TEXT("defaultValue"), DefaultObj);
-  }
-  else if (UMaterialExpressionStaticSwitchParameter* SwitchParam = Cast<UMaterialExpressionStaticSwitchParameter>(Expression))
-  {
-    Resp->SetStringField(TEXT("parameterName"), SwitchParam->ParameterName.ToString());
-    Resp->SetBoolField(TEXT("defaultValue"), SwitchParam->DefaultValue);
-  }
-  else if (UMaterialExpressionLandscapeLayerWeight* LayerWeight = Cast<UMaterialExpressionLandscapeLayerWeight>(Expression))
+  if (UMaterialExpressionLandscapeLayerWeight* LayerWeight = Cast<UMaterialExpressionLandscapeLayerWeight>(Expression))
   {
     Resp->SetStringField(TEXT("parameterName"), LayerWeight->ParameterName.ToString());
     Resp->SetNumberField(TEXT("previewWeight"), LayerWeight->PreviewWeight);
