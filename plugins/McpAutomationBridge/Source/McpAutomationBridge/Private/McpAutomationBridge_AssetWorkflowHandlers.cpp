@@ -776,14 +776,7 @@ static TArray<TSharedPtr<FJsonValue>> McpBuildExpressionConsumersArray(
             TSharedPtr<FJsonObject> ConsumerObj = McpHandlerUtils::CreateResultObject();
             ConsumerObj->SetObjectField(TEXT("target"), McpBuildExpressionRef(Owner, Candidate));
             ConsumerObj->SetStringField(TEXT("targetInputPin"), Property->GetName());
-            ConsumerObj->SetNumberField(TEXT("sourceOutputIndex"), Input->OutputIndex);
-            bool bResolvedOutputName = false;
-            const FString OutputName = McpGetOutputName(SourceExpression, Input->OutputIndex, bResolvedOutputName);
-            if (!OutputName.IsEmpty())
-            {
-              ConsumerObj->SetStringField(TEXT("sourceOutputName"), OutputName);
-            }
-            ConsumerObj->SetBoolField(TEXT("sourceOutputNameResolved"), bResolvedOutputName);
+            McpEmitInputPinJson(Owner, Input, Property->GetName(), ConsumerObj.ToSharedRef());
             Consumers.Add(MakeShared<FJsonValueObject>(ConsumerObj));
           }
         }
