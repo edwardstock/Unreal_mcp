@@ -825,6 +825,9 @@ namespace McpHandlers
 
         // N1: read-back action - returns details for a single Custom HLSL expression node
         MCP_DECLARE_HANDLER(GetCustomExpression);
+
+        // N2: read-back action - returns defaults/ranges for every parameter expression in a material
+        MCP_DECLARE_HANDLER(GetParameterDefaults);
     }
 
     // =========================================================================

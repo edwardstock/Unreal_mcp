@@ -13,6 +13,7 @@
 #include "McpHandlerUtils.h"
 #include "McpAutomationBridgeHelpers.h"
 #include "McpVersionCompatibility.h"
+#include "McpAutomationBridge_MaterialExpressionDetails.h"
 
 // JSON & Serialization
 #include "Dom/JsonObject.h"
@@ -23,6 +24,9 @@
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionStaticSwitchParameter.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
+#include "Materials/MaterialExpressionParameter.h"
+#include "Materials/MaterialExpressionTextureSampleParameter.h"
+#include "Materials/MaterialExpressionTextureObjectParameter.h"
 #include "ScopedTransaction.h"
 
 // Local macro: validates assetPath, resolves it through McpResolveMaterialGraphOwner
@@ -293,6 +297,73 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_ParameterNodes(
 
 #undef LOAD_GRAPH_OWNER_OR_RETURN
 
+// helpers defined in McpAutomationBridge_AssetWorkflowHandlers.cpp (file-scope externals);
+// McpResolveMaterialGraphOwner and McpGetGraphExpressions are static inline in McpAutomationBridgeHelpers.h
+extern int32 McpExpressionIndex(const FMcpMaterialGraphOwner& Owner, const UMaterialExpression* Expression);
+extern void McpAddExpressionIdentity(const FMcpMaterialGraphOwner& Owner, UMaterialExpression* Expression, int32 Index, const TSharedRef<FJsonObject>& Out);
+
+bool UMcpAutomationBridgeSubsystem::HandleGetParameterDefaults(
+    const FString& RequestId, const FString& Action,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket)
+{
+    if (!Action.Equals(TEXT("get_parameter_defaults"), ESearchCase::IgnoreCase)) return false;
+
+    if (!Payload.IsValid())
+    {
+        SendAutomationError(Socket, RequestId, TEXT("payload missing"), TEXT("INVALID_PAYLOAD"));
+        return true;
+    }
+
+    FString AssetPath;
+    if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+    {
+        SendAutomationError(Socket, RequestId, TEXT("assetPath required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    FMcpMaterialGraphOwner Owner;
+    FString Err;
+    if (!McpResolveMaterialGraphOwner(AssetPath, Owner, Err))
+    {
+        SendAutomationError(Socket, RequestId, Err,
+            Err.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
+        return true;
+    }
+
+    const TArray<TObjectPtr<UMaterialExpression>>* AllPtr = McpGetGraphExpressions(Owner);
+    static const TArray<TObjectPtr<UMaterialExpression>> Empty;
+    const auto& All = AllPtr ? *AllPtr : Empty;
+
+    TArray<TSharedPtr<FJsonValue>> Items;
+    for (int32 i = 0; i < All.Num(); ++i)
+    {
+        UMaterialExpression* Expr = All[i];
+        if (!Expr) continue;
+        // UMaterialExpressionTextureSampleParameter and UMaterialExpressionTextureObjectParameter
+        // are NOT subclasses of UMaterialExpressionParameter, so check each explicitly
+        if (!Cast<UMaterialExpressionParameter>(Expr) &&
+            !Cast<UMaterialExpressionTextureSampleParameter>(Expr) &&
+            !Cast<UMaterialExpressionTextureObjectParameter>(Expr))
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+        TSharedPtr<FJsonObject> Identity = MakeShared<FJsonObject>();
+        McpAddExpressionIdentity(Owner, Expr, i, Identity.ToSharedRef());
+        Item->SetObjectField(TEXT("nodeIdentity"), Identity);
+        Item->SetStringField(TEXT("kind"), Expr->GetClass()->GetName());
+        McpMaterialExpressionDetails::AppendParameterDetails(Expr, Item.ToSharedRef());
+        Items.Add(MakeShared<FJsonValueObject>(Item));
+    }
+
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    McpHandlerUtils::AddVerification(Result, Owner.Asset);
+    Result->SetArrayField(TEXT("parameters"), Items);
+    SendAutomationResponse(Socket, RequestId, true, TEXT("Parameter defaults retrieved"), Result, FString());
+    return true;
+}
+
 #else // !WITH_EDITOR
 
 bool UMcpAutomationBridgeSubsystem::HandleAuthoring_ParameterNodes(
@@ -300,6 +371,14 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_ParameterNodes(
     const FString& /*RequestId*/,
     const TSharedPtr<FJsonObject>& /*Payload*/,
     TSharedPtr<FMcpBridgeWebSocket> /*Socket*/) {
+    return false;
+}
+
+bool UMcpAutomationBridgeSubsystem::HandleGetParameterDefaults(
+    const FString& /*RequestId*/, const FString& /*Action*/,
+    const TSharedPtr<FJsonObject>& /*Payload*/,
+    TSharedPtr<FMcpBridgeWebSocket> /*Socket*/)
+{
     return false;
 }
 
