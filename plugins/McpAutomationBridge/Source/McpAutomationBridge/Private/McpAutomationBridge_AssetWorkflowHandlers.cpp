@@ -7059,6 +7059,9 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
     Result->SetStringField(TEXT("assetPath"), AssetPath);
     Result->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
 
+    bool bIncludeOutputPins = false;
+    Payload->TryGetBoolField(TEXT("includeOutputPins"), bIncludeOutputPins);
+
     const TArray<TObjectPtr<UMaterialExpression>>* ExpressionsPtr = McpGetGraphExpressions(GraphOwner);
     static const TArray<TObjectPtr<UMaterialExpression>> EmptyExprs;
     const TArray<TObjectPtr<UMaterialExpression>>& Expressions = ExpressionsPtr ? *ExpressionsPtr : EmptyExprs;
@@ -7134,6 +7137,56 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
       }
 
       NodeObj->SetArrayField(TEXT("inputs"), InputsArray);
+
+      if (bIncludeOutputPins)
+      {
+          TArray<TSharedPtr<FJsonValue>> OutputsArray;
+          if (UMaterialExpressionMaterialFunctionCall* FC = Cast<UMaterialExpressionMaterialFunctionCall>(Expr))
+          {
+              for (int32 OutputIndex = 0; OutputIndex < FC->FunctionOutputs.Num(); ++OutputIndex)
+              {
+                  const FFunctionExpressionOutput& Out = FC->FunctionOutputs[OutputIndex];
+                  TSharedPtr<FJsonObject> OutObj = McpHandlerUtils::CreateResultObject();
+                  OutObj->SetNumberField(TEXT("index"), OutputIndex);
+                  bool bResolvedName = false;
+                  FString Name = McpGetOutputName(Expr, OutputIndex, bResolvedName);
+                  if (Name.IsEmpty() && Out.ExpressionOutput)
+                  {
+                      Name = Out.ExpressionOutput->OutputName.ToString();
+                      bResolvedName = !Name.IsEmpty();
+                  }
+                  if (!Name.IsEmpty()) OutObj->SetStringField(TEXT("name"), Name);
+                  OutObj->SetBoolField(TEXT("nameResolved"), bResolvedName);
+                  OutputsArray.Add(MakeShared<FJsonValueObject>(OutObj));
+              }
+          }
+          else
+          {
+              TArray<FExpressionOutput>& Outputs = Expr->GetOutputs();
+              for (int32 OutputIndex = 0; OutputIndex < Outputs.Num(); ++OutputIndex)
+              {
+                  const FExpressionOutput& Out = Outputs[OutputIndex];
+                  TSharedPtr<FJsonObject> OutObj = McpHandlerUtils::CreateResultObject();
+                  OutObj->SetNumberField(TEXT("index"), OutputIndex);
+                  bool bResolvedName = false;
+                  const FString Name = McpGetOutputName(Expr, OutputIndex, bResolvedName);
+                  if (!Name.IsEmpty()) OutObj->SetStringField(TEXT("name"), Name);
+                  OutObj->SetBoolField(TEXT("nameResolved"), bResolvedName);
+
+                  // Output mask emitted as bool (intentional asymmetry with input-mask which is int - see spec §3.3).
+                  TSharedPtr<FJsonObject> Mask = McpHandlerUtils::CreateResultObject();
+                  Mask->SetBoolField(TEXT("useMask"), Out.Mask != 0);
+                  Mask->SetBoolField(TEXT("r"), Out.MaskR != 0);
+                  Mask->SetBoolField(TEXT("g"), Out.MaskG != 0);
+                  Mask->SetBoolField(TEXT("b"), Out.MaskB != 0);
+                  Mask->SetBoolField(TEXT("a"), Out.MaskA != 0);
+                  OutObj->SetObjectField(TEXT("mask"), Mask);
+
+                  OutputsArray.Add(MakeShared<FJsonValueObject>(OutObj));
+              }
+          }
+          NodeObj->SetArrayField(TEXT("outputs"), OutputsArray);
+      }
 
       if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr))
         NodeObj->SetStringField(TEXT("parameterName"), Param->ParameterName.ToString());
