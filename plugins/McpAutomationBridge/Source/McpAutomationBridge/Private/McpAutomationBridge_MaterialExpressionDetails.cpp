@@ -69,6 +69,12 @@ namespace McpMaterialExpressionDetails
             return true;
         }
 
+        if (auto* GMA = Cast<UMaterialExpressionGetMaterialAttributes>(Expression))
+        {
+            AppendAttributeGetDetails(GMA, Resp);
+            return true;
+        }
+
         if (AppendParameterDetails(Expression, Resp))
         {
             return true;
@@ -424,6 +430,20 @@ namespace McpMaterialExpressionDetails
         }
         Resp->SetArrayField(TEXT("attributeSetTypes"), Items);
     }
-    void AppendAttributeGetDetails(UMaterialExpressionGetMaterialAttributes*, const TSharedRef<FJsonObject>&) {}
+    void AppendAttributeGetDetails(
+        UMaterialExpressionGetMaterialAttributes* Get,
+        const TSharedRef<FJsonObject>& Resp)
+    {
+        if (!Get) return;
+        TArray<TSharedPtr<FJsonValue>> Items;
+        for (const FGuid& Guid : Get->AttributeGetTypes)
+        {
+            TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+            Item->SetStringField(TEXT("guid"), Guid.ToString());
+            Item->SetStringField(TEXT("attribute"), FMaterialAttributeDefinitionMap::GetAttributeName(Guid));
+            Items.Add(MakeShared<FJsonValueObject>(Item));
+        }
+        Resp->SetArrayField(TEXT("attributeGetTypes"), Items);
+    }
     void AppendRerouteDeclarationUsages(const FMcpMaterialGraphOwner&, UMaterialExpressionNamedRerouteDeclaration*, const TSharedRef<FJsonObject>&) {}
 }
