@@ -46,12 +46,21 @@ extern TSharedPtr<FJsonObject> McpBuildExpressionRef(
 
 namespace McpMaterialExpressionDetails
 {
+    // forward declaration so AppendTypedDetails can call it before the definition below
+    void AppendCustomDetails(UMaterialExpressionCustom* Custom, const TSharedRef<FJsonObject>& Resp);
+
     bool AppendTypedDetails(
         const FMcpMaterialGraphOwner& Owner,
         UMaterialExpression* Expression,
         const TSharedRef<FJsonObject>& Resp)
     {
         if (!Expression) return false;
+
+        if (UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression))
+        {
+            AppendCustomDetails(Custom, Resp);
+            return true;
+        }
 
         if (UMaterialExpressionConstant* Const = Cast<UMaterialExpressionConstant>(Expression))
         {
@@ -252,7 +261,55 @@ namespace McpMaterialExpressionDetails
         return false;
     }
 
-    void AppendCustomDetails(UMaterialExpressionCustom*, const TSharedRef<FJsonObject>&) {}
+    void AppendCustomDetails(UMaterialExpressionCustom* Custom, const TSharedRef<FJsonObject>& Resp)
+    {
+        if (!Custom) return;
+
+        Resp->SetStringField(TEXT("code"), Custom->Code);
+        Resp->SetStringField(TEXT("outputType"),
+            StaticEnum<ECustomMaterialOutputType>()
+                ? StaticEnum<ECustomMaterialOutputType>()->GetNameStringByValue(static_cast<int64>(Custom->OutputType))
+                : FString());
+
+        TArray<TSharedPtr<FJsonValue>> Inputs;
+        for (const FCustomInput& CI : Custom->Inputs)
+        {
+            TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+            Item->SetStringField(TEXT("name"), CI.InputName.ToString());
+            Inputs.Add(MakeShared<FJsonValueObject>(Item));
+        }
+        Resp->SetArrayField(TEXT("inputs"), Inputs);
+
+        TArray<TSharedPtr<FJsonValue>> AdditionalOutputs;
+        for (const FCustomOutput& CO : Custom->AdditionalOutputs)
+        {
+            TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+            Item->SetStringField(TEXT("name"), CO.OutputName.ToString());
+            Item->SetStringField(TEXT("outputType"),
+                StaticEnum<ECustomMaterialOutputType>()
+                    ? StaticEnum<ECustomMaterialOutputType>()->GetNameStringByValue(static_cast<int64>(CO.OutputType))
+                    : FString());
+            AdditionalOutputs.Add(MakeShared<FJsonValueObject>(Item));
+        }
+        Resp->SetArrayField(TEXT("additionalOutputs"), AdditionalOutputs);
+
+        TArray<TSharedPtr<FJsonValue>> IncludePaths;
+        for (const FString& Path : Custom->IncludeFilePaths)
+        {
+            IncludePaths.Add(MakeShared<FJsonValueString>(Path));
+        }
+        Resp->SetArrayField(TEXT("includeFilePaths"), IncludePaths);
+
+        TArray<TSharedPtr<FJsonValue>> Defines;
+        for (const FCustomDefine& D : Custom->AdditionalDefines)
+        {
+            TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+            Item->SetStringField(TEXT("name"), D.DefineName);
+            Item->SetStringField(TEXT("value"), D.DefineValue);
+            Defines.Add(MakeShared<FJsonValueObject>(Item));
+        }
+        Resp->SetArrayField(TEXT("additionalDefines"), Defines);
+    }
     bool AppendParameterDetails(UMaterialExpression*, const TSharedRef<FJsonObject>&) { return false; }
     void AppendAttributeSetDetails(const FMcpMaterialGraphOwner&, UMaterialExpressionSetMaterialAttributes*, const TSharedRef<FJsonObject>&) {}
     void AppendAttributeGetDetails(UMaterialExpressionGetMaterialAttributes*, const TSharedRef<FJsonObject>&) {}
