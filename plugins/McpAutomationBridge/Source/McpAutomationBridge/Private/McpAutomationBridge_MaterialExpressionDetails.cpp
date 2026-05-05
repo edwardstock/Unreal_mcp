@@ -32,10 +32,11 @@
 #endif
 
 #if WITH_EDITOR
-extern void McpAddConnectedExpressionInfo(
+extern void McpEmitInputPinJson(
     const FMcpMaterialGraphOwner& Owner,
     const struct FExpressionInput* Input,
-    const TSharedRef<FJsonObject>& Obj);
+    const FString& PinName,
+    const TSharedRef<FJsonObject>& Out);
 
 extern FString McpLandscapeBlendTypeToString(ELandscapeLayerBlendType BlendType);
 
@@ -128,13 +129,11 @@ namespace McpMaterialExpressionDetails
             Resp->SetNumberField(TEXT("previewWeight"), LayerWeight->PreviewWeight);
 
             TSharedPtr<FJsonObject> BaseObj = MakeShared<FJsonObject>();
-            BaseObj->SetStringField(TEXT("name"), TEXT("Base"));
-            ::McpAddConnectedExpressionInfo(Owner, &LayerWeight->Base, BaseObj.ToSharedRef());
+            ::McpEmitInputPinJson(Owner, &LayerWeight->Base, TEXT("Base"), BaseObj.ToSharedRef());
             Resp->SetObjectField(TEXT("baseInput"), BaseObj);
 
             TSharedPtr<FJsonObject> LayerObj = MakeShared<FJsonObject>();
-            LayerObj->SetStringField(TEXT("name"), TEXT("Layer"));
-            ::McpAddConnectedExpressionInfo(Owner, &LayerWeight->Layer, LayerObj.ToSharedRef());
+            ::McpEmitInputPinJson(Owner, &LayerWeight->Layer, TEXT("Layer"), LayerObj.ToSharedRef());
             Resp->SetObjectField(TEXT("layerInput"), LayerObj);
             return true;
         }
@@ -156,11 +155,11 @@ namespace McpMaterialExpressionDetails
                 LayerObj->SetObjectField(TEXT("constLayerInput"), ConstLayerInput);
 
                 TSharedPtr<FJsonObject> LayerInputObj = MakeShared<FJsonObject>();
-                ::McpAddConnectedExpressionInfo(Owner, &Layer.LayerInput, LayerInputObj.ToSharedRef());
+                ::McpEmitInputPinJson(Owner, &Layer.LayerInput, TEXT("LayerInput"), LayerInputObj.ToSharedRef());
                 LayerObj->SetObjectField(TEXT("layerInput"), LayerInputObj);
 
                 TSharedPtr<FJsonObject> HeightInputObj = MakeShared<FJsonObject>();
-                ::McpAddConnectedExpressionInfo(Owner, &Layer.HeightInput, HeightInputObj.ToSharedRef());
+                ::McpEmitInputPinJson(Owner, &Layer.HeightInput, TEXT("HeightInput"), HeightInputObj.ToSharedRef());
                 LayerObj->SetObjectField(TEXT("heightInput"), HeightInputObj);
 
                 LayersArray.Add(MakeShared<FJsonValueObject>(LayerObj));
@@ -182,12 +181,11 @@ namespace McpMaterialExpressionDetails
                 const FFunctionExpressionInput& FunctionInput = FuncCall->FunctionInputs[InputIndex];
                 TSharedPtr<FJsonObject> InputObj = MakeShared<FJsonObject>();
                 InputObj->SetNumberField(TEXT("index"), InputIndex);
-                InputObj->SetStringField(TEXT("name"), FuncCall->GetInputName(InputIndex).ToString());
                 if (FunctionInput.ExpressionInput)
                 {
                     InputObj->SetStringField(TEXT("functionInputId"), FunctionInput.ExpressionInput->Id.ToString());
                 }
-                ::McpAddConnectedExpressionInfo(Owner, &FunctionInput.Input, InputObj.ToSharedRef());
+                ::McpEmitInputPinJson(Owner, &FunctionInput.Input, FuncCall->GetInputName(InputIndex).ToString(), InputObj.ToSharedRef());
                 FunctionInputs.Add(MakeShared<FJsonValueObject>(InputObj));
             }
             Resp->SetArrayField(TEXT("functionInputs"), FunctionInputs);
@@ -221,7 +219,7 @@ namespace McpMaterialExpressionDetails
             Resp->SetStringField(TEXT("rerouteName"), Declaration->Name.ToString());
             Resp->SetStringField(TEXT("rerouteGuid"), Declaration->VariableGuid.ToString());
             TSharedPtr<FJsonObject> InputObj = MakeShared<FJsonObject>();
-            ::McpAddConnectedExpressionInfo(Owner, &Declaration->Input, InputObj.ToSharedRef());
+            ::McpEmitInputPinJson(Owner, &Declaration->Input, TEXT("Input"), InputObj.ToSharedRef());
             Resp->SetObjectField(TEXT("declarationInput"), InputObj);
             AppendRerouteDeclarationUsages(Owner, Declaration, Resp);
             return true;
@@ -248,7 +246,7 @@ namespace McpMaterialExpressionDetails
                 {
                     InputObj->SetStringField(TEXT("physicalMaterial"), Input.PhysicalMaterial->GetPathName());
                 }
-                ::McpAddConnectedExpressionInfo(Owner, &Input.Input, InputObj.ToSharedRef());
+                ::McpEmitInputPinJson(Owner, &Input.Input, FString::Printf(TEXT("Input%d"), InputIndex), InputObj.ToSharedRef());
                 Inputs.Add(MakeShared<FJsonValueObject>(InputObj));
             }
             Resp->SetArrayField(TEXT("physicalMaterialInputs"), Inputs);
@@ -420,7 +418,7 @@ namespace McpMaterialExpressionDetails
                 Item->SetBoolField(TEXT("connected"), bConnected);
                 if (bConnected)
                 {
-                    ::McpAddConnectedExpressionInfo(Owner, &In, Item.ToSharedRef());
+                    ::McpEmitInputPinJson(Owner, &In, FMaterialAttributeDefinitionMap::GetAttributeName(Guid), Item.ToSharedRef());
                 }
             }
             else
