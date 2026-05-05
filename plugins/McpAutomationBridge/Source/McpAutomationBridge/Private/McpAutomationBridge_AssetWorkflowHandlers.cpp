@@ -732,8 +732,7 @@ static TArray<TSharedPtr<FJsonValue>> McpBuildExpressionInputsArray(
       {
         FExpressionInput* Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
         TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
-        InputObj->SetStringField(TEXT("name"), Property->GetName());
-        McpAddConnectedExpressionInfo(Owner, Input, InputObj.ToSharedRef());
+        McpEmitInputPinJson(Owner, Input, Property->GetName(), InputObj.ToSharedRef());
         InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
       }
     }
