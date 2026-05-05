@@ -7090,6 +7090,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
       McpAddExpressionIdentity(GraphOwner, Expr, i, NodeObj.ToSharedRef());
 
       TArray<TSharedPtr<FJsonValue>> InputsArray;
+      TSet<FName> EmittedPinNames;
       for (FProperty* Property = Expr->GetClass()->PropertyLink; Property;
            Property = Property->PropertyLinkNext)
       {
@@ -7101,9 +7102,37 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
             TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
             McpEmitInputPinJson(GraphOwner, Input, Property->GetName(), InputObj.ToSharedRef());
             InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
+            EmittedPinNames.Add(FName(*Property->GetName()));
           }
         }
       }
+
+      if (UMaterialExpressionMaterialFunctionCall* FuncCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expr))
+      {
+        for (int32 InputIndex = 0; InputIndex < FuncCall->FunctionInputs.Num(); ++InputIndex)
+        {
+          const FFunctionExpressionInput& FEI = FuncCall->FunctionInputs[InputIndex];
+          const FName InputName = FuncCall->GetInputName(InputIndex);
+          if (EmittedPinNames.Contains(InputName))
+          {
+            UE_LOG(LogMcpAutomationBridgeSubsystem, Verbose,
+                   TEXT("MFC %s: function input '%s' collides with property-walked pin; skipped"),
+                   *Expr->GetName(), *InputName.ToString());
+            continue;
+          }
+
+          TSharedPtr<FJsonObject> InputObj = McpHandlerUtils::CreateResultObject();
+          if (FEI.ExpressionInput)
+          {
+            InputObj->SetStringField(TEXT("functionInputId"), FEI.ExpressionInput->Id.ToString());
+          }
+          InputObj->SetBoolField(TEXT("isFunctionInput"), true);
+          McpEmitInputPinJson(GraphOwner, const_cast<FExpressionInput*>(&FEI.Input), InputName.ToString(), InputObj.ToSharedRef());
+          InputsArray.Add(MakeShared<FJsonValueObject>(InputObj));
+          EmittedPinNames.Add(InputName);
+        }
+      }
+
       NodeObj->SetArrayField(TEXT("inputs"), InputsArray);
 
       if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr))
