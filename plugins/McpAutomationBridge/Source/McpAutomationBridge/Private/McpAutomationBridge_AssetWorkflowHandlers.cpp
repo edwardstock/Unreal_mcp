@@ -862,10 +862,7 @@ static TSharedPtr<FJsonObject> McpBuildExpressionDetailsObject(
     Resp->SetStringField(TEXT("class"), Expression->GetClass()->GetName());
     Resp->SetStringField(TEXT("className"), Expression->GetClass()->GetName());
     Resp->SetStringField(TEXT("classPath"), Expression->GetClass()->GetPathName());
-    if (!Expression->Desc.IsEmpty())
-    {
-        Resp->SetStringField(TEXT("desc"), Expression->Desc);
-    }
+    Resp->SetStringField(TEXT("desc"), Expression->Desc);
 
     Resp->SetArrayField(TEXT("inputs"), McpBuildExpressionInputsArray(Owner, Expression));
     if (bIncludeConsumers)
@@ -6234,9 +6231,7 @@ bool UMcpAutomationBridgeSubsystem::HandleFindMaterialExpressions(
       TSharedPtr<FJsonObject> Match = McpBuildExpressionRef(GraphOwner, Expr);
       if (Expr) {
         Match->SetStringField(TEXT("className"), Expr->GetClass()->GetName());
-        if (!Expr->Desc.IsEmpty()) {
-          Match->SetStringField(TEXT("desc"), Expr->Desc);
-        }
+        Match->SetStringField(TEXT("desc"), Expr->Desc);
         if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr)) {
           Match->SetStringField(TEXT("parameterName"), Param->ParameterName.ToString());
         }
@@ -6402,9 +6397,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialNodeDetails(
       TSharedPtr<FJsonObject> NodeInfo = McpHandlerUtils::CreateResultObject();
       McpAddExpressionIdentity(GraphOwner, Expr, i, NodeInfo.ToSharedRef());
       NodeInfo->SetStringField(TEXT("nodeType"), Expr->GetClass()->GetName());
-      if (!Expr->Desc.IsEmpty()) {
-        NodeInfo->SetStringField(TEXT("desc"), Expr->Desc);
-      }
+      NodeInfo->SetStringField(TEXT("desc"), Expr->Desc);
       // Add parameter name if applicable
       if (UMaterialExpressionParameter *Param = Cast<UMaterialExpressionParameter>(Expr)) {
         NodeInfo->SetStringField(TEXT("parameterName"), Param->ParameterName.ToString());

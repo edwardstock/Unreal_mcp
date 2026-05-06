@@ -738,10 +738,7 @@ bool UMcpAutomationBridgeSubsystem::HandleMaterialGraphAction(
                 NodeInfo->SetStringField(TEXT("nodeId"), Expr->MaterialExpressionGuid.ToString());
                 NodeInfo->SetStringField(TEXT("nodeType"), Expr->GetClass()->GetName());
                 NodeInfo->SetNumberField(TEXT("index"), i);
-                if (!Expr->Desc.IsEmpty())
-                {
-                    NodeInfo->SetStringField(TEXT("desc"), Expr->Desc);
-                }
+                NodeInfo->SetStringField(TEXT("desc"), Expr->Desc);
                 NodeList.Add(MakeShared<FJsonValueObject>(NodeInfo));
             }
 
