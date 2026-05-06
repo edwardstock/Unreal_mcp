@@ -1008,7 +1008,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
   },
   {
     "name": "inspect",
-    "description": "Inspect any UObject: read/write properties, list components, export snapshots, and query class info. Actions: inspect_cdo (Blueprint CDO properties + all components without spawning an actor; use blueprintPath, optional detailed/componentName/propertyNames), inspect_class (class metadata), inspect_object (world actor), get_property/set_property, get_components, list_objects, find_by_class, find_by_tag, runtime_report, dump_subobject (strict alias - dumps every UProperty of a package subobject by full path \"/Game/X.Asset:SubName\"; refuses non-subobject paths).",
+    "description": "Inspect any UObject: read/write properties, list components, export snapshots, and query class info. Actions: inspect_cdo (Blueprint CDO properties + all components without spawning an actor; use blueprintPath, optional detailed/componentName/propertyNames), inspect_class (class metadata), inspect_object (world actor), get_property/set_property, get_components, list_objects, find_by_class, find_by_tag, runtime_report.",
     "category": "core",
     "inputSchema": {
       "type": "object",
@@ -1051,8 +1051,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             "get_scene_stats",
             "get_performance_stats",
             "get_memory_stats",
-            "get_editor_settings",
-            "dump_subobject"
+            "get_editor_settings"
           ]
         },
         "objectPath": {
@@ -1685,7 +1684,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
   },
   {
     "name": "manage_asset",
-    "description": "Create, import, duplicate, rename, delete assets. Edit Material graphs and instances. Analyze dependencies. Use bulk_get_material_expression_details to fetch details for a batch of expressions identified by indices, guids, or nodeIds.",
+    "description": "Create, import, duplicate, rename, delete assets. Edit Material graphs and instances. Analyze dependencies.",
     "category": "core",
     "inputSchema": {
       "type": "object",
@@ -1754,9 +1753,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             "replace_long_connection_with_named_reroute",
             "align_material_nodes",
             "get_material_node_details",
-            "rebuild_material",
-            "get_set_material_attributes_overrides",
-            "bulk_get_material_expression_details"
+            "rebuild_material"
           ]
         },
         "assetPath": {
@@ -2180,29 +2177,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         },
         "includeConsumers": {
           "type": "boolean",
-          "default": false,
-          "description": "Include downstream consumers in expression connection diagnostics (bulk_get_material_expression_details, get_material_expression_connections)."
-        },
-        "indices": {
-          "type": "array",
-          "description": "Array of expression indices for bulk_get_material_expression_details.",
-          "items": {
-            "type": "number"
-          }
-        },
-        "guids": {
-          "type": "array",
-          "description": "Array of expression GUIDs for bulk_get_material_expression_details.",
-          "items": {
-            "type": "string"
-          }
-        },
-        "nodeIds": {
-          "type": "array",
-          "description": "Array of node IDs for bulk_get_material_expression_details.",
-          "items": {
-            "type": "string"
-          }
+          "description": "Include downstream consumers in expression connection diagnostics."
         },
         "folderPath": {
           "type": "string",
@@ -2236,11 +2211,6 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         "expressionIndex": {
           "type": "number",
           "description": "Material expression index."
-        },
-        "includeOutputPins": {
-          "type": "boolean",
-          "default": false,
-          "description": "When true, get_asset_graph emits a per-node outputs[] array listing each output pin (index, name, mask)."
         }
       },
       "required": [
@@ -7172,9 +7142,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             "set_material_function_instance_parameter",
             "reset_material_function_instance_parameter",
             "clear_material_function_instance_parameters",
-            "bulk_set_material_function_instance_parameters",
-            "get_custom_expression",
-            "get_parameter_defaults"
+            "bulk_set_material_function_instance_parameters"
           ]
         },
         "action": {
@@ -7246,9 +7214,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             "set_material_function_instance_parameter",
             "reset_material_function_instance_parameter",
             "clear_material_function_instance_parameters",
-            "bulk_set_material_function_instance_parameters",
-            "get_custom_expression",
-            "get_parameter_defaults"
+            "bulk_set_material_function_instance_parameters"
           ]
         },
         "assetPath": {
@@ -7377,6 +7343,11 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         "parameterName": {
           "type": "string",
           "description": "Name of the parameter."
+        },
+        "channelNames": {
+          "type": "object",
+          "description": "Vector parameter channel names. Available keys: r, g, b, a.",
+          "additionalProperties": true
         },
         "parameter": {
           "type": "object",
@@ -7625,18 +7596,6 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
           "items": {
             "type": "object"
           }
-        },
-        "expressionGuid": {
-          "type": "string",
-          "description": "Material expression GUID for node selection (get_custom_expression)."
-        },
-        "expressionIndex": {
-          "type": "number",
-          "description": "Material expression index for node selection (get_custom_expression)."
-        },
-        "expressionName": {
-          "type": "string",
-          "description": "Material expression object name for node selection (get_custom_expression)."
         },
         "save": {
           "type": "boolean",

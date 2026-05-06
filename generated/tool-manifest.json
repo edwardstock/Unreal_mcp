@@ -8974,6 +8974,12 @@
 					"type": "string",
 					"description": "Name of the parameter."
 				},
+				"channelNames":
+				{
+					"type": "object",
+					"description": "Vector parameter channel names. Available keys: r, g, b, a.",
+					"additionalProperties": true
+				},
 				"parameter":
 				{
 					"type": "object",
