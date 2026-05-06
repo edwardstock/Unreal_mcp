@@ -22,6 +22,7 @@ namespace McpMaterialExpressionDetails
 
     // Specialised single-type appenders, exposed for N1/N2/N3 thin actions.
     void AppendCustomDetails(
+        const FMcpMaterialGraphOwner& Owner,
         UMaterialExpressionCustom* Custom,
         const TSharedRef<FJsonObject>& Out);
 

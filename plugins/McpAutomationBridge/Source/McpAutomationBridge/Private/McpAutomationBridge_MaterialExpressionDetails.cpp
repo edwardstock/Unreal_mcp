@@ -49,7 +49,7 @@ extern TSharedPtr<FJsonObject> McpBuildExpressionRef(
 namespace McpMaterialExpressionDetails
 {
     // forward declarations so AppendTypedDetails can call them before the definitions below
-    void AppendCustomDetails(UMaterialExpressionCustom* Custom, const TSharedRef<FJsonObject>& Resp);
+    void AppendCustomDetails(const FMcpMaterialGraphOwner& Owner, UMaterialExpressionCustom* Custom, const TSharedRef<FJsonObject>& Resp);
     bool AppendParameterDetails(UMaterialExpression* Expression, const TSharedRef<FJsonObject>& Resp);
 
     bool AppendTypedDetails(
@@ -61,7 +61,7 @@ namespace McpMaterialExpressionDetails
 
         if (UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression))
         {
-            AppendCustomDetails(Custom, Resp);
+            AppendCustomDetails(Owner, Custom, Resp);
             return true;
         }
 
@@ -255,7 +255,7 @@ namespace McpMaterialExpressionDetails
         return false;
     }
 
-    void AppendCustomDetails(UMaterialExpressionCustom* Custom, const TSharedRef<FJsonObject>& Resp)
+    void AppendCustomDetails(const FMcpMaterialGraphOwner& Owner, UMaterialExpressionCustom* Custom, const TSharedRef<FJsonObject>& Resp)
     {
         if (!Custom) return;
 
@@ -266,10 +266,11 @@ namespace McpMaterialExpressionDetails
                 : FString());
 
         TArray<TSharedPtr<FJsonValue>> Inputs;
-        for (const FCustomInput& CI : Custom->Inputs)
+        for (FCustomInput& CI : Custom->Inputs)
         {
-            TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+            TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
             Item->SetStringField(TEXT("name"), CI.InputName.ToString());
+            ::McpEmitInputPinJson(Owner, &CI.Input, CI.InputName.ToString(), Item);
             Inputs.Add(MakeShared<FJsonValueObject>(Item));
         }
         Resp->SetArrayField(TEXT("inputs"), Inputs);

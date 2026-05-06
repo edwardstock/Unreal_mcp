@@ -752,7 +752,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGetCustomExpression(
     TSharedPtr<FJsonObject> Identity = MakeShared<FJsonObject>();
     McpAddExpressionIdentity(Owner, Custom, McpExpressionIndex(Owner, Custom), Identity.ToSharedRef());
     Result->SetObjectField(TEXT("nodeIdentity"), Identity);
-    McpMaterialExpressionDetails::AppendCustomDetails(Custom, Result.ToSharedRef());
+    McpMaterialExpressionDetails::AppendCustomDetails(Owner, Custom, Result.ToSharedRef());
     SendAutomationResponse(Socket, RequestId, true, TEXT("Custom expression details retrieved"), Result, FString());
     return true;
 }
