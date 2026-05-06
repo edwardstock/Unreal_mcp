@@ -565,6 +565,64 @@ static TConstArrayView<TObjectPtr<UMaterialExpressionComment>> McpGetGraphCommen
   return CastChecked<UMaterialFunction>(Owner.GraphSource)->GetEditorComments();
 }
 
+// Build a unified JSON shape for a UMaterialExpressionComment.
+// Emits both legacy keys (text, commentId, expressionPath) and the wider keys
+// added by the 2026-05-06 readback iteration (commentText, nodeId, expressionGuid,
+// type, className, editorX/Y, desc, fontSize, commentColor). Two API surfaces
+// (find_material_expressions and get_asset_graph) consume comments and historically
+// emitted divergent shapes; this helper is the single source of truth.
+// Pass IndexHint >= 0 to add `index` and `expressionIndex` fields (useful when
+// appending comments into a flat list); pass INDEX_NONE to skip them.
+static TSharedRef<FJsonObject> McpBuildCommentJson(UMaterialExpressionComment* Comment, int32 IndexHint)
+{
+  TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+  if (!Comment) { return Item; }
+
+  if (IndexHint >= 0)
+  {
+    Item->SetNumberField(TEXT("index"),           IndexHint);
+    Item->SetNumberField(TEXT("expressionIndex"), IndexHint);
+  }
+
+  // Identifiers: emit both forms so callers reading either API see what they expect.
+  // commentId/expressionPath = full path (legacy get_asset_graph shape).
+  // nodeId/expressionGuid    = MaterialExpressionGuid (find_material_expressions shape).
+  Item->SetStringField(TEXT("nodeId"),         Comment->MaterialExpressionGuid.ToString());
+  Item->SetStringField(TEXT("expressionGuid"), Comment->MaterialExpressionGuid.ToString());
+  Item->SetStringField(TEXT("commentId"),      Comment->GetPathName());
+  Item->SetStringField(TEXT("expressionPath"), Comment->GetPathName());
+  Item->SetStringField(TEXT("expressionName"), Comment->GetName());
+  Item->SetStringField(TEXT("name"),           Comment->GetName());
+  Item->SetStringField(TEXT("type"),           TEXT("MaterialExpressionComment"));
+  Item->SetStringField(TEXT("className"),      TEXT("MaterialExpressionComment"));
+
+  // Position and size; editorX/Y are aliases of x/y kept for symmetry with other expressions.
+  Item->SetNumberField(TEXT("x"),       Comment->MaterialExpressionEditorX);
+  Item->SetNumberField(TEXT("y"),       Comment->MaterialExpressionEditorY);
+  Item->SetNumberField(TEXT("editorX"), Comment->MaterialExpressionEditorX);
+  Item->SetNumberField(TEXT("editorY"), Comment->MaterialExpressionEditorY);
+  Item->SetNumberField(TEXT("width"),   Comment->SizeX);
+  Item->SetNumberField(TEXT("height"),  Comment->SizeY);
+
+  // Text content: `text` is the legacy key, `commentText` the newer one; emit both.
+  Item->SetStringField(TEXT("text"),        Comment->Text);
+  Item->SetStringField(TEXT("commentText"), Comment->Text);
+  Item->SetStringField(TEXT("desc"),        Comment->Desc);
+
+  // Display attributes
+  Item->SetBoolField  (TEXT("groupMode"), Comment->bGroupMode);
+  Item->SetNumberField(TEXT("fontSize"),  Comment->FontSize);
+
+  TSharedRef<FJsonObject> Color = MakeShared<FJsonObject>();
+  Color->SetNumberField(TEXT("r"), Comment->CommentColor.R);
+  Color->SetNumberField(TEXT("g"), Comment->CommentColor.G);
+  Color->SetNumberField(TEXT("b"), Comment->CommentColor.B);
+  Color->SetNumberField(TEXT("a"), Comment->CommentColor.A);
+  Item->SetObjectField(TEXT("commentColor"), Color);
+
+  return Item;
+}
+
 static UMaterialExpressionNamedRerouteDeclaration* McpFindNamedRerouteDeclaration(
     const FMcpMaterialGraphOwner& Owner,
     const FString& NameOrGuid)
@@ -1011,6 +1069,8 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
     return HandleFindMaterialExpressions(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("get_material_expression_details"))
     return HandleGetMaterialExpressionDetails(RequestId, Lower, Payload, RequestingSocket);
+  if (Lower == TEXT("bulk_get_material_expression_details"))
+    return HandleBulkGetMaterialExpressionDetails(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("get_material_expression_connections"))
     return HandleGetMaterialExpressionConnections(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("get_landscape_material_context"))
@@ -1079,6 +1139,18 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
     return HandleGetMaterialNodeDetails(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("rebuild_material"))
     return HandleRebuildMaterial(RequestId, Lower, Payload, RequestingSocket);
+
+  // If the original Action was "manage_asset" the dispatcher already extracted
+  // a subAction from the payload; reaching this point means the subAction is
+  // genuinely unknown and no other handler will pick it up. Emit an explicit
+  // error rather than letting the request silently time out.
+  if (Action.ToLower() == TEXT("manage_asset"))
+  {
+    SendAutomationError(RequestingSocket, RequestId,
+        FString::Printf(TEXT("Unknown subAction '%s' for manage_asset"), *Lower),
+        TEXT("INVALID_SUBACTION"));
+    return true;
+  }
 
   return false;
 }
@@ -6265,36 +6337,7 @@ bool UMcpAutomationBridgeSubsystem::HandleFindMaterialExpressions(
     for (UMaterialExpressionComment* Comment : McpGetGraphComments(GraphOwner))
     {
       if (!Comment) { continue; }
-      TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
-      Item->SetNumberField(TEXT("index"),          NextIndex);
-      Item->SetNumberField(TEXT("expressionIndex"), NextIndex);
-      ++NextIndex;
-      Item->SetStringField(TEXT("nodeId"),         Comment->MaterialExpressionGuid.ToString());
-      Item->SetStringField(TEXT("expressionGuid"), Comment->MaterialExpressionGuid.ToString());
-      Item->SetStringField(TEXT("expressionPath"), Comment->GetPathName());
-      Item->SetStringField(TEXT("expressionName"), Comment->GetName());
-      Item->SetStringField(TEXT("name"),           Comment->GetName());
-      Item->SetStringField(TEXT("type"),           TEXT("MaterialExpressionComment"));
-      Item->SetStringField(TEXT("className"),      TEXT("MaterialExpressionComment"));
-      Item->SetNumberField(TEXT("x"),              Comment->MaterialExpressionEditorX);
-      Item->SetNumberField(TEXT("y"),              Comment->MaterialExpressionEditorY);
-      Item->SetNumberField(TEXT("editorX"),        Comment->MaterialExpressionEditorX);
-      Item->SetNumberField(TEXT("editorY"),        Comment->MaterialExpressionEditorY);
-      Item->SetNumberField(TEXT("width"),          Comment->SizeX);
-      Item->SetNumberField(TEXT("height"),         Comment->SizeY);
-      Item->SetStringField(TEXT("commentText"),    Comment->Text);
-      Item->SetStringField(TEXT("desc"),           Comment->Desc);
-      Item->SetBoolField  (TEXT("groupMode"),      Comment->bGroupMode);
-      Item->SetNumberField(TEXT("fontSize"),       Comment->FontSize);
-
-      TSharedRef<FJsonObject> Color = MakeShared<FJsonObject>();
-      Color->SetNumberField(TEXT("r"), Comment->CommentColor.R);
-      Color->SetNumberField(TEXT("g"), Comment->CommentColor.G);
-      Color->SetNumberField(TEXT("b"), Comment->CommentColor.B);
-      Color->SetNumberField(TEXT("a"), Comment->CommentColor.A);
-      Item->SetObjectField(TEXT("commentColor"), Color);
-
-      Matches.Add(MakeShared<FJsonValueObject>(Item));
+      Matches.Add(MakeShared<FJsonValueObject>(McpBuildCommentJson(Comment, NextIndex++)));
     }
   }
 
@@ -7325,16 +7368,7 @@ bool UMcpAutomationBridgeSubsystem::HandleGetAssetGraph(
       {
         continue;
       }
-      TSharedPtr<FJsonObject> CommentObj = McpHandlerUtils::CreateResultObject();
-      CommentObj->SetStringField(TEXT("commentId"), Comment->GetPathName());
-      CommentObj->SetStringField(TEXT("expressionPath"), Comment->GetPathName());
-      CommentObj->SetStringField(TEXT("text"), Comment->Text);
-      CommentObj->SetNumberField(TEXT("x"), Comment->MaterialExpressionEditorX);
-      CommentObj->SetNumberField(TEXT("y"), Comment->MaterialExpressionEditorY);
-      CommentObj->SetNumberField(TEXT("width"), Comment->SizeX);
-      CommentObj->SetNumberField(TEXT("height"), Comment->SizeY);
-      CommentObj->SetBoolField(TEXT("groupMode"), Comment->bGroupMode);
-      CommentList.Add(MakeShared<FJsonValueObject>(CommentObj));
+      CommentList.Add(MakeShared<FJsonValueObject>(McpBuildCommentJson(Comment, INDEX_NONE)));
     }
     Result->SetNumberField(TEXT("commentCount"), CommentList.Num());
     Result->SetArrayField(TEXT("comments"), CommentList);
