@@ -23,12 +23,39 @@
 #include "Materials/MaterialExpressionTextureObjectParameter.h"
 #include "Materials/MaterialExpressionSetMaterialAttributes.h"
 #include "Materials/MaterialExpressionGetMaterialAttributes.h"
+#include "Materials/MaterialExpressionBreakMaterialAttributes.h"
 #include "Materials/MaterialExpressionNamedReroute.h"
 #include "Materials/MaterialAttributeDefinitionMap.h"
 #include "Materials/MaterialExpressionLandscapeLayerWeight.h"
 #include "Materials/MaterialExpressionLandscapeLayerBlend.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialExpressionLandscapePhysicalMaterialOutput.h"
+#include "Materials/MaterialExpressionFunctionInput.h"
+#include "Materials/MaterialExpressionFunctionOutput.h"
+#include "McpFunctionInputTypeName.h"
+#endif
+
+#if WITH_EDITOR
+FString McpFunctionInputTypeName(EFunctionInputType Type)
+{
+    switch (Type)
+    {
+        case FunctionInput_Scalar:             return TEXT("Float1");
+        case FunctionInput_Vector2:            return TEXT("Float2");
+        case FunctionInput_Vector3:            return TEXT("Float3");
+        case FunctionInput_Vector4:            return TEXT("Float4");
+        case FunctionInput_Texture2D:          return TEXT("Texture2D");
+        case FunctionInput_TextureCube:        return TEXT("TextureCube");
+        case FunctionInput_Texture2DArray:     return TEXT("Texture2DArray");
+        case FunctionInput_VolumeTexture:      return TEXT("VolumeTexture");
+        case FunctionInput_StaticBool:         return TEXT("StaticBool");
+        case FunctionInput_MaterialAttributes: return TEXT("MaterialAttributes");
+        case FunctionInput_TextureExternal:    return TEXT("TextureExternal");
+        case FunctionInput_Bool:               return TEXT("Bool");
+        case FunctionInput_Substrate:          return TEXT("Substrate");
+        default:                               return TEXT("Unknown");
+    }
+}
 #endif
 
 #if WITH_EDITOR
@@ -74,6 +101,12 @@ namespace McpMaterialExpressionDetails
         if (auto* GMA = Cast<UMaterialExpressionGetMaterialAttributes>(Expression))
         {
             AppendAttributeGetDetails(GMA, Resp);
+            return true;
+        }
+
+        if (auto* Break = Cast<UMaterialExpressionBreakMaterialAttributes>(Expression))
+        {
+            AppendBreakMaterialAttributesDetails(Owner, Break, Resp);
             return true;
         }
 
@@ -250,6 +283,27 @@ namespace McpMaterialExpressionDetails
                 Inputs.Add(MakeShared<FJsonValueObject>(InputObj));
             }
             Resp->SetArrayField(TEXT("physicalMaterialInputs"), Inputs);
+            return true;
+        }
+        if (UMaterialExpressionFunctionInput* FuncIn = Cast<UMaterialExpressionFunctionInput>(Expression))
+        {
+            Resp->SetStringField(TEXT("inputType"),                ::McpFunctionInputTypeName(FuncIn->InputType));
+            Resp->SetStringField(TEXT("description"),              FuncIn->Description);
+            Resp->SetNumberField(TEXT("sortPriority"),             FuncIn->SortPriority);
+            Resp->SetBoolField  (TEXT("usePreviewValueAsDefault"), FuncIn->bUsePreviewValueAsDefault);
+
+            TSharedRef<FJsonObject> Pv = MakeShared<FJsonObject>();
+            Pv->SetNumberField(TEXT("x"), FuncIn->PreviewValue.X);
+            Pv->SetNumberField(TEXT("y"), FuncIn->PreviewValue.Y);
+            Pv->SetNumberField(TEXT("z"), FuncIn->PreviewValue.Z);
+            Pv->SetNumberField(TEXT("w"), FuncIn->PreviewValue.W);
+            Resp->SetObjectField(TEXT("previewValue"), Pv);
+            return true;
+        }
+        if (UMaterialExpressionFunctionOutput* FuncOut = Cast<UMaterialExpressionFunctionOutput>(Expression))
+        {
+            Resp->SetStringField(TEXT("description"),  FuncOut->Description);
+            Resp->SetNumberField(TEXT("sortPriority"), FuncOut->SortPriority);
             return true;
         }
         return false;
@@ -445,6 +499,87 @@ namespace McpMaterialExpressionDetails
         }
         Resp->SetArrayField(TEXT("attributeGetTypes"), Items);
     }
+    void AppendBreakMaterialAttributesDetails(
+        const FMcpMaterialGraphOwner& Owner,
+        UMaterialExpressionBreakMaterialAttributes* Break,
+        const TSharedRef<FJsonObject>& Resp)
+    {
+        if (!Break) return;
+
+        // Resolve the Break node's outputs once; each entry corresponds to one attribute pin
+        // (BaseColor, Metallic, Specular, Roughness, Normal, EmissiveColor, ...).
+        const TArray<FExpressionOutput>& BreakOutputs = Break->GetOutputs();
+
+        // Pre-fetch the graph's expression list so consumers can be discovered by walking
+        // every other expression's inputs and matching Input->Expression == Break with
+        // Input->OutputIndex against this entry's index.
+        const TArray<TObjectPtr<UMaterialExpression>>* AllExprs = McpGetGraphExpressions(Owner);
+
+        // Build attribute name -> GUID lookup once by walking the ordered attribute list
+        // and asking GetAttributeName for each GUID. FMaterialAttributeDefinitionMap::GetID
+        // takes EMaterialProperty (not name) and the name-to-id list helper is private.
+        TMap<FString, FGuid> NameToId;
+        const TArray<FGuid>& OrderedIds = FMaterialAttributeDefinitionMap::GetOrderedVisibleAttributeList();
+        NameToId.Reserve(OrderedIds.Num());
+        for (const FGuid& Id : OrderedIds)
+        {
+            const FString Name = FMaterialAttributeDefinitionMap::GetAttributeName(Id);
+            if (!Name.IsEmpty())
+            {
+                NameToId.Add(Name, Id);
+            }
+        }
+
+        TArray<TSharedPtr<FJsonValue>> Items;
+        for (int32 OutputIndex = 0; OutputIndex < BreakOutputs.Num(); ++OutputIndex)
+        {
+            const FExpressionOutput& Output = BreakOutputs[OutputIndex];
+            const FString AttrName = Output.OutputName.ToString();
+
+            TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+
+            // Resolve the matching attribute GUID by name; BreakMaterialAttributes outputs
+            // are named after the attributes (BaseColor, Roughness, ...).
+            FGuid AttrGuid;
+            if (const FGuid* Found = NameToId.Find(AttrName))
+            {
+                AttrGuid = *Found;
+            }
+            Item->SetStringField(TEXT("guid"),       AttrGuid.IsValid() ? AttrGuid.ToString() : FString());
+            Item->SetStringField(TEXT("attribute"),  AttrName);
+            Item->SetNumberField(TEXT("outputIndex"), OutputIndex);
+
+            // Scan the graph for any input whose source is this Break with this OutputIndex.
+            TArray<TSharedPtr<FJsonValue>> Consumers;
+            if (AllExprs)
+            {
+                for (int32 ExprIdx = 0; ExprIdx < AllExprs->Num(); ++ExprIdx)
+                {
+                    UMaterialExpression* Other = (*AllExprs)[ExprIdx];
+                    if (!Other || Other == Break) continue;
+
+                    int32 InputIdx = 0;
+                    for (FExpressionInputIterator It(Other); It; ++It, ++InputIdx)
+                    {
+                        FExpressionInput* In = It.Input;
+                        if (!In || In->Expression != Break) continue;
+                        if (In->OutputIndex != OutputIndex) continue;
+
+                        TSharedRef<FJsonObject> Consumer = MakeShared<FJsonObject>();
+                        Consumer->SetObjectField(TEXT("expression"), ::McpBuildExpressionRef(Owner, Other));
+                        Consumer->SetStringField(TEXT("inputName"), Other->GetInputName(InputIdx).ToString());
+                        Consumer->SetNumberField(TEXT("inputIndex"), InputIdx);
+                        Consumers.Add(MakeShared<FJsonValueObject>(Consumer));
+                    }
+                }
+            }
+            Item->SetArrayField(TEXT("consumers"), Consumers);
+
+            Items.Add(MakeShared<FJsonValueObject>(Item));
+        }
+        Resp->SetArrayField(TEXT("attributeBreakTypes"), Items);
+    }
+
     void AppendRerouteDeclarationUsages(
         const FMcpMaterialGraphOwner& Owner,
         UMaterialExpressionNamedRerouteDeclaration* Decl,

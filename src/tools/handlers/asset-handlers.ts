@@ -965,7 +965,9 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
           { key: 'expressionPath' },
           { key: 'expressionGuid' },
           { key: 'nodeId' },
-          { key: 'desc' }
+          { key: 'desc' },
+          // NEW3: forward includeDetails so C++ inlines per-entry typed details
+          { key: 'includeDetails' }
         ]);
         const res = await executeAutomationRequest(tools, 'find_material_expressions', {
           ...params

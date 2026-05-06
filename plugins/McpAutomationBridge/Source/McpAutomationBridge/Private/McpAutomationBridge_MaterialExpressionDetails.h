@@ -8,6 +8,7 @@ class UMaterialExpression;
 class UMaterialExpressionCustom;
 class UMaterialExpressionSetMaterialAttributes;
 class UMaterialExpressionGetMaterialAttributes;
+class UMaterialExpressionBreakMaterialAttributes;
 class UMaterialExpressionNamedRerouteDeclaration;
 struct FMcpMaterialGraphOwner;
 
@@ -38,6 +39,11 @@ namespace McpMaterialExpressionDetails
 
     void AppendAttributeGetDetails(
         UMaterialExpressionGetMaterialAttributes* Get,
+        const TSharedRef<FJsonObject>& Out);
+
+    void AppendBreakMaterialAttributesDetails(
+        const FMcpMaterialGraphOwner& Owner,
+        UMaterialExpressionBreakMaterialAttributes* Break,
         const TSharedRef<FJsonObject>& Out);
 
     void AppendRerouteDeclarationUsages(

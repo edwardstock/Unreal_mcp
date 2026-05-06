@@ -48,6 +48,7 @@
 #include "McpAutomationBridgeGlobals.h"
 #include "McpAutomationBridgeHelpers.h"
 #include "McpAutomationBridge_MaterialExpressionDetails.h"
+#include "McpFunctionInputTypeName.h"
 #include "McpSafeOperations.h"
 
 // -----------------------------------------------------------------------------
@@ -6220,6 +6221,10 @@ bool UMcpAutomationBridgeSubsystem::HandleFindMaterialExpressions(
     return true;
   }
 
+  // NEW3: when set, every entry includes the same shape as get_material_expression_details.
+  bool bIncludeDetails = false;
+  Payload->TryGetBoolField(TEXT("includeDetails"), bIncludeDetails);
+
   const TArray<TObjectPtr<UMaterialExpression>>* Expressions = McpGetGraphExpressions(GraphOwner);
   TArray<TSharedPtr<FJsonValue>> Matches;
   if (Expressions) {
@@ -6235,8 +6240,61 @@ bool UMcpAutomationBridgeSubsystem::HandleFindMaterialExpressions(
         if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr)) {
           Match->SetStringField(TEXT("parameterName"), Param->ParameterName.ToString());
         }
+        if (bIncludeDetails) {
+          // NEW3: inline type-specific details (code for Custom, attributeSetTypes for SetMaterialAttributes, etc.)
+          McpAppendTypedExpressionDetails(GraphOwner, Expr, Match.ToSharedRef());
+        }
       }
       Matches.Add(MakeShared<FJsonValueObject>(Match));
+    }
+  }
+
+  // NEW2: include comments in the listing (UMaterialExpressionComment lives in EditorComments,
+  // separate from the regular expression collection); honour an explicit className filter when present.
+  FString ClassFilter;
+  Payload->TryGetStringField(TEXT("className"), ClassFilter);
+  if (ClassFilter.IsEmpty())
+  {
+    Payload->TryGetStringField(TEXT("expressionClass"), ClassFilter);
+  }
+  const bool bCommentsAllowed = ClassFilter.IsEmpty() ||
+      ClassFilter.Contains(TEXT("Comment"), ESearchCase::IgnoreCase);
+  if (bCommentsAllowed)
+  {
+    int32 NextIndex = Expressions ? Expressions->Num() : 0;
+    for (UMaterialExpressionComment* Comment : McpGetGraphComments(GraphOwner))
+    {
+      if (!Comment) { continue; }
+      TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+      Item->SetNumberField(TEXT("index"),          NextIndex);
+      Item->SetNumberField(TEXT("expressionIndex"), NextIndex);
+      ++NextIndex;
+      Item->SetStringField(TEXT("nodeId"),         Comment->MaterialExpressionGuid.ToString());
+      Item->SetStringField(TEXT("expressionGuid"), Comment->MaterialExpressionGuid.ToString());
+      Item->SetStringField(TEXT("expressionPath"), Comment->GetPathName());
+      Item->SetStringField(TEXT("expressionName"), Comment->GetName());
+      Item->SetStringField(TEXT("name"),           Comment->GetName());
+      Item->SetStringField(TEXT("type"),           TEXT("MaterialExpressionComment"));
+      Item->SetStringField(TEXT("className"),      TEXT("MaterialExpressionComment"));
+      Item->SetNumberField(TEXT("x"),              Comment->MaterialExpressionEditorX);
+      Item->SetNumberField(TEXT("y"),              Comment->MaterialExpressionEditorY);
+      Item->SetNumberField(TEXT("editorX"),        Comment->MaterialExpressionEditorX);
+      Item->SetNumberField(TEXT("editorY"),        Comment->MaterialExpressionEditorY);
+      Item->SetNumberField(TEXT("width"),          Comment->SizeX);
+      Item->SetNumberField(TEXT("height"),         Comment->SizeY);
+      Item->SetStringField(TEXT("commentText"),    Comment->Text);
+      Item->SetStringField(TEXT("desc"),           Comment->Desc);
+      Item->SetBoolField  (TEXT("groupMode"),      Comment->bGroupMode);
+      Item->SetNumberField(TEXT("fontSize"),       Comment->FontSize);
+
+      TSharedRef<FJsonObject> Color = MakeShared<FJsonObject>();
+      Color->SetNumberField(TEXT("r"), Comment->CommentColor.R);
+      Color->SetNumberField(TEXT("g"), Comment->CommentColor.G);
+      Color->SetNumberField(TEXT("b"), Comment->CommentColor.B);
+      Color->SetNumberField(TEXT("a"), Comment->CommentColor.A);
+      Item->SetObjectField(TEXT("commentColor"), Color);
+
+      Matches.Add(MakeShared<FJsonValueObject>(Item));
     }
   }
 
@@ -6880,6 +6938,10 @@ bool UMcpAutomationBridgeSubsystem::HandleAnalyzeGraph(
     Result->SetNumberField(TEXT("parameterCount"), ParameterCount);
     Result->SetNumberField(TEXT("textureSampleCount"), TextureSampleCount);
 
+    // NEW6: comment count (lives in EditorComments, separate from regular expressions)
+    const TConstArrayView<TObjectPtr<UMaterialExpressionComment>> Comments = McpGetGraphComments(GraphOwner);
+    Result->SetNumberField(TEXT("commentCount"), Comments.Num());
+
     TArray<TSharedPtr<FJsonValue>> ParamArray;
     for (const FString& ParamName : ParameterNames)
       ParamArray.Add(MakeShared<FJsonValueString>(ParamName));
@@ -6925,6 +6987,54 @@ bool UMcpAutomationBridgeSubsystem::HandleAnalyzeGraph(
       }
       Result->SetNumberField(TEXT("functionInputCount"), FunctionInputCount);
       Result->SetNumberField(TEXT("functionOutputCount"), FunctionOutputCount);
+
+      // NEW6: functionInterface (sorted inputs/outputs with names + types)
+      {
+        TArray<UMaterialExpressionFunctionInput*>  InputExprs;
+        TArray<UMaterialExpressionFunctionOutput*> OutputExprs;
+        if (Expressions)
+        {
+          for (UMaterialExpression* Expr : *Expressions)
+          {
+            if (auto* In  = Cast<UMaterialExpressionFunctionInput>(Expr))  InputExprs.Add(In);
+            if (auto* Out = Cast<UMaterialExpressionFunctionOutput>(Expr)) OutputExprs.Add(Out);
+          }
+        }
+        InputExprs.Sort([](const UMaterialExpressionFunctionInput& A, const UMaterialExpressionFunctionInput& B){
+          if (A.SortPriority != B.SortPriority) return A.SortPriority < B.SortPriority;
+          return A.InputName.LexicalLess(B.InputName);
+        });
+        OutputExprs.Sort([](const UMaterialExpressionFunctionOutput& A, const UMaterialExpressionFunctionOutput& B){
+          if (A.SortPriority != B.SortPriority) return A.SortPriority < B.SortPriority;
+          return A.OutputName.LexicalLess(B.OutputName);
+        });
+
+        TSharedRef<FJsonObject> Iface = MakeShared<FJsonObject>();
+        TArray<TSharedPtr<FJsonValue>> InArr, OutArr;
+        for (UMaterialExpressionFunctionInput* In : InputExprs)
+        {
+          if (!In) continue;
+          TSharedRef<FJsonObject> O = MakeShared<FJsonObject>();
+          O->SetStringField(TEXT("name"),                     In->InputName.ToString());
+          O->SetStringField(TEXT("type"),                     ::McpFunctionInputTypeName(In->InputType));
+          O->SetStringField(TEXT("description"),              In->Description);
+          O->SetNumberField(TEXT("sortPriority"),             In->SortPriority);
+          O->SetBoolField  (TEXT("usePreviewValueAsDefault"), In->bUsePreviewValueAsDefault);
+          InArr.Add(MakeShared<FJsonValueObject>(O));
+        }
+        for (UMaterialExpressionFunctionOutput* Out : OutputExprs)
+        {
+          if (!Out) continue;
+          TSharedRef<FJsonObject> O = MakeShared<FJsonObject>();
+          O->SetStringField(TEXT("name"),         Out->OutputName.ToString());
+          O->SetStringField(TEXT("description"),  Out->Description);
+          O->SetNumberField(TEXT("sortPriority"), Out->SortPriority);
+          OutArr.Add(MakeShared<FJsonValueObject>(O));
+        }
+        Iface->SetArrayField(TEXT("inputs"),  InArr);
+        Iface->SetArrayField(TEXT("outputs"), OutArr);
+        Result->SetObjectField(TEXT("functionInterface"), Iface);
+      }
     }
     else // MaterialFunctionInstance
     {

@@ -467,6 +467,22 @@ UObject* ResolveObjectFromPath(const FString& ObjectPath, FString* OutResolvedPa
             if (!SubObjectName.IsEmpty())
             {
                 UObject* SubObj = FindObject<UObject>(Found, *SubObjectName);
+                if (!SubObj)
+                {
+                    // REG1: fall back to nested-outer scan to find subobjects whose
+                    // outer chain goes through EditorOnlyData -> ExpressionCollection
+                    // (UE 5.7 material/material function expressions live in this chain)
+                    TArray<UObject*> Inner;
+                    GetObjectsWithOuter(Found, Inner, /*bIncludeNestedObjects=*/true);
+                    for (UObject* Obj : Inner)
+                    {
+                        if (Obj && Obj->GetName() == SubObjectName)
+                        {
+                            SubObj = Obj;
+                            break;
+                        }
+                    }
+                }
                 if (SubObj)
                 {
                     if (OutResolvedPath) *OutResolvedPath = SubObj->GetPathName();
@@ -485,6 +501,20 @@ UObject* ResolveObjectFromPath(const FString& ObjectPath, FString* OutResolvedPa
             if (!SubObjectName.IsEmpty())
             {
                 UObject* SubObj = FindObject<UObject>(Found, *SubObjectName);
+                if (!SubObj)
+                {
+                    // REG1: fall back to nested-outer scan (see comment above)
+                    TArray<UObject*> Inner;
+                    GetObjectsWithOuter(Found, Inner, /*bIncludeNestedObjects=*/true);
+                    for (UObject* Obj : Inner)
+                    {
+                        if (Obj && Obj->GetName() == SubObjectName)
+                        {
+                            SubObj = Obj;
+                            break;
+                        }
+                    }
+                }
                 if (SubObj)
                 {
                     if (OutResolvedPath) *OutResolvedPath = SubObj->GetPathName();
