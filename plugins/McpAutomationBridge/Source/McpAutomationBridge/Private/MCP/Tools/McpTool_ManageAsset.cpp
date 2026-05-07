@@ -71,6 +71,7 @@ public:
 				TEXT("get_material_instance_info"),
 				TEXT("find_material_expressions"),
 				TEXT("get_material_expression_details"),
+				TEXT("bulk_get_material_expression_details"),
 				TEXT("get_material_expression_connections"),
 				TEXT("get_landscape_material_context"),
 				TEXT("compile_material_diagnostics"),
@@ -204,6 +205,9 @@ public:
 			.String(TEXT("type"), TEXT("Action-specific type discriminator. Prefer the more specific 'parameterType' / 'expressionClass' / 'nodeType' when the action exposes them; this generic 'type' exists only for actions that have not yet been migrated to a specific name."))
 			.FreeformObject(TEXT("defaultValue"), TEXT("Generic value (any type)."))
 			.Number(TEXT("expressionIndex"), TEXT("Material expression index."))
+			.Array(TEXT("indices"), TEXT("Indices of expressions to fetch details for in one round-trip. Provide exactly one of indices, guids, or nodeIds."))
+			.Array(TEXT("guids"), TEXT("Expression GUIDs to fetch details for in one round-trip. Provide exactly one of indices, guids, or nodeIds."))
+			.Array(TEXT("nodeIds"), TEXT("Node IDs to fetch details for in one round-trip. Provide exactly one of indices, guids, or nodeIds."))
 			.Required({TEXT("action")})
 			.Build();
 	}

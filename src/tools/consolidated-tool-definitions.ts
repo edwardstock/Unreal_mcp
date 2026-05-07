@@ -1730,6 +1730,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
             "get_material_instance_info",
             "find_material_expressions",
             "get_material_expression_details",
+            "bulk_get_material_expression_details",
             "get_material_expression_connections",
             "get_landscape_material_context",
             "compile_material_diagnostics",
@@ -2211,6 +2212,27 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         "expressionIndex": {
           "type": "number",
           "description": "Material expression index."
+        },
+        "indices": {
+          "type": "array",
+          "description": "Indices of expressions to fetch details for in one round-trip. Provide exactly one of indices, guids, or nodeIds.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "guids": {
+          "type": "array",
+          "description": "Expression GUIDs to fetch details for in one round-trip. Provide exactly one of indices, guids, or nodeIds.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nodeIds": {
+          "type": "array",
+          "description": "Node IDs to fetch details for in one round-trip. Provide exactly one of indices, guids, or nodeIds.",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [

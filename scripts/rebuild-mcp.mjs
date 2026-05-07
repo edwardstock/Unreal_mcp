@@ -3,46 +3,115 @@
 //
 // Single-shot pipeline to refresh the stdio MCP server after a C++ tool change.
 // Run order:
-//   1. Regenerate src/tools/consolidated-tool-definitions.ts from generated/tool-manifest.json
-//   2. tsc -p tsconfig.json  (type-check + emit dist/)
-//   3. lint:tool-defs (warnings only, non-blocking)
-//
-// PREREQUISITE: Run the DumpMcpManifest commandlet first, in your own terminal
-// from the project root (Claude Code's sandbox cannot run commandlets):
-//   python Scripts/run-cmd.py DumpMcpManifest --skip-build
-//
-// That refreshes generated/tool-manifest.json from the live C++ registry.
-// This script picks it up and produces a working dist/cli.js for stdio MCP.
+//   1. Run DumpMcpManifest from the Unreal project root
+//   2. Regenerate src/tools/consolidated-tool-definitions.ts from generated/tool-manifest.json
+//   3. Verify generated TypeScript tool definitions match the manifest
+//   4. tsc -p tsconfig.json  (type-check + emit dist/)
+//   5. lint:tool-defs
 
-import { execSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { execFileSync, execSync } from 'node:child_process';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifestPath = resolve(root, 'generated/tool-manifest.json');
 const cliPath = resolve(root, 'dist/cli.js');
 
-function step(label, cmd) {
+dotenv.config({ path: resolve(root, '.env'), quiet: true });
+
+function arg(flag, fallback = undefined) {
+  const i = process.argv.indexOf(flag);
+  if (i === -1) return fallback;
+  return process.argv[i + 1];
+}
+
+function step(label, cmd, cwd = root) {
   console.log(`\n--- ${label} ---`);
-  execSync(cmd, { stdio: 'inherit', cwd: root });
+  execSync(cmd, { stdio: 'inherit', cwd });
 }
 
-if (!existsSync(manifestPath)) {
-  console.error(`[ERROR] generated/tool-manifest.json not found at ${manifestPath}`);
-  console.error('Refresh it first (run from project root, in your own terminal):');
-  console.error('  python Scripts/run-cmd.py DumpMcpManifest --skip-build');
-  process.exit(1);
+function findProjectFile(startDir) {
+  let current = resolve(startDir);
+  while (true) {
+    const uproject = readdirSync(current).find((entry) => entry.endsWith('.uproject'));
+    if (uproject) {
+      return resolve(current, uproject);
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
 }
 
-const manifestMtime = statSync(manifestPath).mtime;
-console.log(`Using manifest: ${manifestPath}`);
-console.log(`  manifest mtime: ${manifestMtime.toISOString()}`);
+function resolveProjectFile() {
+  const configured = arg('--project', process.env.UE_PROJECT_PATH);
+  const projectPath = configured ? resolve(configured) : findProjectFile(root);
+  if (!projectPath || !existsSync(projectPath)) {
+    throw new Error('Unreal project not found. Pass --project <path-to.uproject> or set UE_PROJECT_PATH.');
+  }
+  return projectPath;
+}
+
+function resolveUnrealEditorCmd() {
+  const configured = arg('--unreal-editor-cmd', process.env.UE_EDITOR_CMD ?? process.env.UNREAL_EDITOR_CMD);
+  if (configured) {
+    const cmdPath = resolve(configured);
+    if (!existsSync(cmdPath)) {
+      throw new Error(`UnrealEditor-Cmd not found at ${cmdPath}`);
+    }
+    return cmdPath;
+  }
+
+  const engineRoot = arg('--engine-root', process.env.UE_ENGINE_ROOT ?? process.env.UNREAL_ENGINE_ROOT);
+  if (engineRoot) {
+    const cmdPath = resolve(engineRoot, 'Engine/Binaries/Win64/UnrealEditor-Cmd.exe');
+    if (!existsSync(cmdPath)) {
+      throw new Error(`UnrealEditor-Cmd not found under engine root ${engineRoot}`);
+    }
+    return cmdPath;
+  }
+
+  throw new Error('UnrealEditor-Cmd not configured. Pass --unreal-editor-cmd <path> or set UE_EDITOR_CMD / UE_ENGINE_ROOT.');
+}
+
+function runDumpMcpManifest() {
+  const projectFile = resolveProjectFile();
+  const editorCmd = resolveUnrealEditorCmd();
+  const outputArg = `-Output=${manifestPath}`;
+
+  console.log(`Unreal project: ${projectFile}`);
+  console.log(`UnrealEditor-Cmd: ${editorCmd}`);
+  console.log(`Manifest output: ${manifestPath}`);
+
+  execFileSync(editorCmd, [projectFile, '-run=DumpMcpManifest', outputArg], {
+    stdio: 'inherit',
+    cwd: dirname(projectFile),
+  });
+}
+
+console.log(`Using MCP root: ${root}`);
 
 try {
-  step('1/3 Regenerate consolidated tool defs', 'node scripts/generate-tool-defs.mjs');
-  step('2/3 Build TypeScript (type-check + emit dist/)', 'npx tsc -p tsconfig.json');
-  step('3/3 Lint tool defs (warnings only, non-blocking)', 'node scripts/lint-tool-defs.mjs');
+  console.log('\n--- 1/5 Dump native MCP manifest ---');
+  runDumpMcpManifest();
+
+  if (!existsSync(manifestPath)) {
+    throw new Error(`generated/tool-manifest.json not found at ${manifestPath}`);
+  }
+
+  const manifestMtime = statSync(manifestPath).mtime;
+  console.log(`Using manifest: ${manifestPath}`);
+  console.log(`  manifest mtime: ${manifestMtime.toISOString()}`);
+
+  step('2/5 Regenerate consolidated tool defs', 'node scripts/generate-tool-defs.mjs');
+  step('3/5 Verify consolidated tool defs', 'node scripts/generate-tool-defs.mjs --check');
+  step('4/5 Build TypeScript (type-check + emit dist/)', 'npx tsc -p tsconfig.json');
+  step('5/5 Lint tool defs', 'node scripts/lint-tool-defs.mjs');
 } catch (err) {
   console.error(`\n[ERROR] Pipeline failed at step: ${err.message ?? err}`);
   process.exit(1);
