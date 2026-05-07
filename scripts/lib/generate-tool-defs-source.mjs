@@ -6,7 +6,7 @@
 // in the input. This renderer never touches commonSchemas.
 
 const HEADER = `// AUTO-GENERATED FROM generated/tool-manifest.json — DO NOT EDIT.
-// Regenerate via: python Scripts/run-cmd.py DumpMcpManifest && npm run gen:tool-defs
+// Regenerate via: npm run mcp:rebuild
 //
 
 export interface ToolDefinition {

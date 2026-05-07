@@ -32,7 +32,7 @@ MCP server for Unreal Engine 5 (5.0-5.7). Dual-process: TypeScript MCP server + 
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
-| Add MCP Tool | `plugins/.../McpTool_*.cpp` | Native is source of truth; re-run `python Scripts/run-cmd.py DumpMcpManifest && npm run gen:tool-defs` |
+| Add MCP Tool | `plugins/.../McpTool_*.cpp` | Native is source of truth; re-run `npm run mcp:rebuild` |
 | Route Tool | `src/tools/consolidated-tool-handlers.ts` | Register in `registerDefaultHandlers()` |
 | Implement Handler | `src/tools/handlers/*-handlers.ts` | Call `executeAutomationRequest()` |
 | Add UE Action | `plugins/.../Private/*Handlers.cpp` | Register in `Subsystem::InitializeHandlers()` |
@@ -41,12 +41,12 @@ MCP server for Unreal Engine 5 (5.0-5.7). Dual-process: TypeScript MCP server + 
 | CI Workflows | `.github/workflows/` | All actions use commit SHAs (secure) |
 | Version Sync | `.github/workflows/bump-version.yml` | Updates 4 files atomically |
 | Change default enabled tools | `config/default-enabled-tools.json` | Filters `tools/list` at startup |
-| Regenerate tool schemas | `python Scripts/run-cmd.py DumpMcpManifest && npm run gen:tool-defs` | After any C++ tool change |
+| Regenerate tool schemas | `npm run mcp:rebuild` | Runs `DumpMcpManifest`, regenerates TypeScript tool definitions, verifies them, builds the MCP server, and audits tool schema quality |
 | Audit tool-defs quality | `npm run lint:tool-defs` | Lists missing descriptions and similar issues |
 
 ## CONVENTIONS
 ### Dual-Process Flow
-0. **Schema Definition**: C++ `McpTool_*.cpp` declares each tool via `FMcpToolDefinition` + `FMcpSchemaBuilder` → `FMcpToolRegistry` → `DumpMcpManifest` commandlet → `npm run gen:tool-defs`. Native is the single source of truth for `name/description/inputSchema/category/annotations`.
+0. **Schema Definition**: C++ `McpTool_*.cpp` declares each tool via `FMcpToolDefinition` + `FMcpSchemaBuilder` → `FMcpToolRegistry` → `DumpMcpManifest` commandlet → `npm run mcp:rebuild`. Native is the single source of truth for `name/description/inputSchema/category/annotations`.
 1. **TS (MCP)**: Validates JSON Schema → Executes Tool Handler.
 2. **Bridge (WS)**: TS sends JSON payload → C++ Subsystem dispatches to Game Thread.
 3. **Execution**: C++ handler performs native UE API calls → Returns JSON result.
@@ -82,7 +82,8 @@ npm run build:core      # Build TypeScript
 npm run test:unit       # Vitest unit tests
 npm test                # UE Integration (Requires Editor)
 npm run test:smoke      # Mock mode smoke test
-npm run gen:tool-defs   # Regenerate consolidated-tool-definitions.ts from manifest
+npm run mcp:rebuild     # Dump native manifest, regenerate tool definitions, verify, build, and lint schemas
+npm run gen:tool-defs   # Regenerate consolidated-tool-definitions.ts from the current manifest only
 npm run lint:tool-defs  # Audit tool manifest for missing descriptions
 ```
 

@@ -1,5 +1,5 @@
 {
-  "$schema": "Tool names must match generated/tool-manifest.json. Run npm run gen:tool-defs after C++ changes.",
+  "$schema": "Tool names must match generated/tool-manifest.json. Run npm run mcp:rebuild after C++ changes.",
   "enabled": [
     "manage_asset",
     "manage_level",

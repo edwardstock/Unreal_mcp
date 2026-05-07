@@ -306,6 +306,16 @@ ASSET_LIST_TTL_MS=10000
 # MCP_ADDITIONAL_PATH_PREFIXES=/ProjectObject/,/ProjectAnimation/
 ```
 
+### Rebuilding MCP Schemas
+
+After changing native C++ tool schemas in `plugins/McpAutomationBridge`, rebuild the MCP schema artifacts and stdio server:
+
+```bash
+npm run mcp:rebuild
+```
+
+`mcp:rebuild` loads local settings from `.env`, runs the `DumpMcpManifest` Unreal commandlet, regenerates `src/tools/consolidated-tool-definitions.ts`, verifies the generated file, builds TypeScript, and runs the tool schema linter. Configure the commandlet with `UE_PROJECT_PATH` and either `UE_EDITOR_CMD` or `UE_ENGINE_ROOT` in `.env`; see `.env.example`.
+
 ### LAN Access Configuration
 
 By default, the automation bridge only binds to loopback addresses (127.0.0.1) for security. To enable access from other machines on your network:
