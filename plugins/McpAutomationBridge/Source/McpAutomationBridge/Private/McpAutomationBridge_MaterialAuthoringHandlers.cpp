@@ -398,6 +398,23 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     }
   }
 
+  // F.3: synchronous compile + per-asset stat extraction.
+  // Lives in McpAutomationBridge_Material_Compile.cpp.
+  {
+    extern bool McpHandle_CompileMaterials(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_CompileMaterialsDiagnostics(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    if (SubAction == TEXT("compile_materials")) {
+      return McpHandle_CompileMaterials(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("compile_materials_diagnostics")) {
+      return McpHandle_CompileMaterialsDiagnostics(this, RequestId, Payload, Socket);
+    }
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {
