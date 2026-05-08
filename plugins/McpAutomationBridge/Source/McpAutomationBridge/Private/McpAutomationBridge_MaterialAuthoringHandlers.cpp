@@ -286,6 +286,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     return McpHandle_UpdateMaterialFunctionCalls(this, RequestId, Payload, Socket);
   }
 
+  // E.1: find_material_expressions - consolidated read API.
+  // Lives in McpAutomationBridge_Material_GraphReads.cpp.
+  extern bool McpHandle_FindMaterialExpressions(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("find_material_expressions")) {
+    return McpHandle_FindMaterialExpressions(this, RequestId, Payload, Socket);
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {

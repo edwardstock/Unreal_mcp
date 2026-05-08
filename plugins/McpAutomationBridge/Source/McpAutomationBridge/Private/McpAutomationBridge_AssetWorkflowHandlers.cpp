@@ -825,83 +825,8 @@ static TArray<TSharedPtr<FJsonValue>> McpBuildExpressionConsumersArray(
   return Consumers;
 }
 
-static bool McpExpressionMatchesFilters(
-    const FMcpMaterialGraphOwner& Owner,
-    UMaterialExpression* Expr,
-    int32 Index,
-    const TSharedPtr<FJsonObject>& Payload)
-{
-  if (!Expr || !Payload.IsValid())
-  {
-    return false;
-  }
-
-  FString ClassName;
-  if (Payload->TryGetStringField(TEXT("className"), ClassName) ||
-      Payload->TryGetStringField(TEXT("expressionClass"), ClassName))
-  {
-    if (!ClassName.IsEmpty() &&
-        !Expr->GetClass()->GetName().Contains(ClassName, ESearchCase::IgnoreCase))
-    {
-      return false;
-    }
-  }
-
-  FString ParameterName;
-  if (Payload->TryGetStringField(TEXT("parameterName"), ParameterName) && !ParameterName.IsEmpty())
-  {
-    const UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr);
-    if (!Param || !Param->ParameterName.ToString().Contains(ParameterName, ESearchCase::IgnoreCase))
-    {
-      return false;
-    }
-  }
-
-  FString ExpressionName;
-  if (Payload->TryGetStringField(TEXT("expressionName"), ExpressionName) && !ExpressionName.IsEmpty())
-  {
-    if (!Expr->GetName().Contains(ExpressionName, ESearchCase::IgnoreCase))
-    {
-      return false;
-    }
-  }
-
-  FString Desc;
-  if (Payload->TryGetStringField(TEXT("desc"), Desc) && !Desc.IsEmpty())
-  {
-    if (!Expr->Desc.Contains(Desc, ESearchCase::IgnoreCase))
-    {
-      return false;
-    }
-  }
-
-  FString ExpressionPath;
-  if (Payload->TryGetStringField(TEXT("expressionPath"), ExpressionPath) && !ExpressionPath.IsEmpty())
-  {
-    if (!Expr->GetPathName().Equals(ExpressionPath, ESearchCase::IgnoreCase))
-    {
-      return false;
-    }
-  }
-
-  FString Guid;
-  if ((Payload->TryGetStringField(TEXT("expressionGuid"), Guid) || Payload->TryGetStringField(TEXT("nodeId"), Guid)) &&
-      !Guid.IsEmpty())
-  {
-    if (!Expr->MaterialExpressionGuid.ToString().Equals(Guid, ESearchCase::IgnoreCase))
-    {
-      return false;
-    }
-  }
-
-  int32 ExpressionIndex = INDEX_NONE;
-  if (Payload->TryGetNumberField(TEXT("expressionIndex"), ExpressionIndex) && ExpressionIndex != Index)
-  {
-    return false;
-  }
-
-  return true;
-}
+// E.1: McpExpressionMatchesFilters moved to McpAutomationBridge_Material_GraphReads.cpp
+// (extended with parameterGroup/samplerType/referencesTexture/isOrphan filters).
 
 static void McpAppendTypedExpressionDetails(
     const FMcpMaterialGraphOwner& Owner,
@@ -5477,6 +5402,15 @@ bool UMcpAutomationBridgeSubsystem::HandleGetMaterialInstanceInfo(
 #endif
 }
 
+// E.1: HandleFindMaterialExpressions body moved to McpAutomationBridge_Material_GraphReads.cpp
+// (consolidated with filters, identifiers[], orphan detection, reflection details, and
+// symmetric connections[]). The legacy member-function entry point forwards to the
+// new free-function dispatch so callers using the manage_asset route still work until
+// G.2 deletes the legacy dispatch line.
+extern bool McpHandle_FindMaterialExpressions(
+    UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+
 bool UMcpAutomationBridgeSubsystem::HandleFindMaterialExpressions(
     const FString &RequestId, const FString &Action,
     const TSharedPtr<FJsonObject> &Payload,
@@ -5485,103 +5419,7 @@ bool UMcpAutomationBridgeSubsystem::HandleFindMaterialExpressions(
   if (!Lower.Equals(TEXT("find_material_expressions"), ESearchCase::IgnoreCase)) {
     return false;
   }
-
-#if WITH_EDITOR
-  if (!Payload.IsValid()) {
-    SendAutomationError(Socket, RequestId,
-                        TEXT("find_material_expressions payload missing"),
-                        TEXT("INVALID_PAYLOAD"));
-    return true;
-  }
-
-  FString AssetPath;
-  if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) &&
-      !Payload->TryGetStringField(TEXT("materialPath"), AssetPath)) {
-    SendAutomationError(Socket, RequestId, TEXT("assetPath is required"),
-                        TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  FMcpMaterialGraphOwner GraphOwner;
-  FString GraphOwnerError;
-  if (!McpResolveMaterialGraphOwner(AssetPath, GraphOwner, GraphOwnerError)) {
-    SendAutomationError(Socket, RequestId, GraphOwnerError,
-                        GraphOwnerError.Contains(TEXT("not found"))
-                            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
-    return true;
-  }
-
-  // NEW3: when set, every entry includes the same shape as get_material_expression_details.
-  bool bIncludeDetails = false;
-  Payload->TryGetBoolField(TEXT("includeDetails"), bIncludeDetails);
-
-  const TArray<TObjectPtr<UMaterialExpression>>* Expressions = McpGetGraphExpressions(GraphOwner);
-  TArray<TSharedPtr<FJsonValue>> Matches;
-  if (Expressions) {
-    for (int32 Index = 0; Index < Expressions->Num(); ++Index) {
-      UMaterialExpression* Expr = (*Expressions)[Index];
-      if (!McpExpressionMatchesFilters(GraphOwner, Expr, Index, Payload)) {
-        continue;
-      }
-      TSharedPtr<FJsonObject> Match = McpBuildExpressionRef(GraphOwner, Expr);
-      if (Expr) {
-        Match->SetStringField(TEXT("className"), Expr->GetClass()->GetName());
-        Match->SetStringField(TEXT("desc"), Expr->Desc);
-        if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr)) {
-          Match->SetStringField(TEXT("parameterName"), Param->ParameterName.ToString());
-        }
-        // Spec §7.11: functionPath and functionName must be available on every
-        // MaterialFunctionCall expression at top-level, regardless of includeDetails.
-        if (UMaterialExpressionMaterialFunctionCall* FuncCall =
-                Cast<UMaterialExpressionMaterialFunctionCall>(Expr)) {
-          if (FuncCall->MaterialFunction) {
-            Match->SetStringField(TEXT("functionPath"), FuncCall->MaterialFunction->GetPathName());
-            Match->SetStringField(TEXT("functionName"), FuncCall->MaterialFunction->GetName());
-          }
-        }
-        if (bIncludeDetails) {
-          // NEW3: inline type-specific details (code for Custom, attributeSetTypes for SetMaterialAttributes, etc.)
-          McpAppendTypedExpressionDetails(GraphOwner, Expr, Match.ToSharedRef());
-        }
-      }
-      Matches.Add(MakeShared<FJsonValueObject>(Match));
-    }
-  }
-
-  // NEW2: include comments in the listing (UMaterialExpressionComment lives in EditorComments,
-  // separate from the regular expression collection); honour an explicit className filter when present.
-  FString ClassFilter;
-  Payload->TryGetStringField(TEXT("className"), ClassFilter);
-  if (ClassFilter.IsEmpty())
-  {
-    Payload->TryGetStringField(TEXT("expressionClass"), ClassFilter);
-  }
-  const bool bCommentsAllowed = ClassFilter.IsEmpty() ||
-      ClassFilter.Contains(TEXT("Comment"), ESearchCase::IgnoreCase);
-  if (bCommentsAllowed)
-  {
-    int32 NextIndex = Expressions ? Expressions->Num() : 0;
-    for (UMaterialExpressionComment* Comment : McpGetGraphComments(GraphOwner))
-    {
-      if (!Comment) { continue; }
-      Matches.Add(MakeShared<FJsonValueObject>(McpBuildCommentJson(Comment, NextIndex++)));
-    }
-  }
-
-  TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Result, GraphOwner.Asset);
-  Result->SetStringField(TEXT("assetPath"), AssetPath);
-  Result->SetArrayField(TEXT("expressions"), Matches);
-  Result->SetNumberField(TEXT("matchCount"), Matches.Num());
-  SendAutomationResponse(Socket, RequestId, true,
-                         TEXT("Material expressions found"), Result, FString());
-  return true;
-#else
-  SendAutomationResponse(Socket, RequestId, false,
-                         TEXT("find_material_expressions requires editor build"),
-                         nullptr, TEXT("NOT_IMPLEMENTED"));
-  return true;
-#endif
+  return McpHandle_FindMaterialExpressions(this, RequestId, Payload, Socket);
 }
 
 bool UMcpAutomationBridgeSubsystem::HandleGetMaterialExpressionDetails(
