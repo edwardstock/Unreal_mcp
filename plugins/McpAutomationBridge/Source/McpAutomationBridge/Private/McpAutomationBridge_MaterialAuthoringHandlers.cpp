@@ -462,6 +462,64 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     }
   }
 
+  // F.5: top-level material property setters.
+  // All live in McpAutomationBridge_Material_Properties.cpp.
+  {
+    extern bool McpHandle_SetBlendModes(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_SetShadingModels(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_SetMaterialDomains(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_SetMaterialAttributesModes(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_SetTwoSidedFlags(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    if (SubAction == TEXT("set_blend_modes")) {
+      return McpHandle_SetBlendModes(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("set_shading_models")) {
+      return McpHandle_SetShadingModels(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("set_material_domains")) {
+      return McpHandle_SetMaterialDomains(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("set_material_attributes_modes")) {
+      return McpHandle_SetMaterialAttributesModes(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("set_two_sided_flags")) {
+      return McpHandle_SetTwoSidedFlags(this, RequestId, Payload, Socket);
+    }
+  }
+
+  // F.6: landscape layer-blend operations.
+  // All live in McpAutomationBridge_Material_Landscape.cpp.
+  {
+    extern bool McpHandle_AddLandscapeLayers(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_ConfigureLandscapeLayerBlends(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_GetLandscapeMaterialContext(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    if (SubAction == TEXT("add_landscape_layers")) {
+      return McpHandle_AddLandscapeLayers(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("configure_landscape_layer_blends")) {
+      return McpHandle_ConfigureLandscapeLayerBlends(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("get_landscape_material_context")) {
+      return McpHandle_GetLandscapeMaterialContext(this, RequestId, Payload, Socket);
+    }
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {
