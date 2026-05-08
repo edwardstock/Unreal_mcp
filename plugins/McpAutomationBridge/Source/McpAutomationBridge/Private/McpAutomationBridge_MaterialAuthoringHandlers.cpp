@@ -176,11 +176,11 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
   }
 
   FString SubAction;
-  if ((!Payload->TryGetStringField(TEXT("subAction"), SubAction) || SubAction.IsEmpty()) &&
-      (!Payload->TryGetStringField(TEXT("action"), SubAction) || SubAction.IsEmpty())) {
+  if (!Payload->TryGetStringField(TEXT("subAction"), SubAction) || SubAction.IsEmpty())
+  {
     SendAutomationError(Socket, RequestId,
                         TEXT("Missing 'subAction' for manage_material_authoring"),
-                        TEXT("INVALID_ARGUMENT"));
+                        TEXT("MISSING_SUB_ACTION"));
     return true;
   }
 

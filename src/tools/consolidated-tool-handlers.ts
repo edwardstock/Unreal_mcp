@@ -145,14 +145,18 @@ function normalizeToolCall(
   };
 }
 
+// Module-scope so tests and any future callers can reach it.
+// Strict subAction discriminator: the legacy `action` key fallback is intentionally gone.
+export const getAction = (args: Record<string, unknown>): string => {
+  const action = args.subAction;
+  if (typeof action !== 'string' || action.length === 0) {
+    throw new Error('MISSING_SUB_ACTION');
+  }
+  return action;
+};
+
 // Registration of default handlers
 function registerDefaultHandlers() {
-  // Helper to extract action string from args
-  const getAction = (args: Record<string, unknown>): string => {
-    const action = args.action ?? args.subAction;
-    return typeof action === 'string' ? action : requireAction(args);
-  };
-
   // 1. ASSET MANAGER
   toolRegistry.register('manage_asset', async (args, tools) => {
     const action = getAction(args);

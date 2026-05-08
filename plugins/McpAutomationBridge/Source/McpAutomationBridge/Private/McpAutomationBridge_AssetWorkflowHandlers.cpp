@@ -1001,14 +1001,25 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
     TSharedPtr<FMcpBridgeWebSocket> RequestingSocket) {
   FString Lower = Action.ToLower();
 
-  // If the action is the generic "manage_asset" tool, check for a subAction in
-  // the payload
-  if (Lower == TEXT("manage_asset") && Payload.IsValid()) {
-    FString SubAction;
-    if (Payload->TryGetStringField(TEXT("subAction"), SubAction) &&
-        !SubAction.IsEmpty()) {
-      Lower = SubAction.ToLower();
+  // When the wrapping action is the generic "manage_asset" tool, the payload
+  // MUST carry a non-empty `subAction`. The legacy `action`-key fallback has
+  // been removed; callers must use `subAction`.
+  if (Lower == TEXT("manage_asset")) {
+    if (!Payload.IsValid()) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("Missing payload for manage_asset"),
+                          TEXT("INVALID_PAYLOAD"));
+      return true;
     }
+    FString SubAction;
+    if (!Payload->TryGetStringField(TEXT("subAction"), SubAction) ||
+        SubAction.IsEmpty()) {
+      SendAutomationError(RequestingSocket, RequestId,
+                          TEXT("Missing 'subAction' for manage_asset"),
+                          TEXT("MISSING_SUB_ACTION"));
+      return true;
+    }
+    Lower = SubAction.ToLower();
   }
 
   if (Lower.IsEmpty())
