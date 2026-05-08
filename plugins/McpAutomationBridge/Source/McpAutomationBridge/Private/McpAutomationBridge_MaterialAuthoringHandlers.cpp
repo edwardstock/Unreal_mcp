@@ -202,6 +202,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     return McpHandle_UpdateMaterialNodes(this, RequestId, Payload, Socket);
   }
 
+  // C.3: remove_material_nodes (transactional batch).
+  // Lives in McpAutomationBridge_Material_GraphWrites.cpp.
+  extern bool McpHandle_RemoveMaterialNodes(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("remove_material_nodes")) {
+    return McpHandle_RemoveMaterialNodes(this, RequestId, Payload, Socket);
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {

@@ -1938,3 +1938,220 @@ namespace McpUpdateMaterialNodesValidationForTests
     }
 #endif
 }
+
+// =============================================================================
+// External entry: McpHandle_RemoveMaterialNodes (Task C.3)
+//
+// Payload: { assetPath, identifiers: [...], save?: bool }
+// Phase A: resolve each identifier via McpResolveUpdateIdentifier (mixed-array
+//          rules from C.2). All-or-nothing - any miss aborts the batch.
+// Phase B: open transaction, Modify() asset and each expression, remove via
+//          ExpressionCollection.RemoveExpression (UE 5.1+) plus
+//          RemoveExpressionParameter for UMaterial owners. Single rebuild
+//          after the loop. Optional save - failure rolls back.
+// =============================================================================
+extern bool McpHandle_RemoveMaterialNodes(
+    UMcpAutomationBridgeSubsystem* Sub,
+    const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket);
+
+bool McpHandle_RemoveMaterialNodes(
+    UMcpAutomationBridgeSubsystem* Sub,
+    const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket)
+{
+#if WITH_EDITOR
+    if (!Sub || !Payload.IsValid())
+    {
+        if (Sub) Sub->SendAutomationError(Socket, RequestId,
+            TEXT("Invalid payload"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    FString AssetPath;
+    if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("assetPath required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    if (AssetPath.StartsWith(TEXT("/Engine/")) || AssetPath.StartsWith(TEXT("/EnginePlugins/")))
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            FString::Printf(TEXT("Asset path '%s' is under engine content. Copy to /Game first."), *AssetPath),
+            TEXT("ENGINE_ASSET_BLOCKED"));
+        return true;
+    }
+
+    FMcpMaterialGraphOwner Owner;
+    FString OwnerErr;
+    if (!McpResolveMaterialGraphOwner(AssetPath, Owner, OwnerErr))
+    {
+        const FString Code = OwnerErr.Contains(TEXT("not found"))
+            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE");
+        Sub->SendAutomationError(Socket, RequestId,
+            OwnerErr.IsEmpty() ? TEXT("Cannot mutate this asset") : OwnerErr, Code);
+        return true;
+    }
+    if (Owner.bReadOnly)
+    {
+        // mirrors the legacy single-node remove handler
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("Cannot remove nodes from a MaterialFunctionInstance - edit the parent function instead"),
+            TEXT("UNSUPPORTED_OPERATION"));
+        return true;
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* IdentifiersArr = nullptr;
+    if (!Payload->TryGetArrayField(TEXT("identifiers"), IdentifiersArr) || !IdentifiersArr || IdentifiersArr->Num() == 0)
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("identifiers[] is required, minimum length 1"),
+            TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    // Phase A: resolve each identifier; collect ALL errors and abort all-or-nothing.
+    struct FResolvedRemove
+    {
+        UMaterialExpression* Expr = nullptr;
+        FString              IdentifierDisplay;
+    };
+    TArray<FResolvedRemove>          Resolved;
+    TArray<FMcpNodeValidationError>  NodeErrors;
+    Resolved.Reserve(IdentifiersArr->Num());
+
+    // dedupe expressions to avoid double-remove (both as protective measure
+    // and so nodesRemoved reflects unique nodes)
+    TSet<UMaterialExpression*> SeenExprs;
+
+    for (int32 i = 0; i < IdentifiersArr->Num(); ++i)
+    {
+        const TSharedPtr<FJsonValue> IdentifierJson = (*IdentifiersArr)[i];
+
+        FResolvedRemove R;
+        R.IdentifierDisplay = McpFormatIdentifierForDisplay(IdentifierJson);
+
+        FMcpNodeValidationError E;
+        E.Index = i;
+        UMaterialExpression* Expr = nullptr;
+        if (!McpResolveUpdateIdentifier(Owner, IdentifierJson, Expr, E))
+        {
+            NodeErrors.Add(E);
+            Resolved.Add(R);
+            continue;
+        }
+        R.Expr = Expr;
+        if (SeenExprs.Contains(Expr))
+        {
+            // skip duplicate; do not error - silent dedupe matches "remove once" semantics
+            continue;
+        }
+        SeenExprs.Add(Expr);
+        Resolved.Add(R);
+    }
+
+    if (NodeErrors.Num() > 0)
+    {
+        TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+        Resp->SetBoolField  (TEXT("success"), false);
+        Resp->SetStringField(TEXT("errorCode"), TEXT("VALIDATION_FAILED"));
+        Resp->SetStringField(TEXT("message"),
+            FString::Printf(TEXT("Batch rejected; 0 mutations applied. %d node errors."),
+                NodeErrors.Num()));
+        TArray<TSharedPtr<FJsonValue>> ErrorsJson;
+        for (const auto& E : NodeErrors) ErrorsJson.Add(McpFormatNodeError(E));
+        Resp->SetArrayField(TEXT("errors"), ErrorsJson);
+        Sub->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("validation failed"), Resp, TEXT("VALIDATION_FAILED"));
+        return true;
+    }
+
+    // Phase B: apply
+    FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
+        "McpRemoveMaterialNodes", "MCP remove_material_nodes"));
+    if (Owner.Asset) Owner.Asset->Modify();
+
+    TArray<TSharedPtr<FJsonObject>> ResultsJson;
+
+    for (const FResolvedRemove& R : Resolved)
+    {
+        if (!R.Expr) continue;
+
+        const FString RemovedName = R.Expr->GetName();
+        const FString RemovedGuid = R.Expr->MaterialExpressionGuid.ToString();
+
+        R.Expr->Modify();
+
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+        if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+        {
+            UMaterial* Mat = CastChecked<UMaterial>(Owner.GraphSource);
+            Mat->GetEditorOnlyData()->ExpressionCollection.RemoveExpression(R.Expr);
+            Mat->RemoveExpressionParameter(R.Expr);
+        }
+        else
+        {
+            UMaterialFunction* Func = CastChecked<UMaterialFunction>(Owner.GraphSource);
+            Func->GetEditorOnlyData()->ExpressionCollection.RemoveExpression(R.Expr);
+        }
+#else
+        // UE 5.0 fallback (project is 5.7 - dead branch but kept for parity)
+        if (TArray<TObjectPtr<UMaterialExpression>>* ExprPtr = McpGetGraphExpressionsMutable(Owner))
+        {
+            ExprPtr->Remove(R.Expr);
+        }
+        if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+        {
+            CastChecked<UMaterial>(Owner.GraphSource)->RemoveExpressionParameter(R.Expr);
+        }
+#endif
+
+        TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+        Item->SetStringField(TEXT("identifier"),     R.IdentifierDisplay);
+        Item->SetStringField(TEXT("expressionName"), RemovedName);
+        Item->SetStringField(TEXT("expressionGuid"), RemovedGuid);
+        ResultsJson.Add(Item);
+    }
+
+    // single rebuild after all removals
+    FString RebuildErr;
+    McpRebuildMaterialGraphOwner(Owner, RebuildErr);
+
+    bool bSave = false;
+    Payload->TryGetBoolField(TEXT("save"), bSave);
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = McpSafeAssetSave(Owner.Asset);
+        if (!bSaved)
+        {
+            Tx.Cancel();
+            Sub->SendAutomationError(Socket, RequestId,
+                TEXT("Save failed; transaction rolled back"), TEXT("APPLY_FAILED"));
+            return true;
+        }
+    }
+
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+    Resp->SetBoolField  (TEXT("success"), true);
+    Resp->SetStringField(TEXT("assetPath"), AssetPath);
+    Resp->SetNumberField(TEXT("nodesRemoved"), ResultsJson.Num());
+    Resp->SetBoolField  (TEXT("saved"), bSaved);
+
+    TArray<TSharedPtr<FJsonValue>> ResultsArr;
+    for (const auto& R : ResultsJson) ResultsArr.Add(MakeShared<FJsonValueObject>(R));
+    Resp->SetArrayField(TEXT("results"), ResultsArr);
+
+    Sub->SendAutomationResponse(Socket, RequestId, true,
+        TEXT("remove_material_nodes succeeded"), Resp, FString());
+    return true;
+#else
+    if (Sub) Sub->SendAutomationError(Socket, RequestId,
+        TEXT("remove_material_nodes requires editor build"), TEXT("NOT_IMPLEMENTED"));
+    return true;
+#endif
+}
