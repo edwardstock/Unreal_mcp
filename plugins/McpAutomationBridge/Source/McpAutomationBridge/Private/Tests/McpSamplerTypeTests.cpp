@@ -5,6 +5,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "../McpAutomationBridgeHelpers.h"
+#include "Engine/Texture2D.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMcpParseSamplerTypeStringTest,
     "LHGame.Mcp.Material.SamplerType.Parse",
@@ -102,6 +103,57 @@ bool FMcpParseSamplerTypeStringTest::RunTest(const FString& Parameters)
 
     T = McpParseSamplerTypeString(TEXT("VirtualNormal"));
     TestEqual(TEXT("1-arg form returns VirtualNormal"),    (int32)T, (int32)SAMPLERTYPE_VirtualNormal);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMcpValidateSamplerTextureCompatibilityTest,
+    "LHGame.Mcp.Material.SamplerType.Compatibility",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMcpValidateSamplerTextureCompatibilityTest::RunTest(const FString& Parameters)
+{
+    UTexture2D* Tex = NewObject<UTexture2D>(GetTransientPackage(), TEXT("FixtureTex"), RF_Transient);
+    FMcpSamplerWarning W;
+
+    // sRGB Default texture
+    Tex->CompressionSettings = TC_Default;
+    Tex->SRGB = true;
+    Tex->VirtualTextureStreaming = false;
+
+    TestTrue(TEXT("Color matches TC_Default+sRGB"),
+             McpValidateSamplerTextureCompatibility(SAMPLERTYPE_Color, Tex, W));
+
+    TestFalse(TEXT("LinearColor mismatches TC_Default+sRGB"),
+              McpValidateSamplerTextureCompatibility(SAMPLERTYPE_LinearColor, Tex, W));
+    TestEqual(TEXT("warn code"),     W.Code,     FString(TEXT("SAMPLER_TEXTURE_MISMATCH")));
+    TestEqual(TEXT("expected"),       W.Expected, FString(TEXT("Color")));
+    TestEqual(TEXT("got"),            W.Got,      FString(TEXT("LinearColor")));
+
+    // Switch to VT
+    Tex->VirtualTextureStreaming = true;
+
+    TestFalse(TEXT("Color sampler on VT texture mismatches"),
+              McpValidateSamplerTextureCompatibility(SAMPLERTYPE_Color, Tex, W));
+    TestEqual(TEXT("VT warn code"), W.Code, FString(TEXT("SAMPLER_VT_MISMATCH")));
+
+    TestTrue(TEXT("VirtualColor matches VT+sRGB"),
+             McpValidateSamplerTextureCompatibility(SAMPLERTYPE_VirtualColor, Tex, W));
+
+    // Normal map (linear, non-VT)
+    Tex->VirtualTextureStreaming = false;
+    Tex->SRGB = false;
+    Tex->CompressionSettings = TC_Normalmap;
+
+    TestTrue(TEXT("Normal matches TC_Normalmap"),
+             McpValidateSamplerTextureCompatibility(SAMPLERTYPE_Normal, Tex, W));
+    TestFalse(TEXT("Color mismatches TC_Normalmap"),
+              McpValidateSamplerTextureCompatibility(SAMPLERTYPE_Color, Tex, W));
+    TestEqual(TEXT("expected for Normal"), W.Expected, FString(TEXT("Normal")));
+
+    // Null texture is legal (unbound sampler)
+    TestTrue(TEXT("null texture is legal"),
+             McpValidateSamplerTextureCompatibility(SAMPLERTYPE_Color, nullptr, W));
 
     return true;
 }

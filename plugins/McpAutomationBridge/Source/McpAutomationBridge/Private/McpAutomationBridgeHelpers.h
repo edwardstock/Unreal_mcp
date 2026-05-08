@@ -3768,6 +3768,155 @@ static inline EMaterialSamplerType McpParseSamplerTypeString(
     return SAMPLERTYPE_Color;
 }
 
+// Structured warning emitted by McpValidateSamplerTextureCompatibility.
+// Code is one of: SAMPLER_TEXTURE_MISMATCH, SAMPLER_VT_MISMATCH.
+struct FMcpSamplerWarning
+{
+    FString Code;                       // SAMPLER_TEXTURE_MISMATCH or SAMPLER_VT_MISMATCH
+    FString Message;                    // human-readable explanation with suggestion
+    FString Expected;                   // canonical samplerType string for the texture's flags
+    FString Got;                        // string form of the requested samplerType
+    FString CompressionSettingsName;    // e.g., "TC_Default"
+    bool    bSRGB = false;
+    bool    bVirtualTexture = false;
+};
+
+// Returns true if RequestedType is compatible with Texture's compression/SRGB/VT flags.
+// On mismatch returns false and fills OutWarning. A null Texture is treated as legal
+// (unbound sampler) and returns true with no warning.
+// VT mismatches take priority over compression mismatches.
+static inline bool McpValidateSamplerTextureCompatibility(
+    EMaterialSamplerType RequestedType,
+    const UTexture* Texture,
+    FMcpSamplerWarning& OutWarning)
+{
+    if (!Texture) return true;  // unbound sampler is legal
+
+    // canonical name for an EMaterialSamplerType
+    auto SamplerName = [](EMaterialSamplerType T) -> FString
+    {
+        switch (T)
+        {
+            case SAMPLERTYPE_Color:                  return TEXT("Color");
+            case SAMPLERTYPE_LinearColor:            return TEXT("LinearColor");
+            case SAMPLERTYPE_Normal:                 return TEXT("Normal");
+            case SAMPLERTYPE_Masks:                  return TEXT("Masks");
+            case SAMPLERTYPE_Alpha:                  return TEXT("Alpha");
+            case SAMPLERTYPE_Grayscale:              return TEXT("Grayscale");
+            case SAMPLERTYPE_LinearGrayscale:        return TEXT("LinearGrayscale");
+            case SAMPLERTYPE_DistanceFieldFont:      return TEXT("DistanceFieldFont");
+            case SAMPLERTYPE_External:               return TEXT("External");
+            case SAMPLERTYPE_Data:                   return TEXT("Data");
+            case SAMPLERTYPE_VirtualColor:           return TEXT("VirtualColor");
+            case SAMPLERTYPE_VirtualLinearColor:     return TEXT("VirtualLinearColor");
+            case SAMPLERTYPE_VirtualGrayscale:       return TEXT("VirtualGrayscale");
+            case SAMPLERTYPE_VirtualLinearGrayscale: return TEXT("VirtualLinearGrayscale");
+            case SAMPLERTYPE_VirtualNormal:          return TEXT("VirtualNormal");
+            case SAMPLERTYPE_VirtualMasks:           return TEXT("VirtualMasks");
+            case SAMPLERTYPE_VirtualAlpha:           return TEXT("VirtualAlpha");
+            default:                                 return TEXT("Unknown");
+        }
+    };
+
+    // canonical name for a TextureCompressionSettings value
+    auto CompName = [](TextureCompressionSettings TC) -> FString
+    {
+        switch (TC)
+        {
+            case TC_Default:           return TEXT("TC_Default");
+            case TC_Normalmap:         return TEXT("TC_Normalmap");
+            case TC_Masks:             return TEXT("TC_Masks");
+            case TC_Grayscale:         return TEXT("TC_Grayscale");
+            case TC_Alpha:             return TEXT("TC_Alpha");
+            case TC_DistanceFieldFont: return TEXT("TC_DistanceFieldFont");
+            case TC_HDR:               return TEXT("TC_HDR");
+            case TC_HDR_Compressed:    return TEXT("TC_HDR_Compressed");
+            case TC_BC7:               return TEXT("TC_BC7");
+            default:                   return FString::Printf(TEXT("TC_%d"), static_cast<int32>(TC));
+        }
+    };
+
+    const bool bVT = Texture->VirtualTextureStreaming != 0;
+    const bool bIsVirtualSampler = (
+        RequestedType == SAMPLERTYPE_VirtualColor ||
+        RequestedType == SAMPLERTYPE_VirtualLinearColor ||
+        RequestedType == SAMPLERTYPE_VirtualGrayscale ||
+        RequestedType == SAMPLERTYPE_VirtualLinearGrayscale ||
+        RequestedType == SAMPLERTYPE_VirtualNormal ||
+        RequestedType == SAMPLERTYPE_VirtualMasks ||
+        RequestedType == SAMPLERTYPE_VirtualAlpha);
+
+    OutWarning.CompressionSettingsName = CompName(Texture->CompressionSettings);
+    OutWarning.bSRGB = (Texture->SRGB != 0);
+    OutWarning.bVirtualTexture = bVT;
+    OutWarning.Got = SamplerName(RequestedType);
+
+    // VT mismatch takes priority — checked first
+    if (bVT != bIsVirtualSampler)
+    {
+        OutWarning.Code = TEXT("SAMPLER_VT_MISMATCH");
+        OutWarning.Expected = bVT
+            ? TEXT("a Virtual* samplerType (e.g., VirtualColor)")
+            : TEXT("a non-Virtual samplerType (e.g., Color)");
+        OutWarning.Message = FString::Printf(
+            TEXT("samplerType '%s' is %s, but texture has bVirtualTextureStreaming=%s. Use the matching kind."),
+            *OutWarning.Got,
+            bIsVirtualSampler ? TEXT("a Virtual variant") : TEXT("not a Virtual variant"),
+            bVT ? TEXT("true") : TEXT("false"));
+        return false;
+    }
+
+    // Expected canonical samplerType from compression x SRGB x VT
+    EMaterialSamplerType Expected = SAMPLERTYPE_Color;
+    switch (Texture->CompressionSettings)
+    {
+        case TC_Normalmap:
+            Expected = bVT ? SAMPLERTYPE_VirtualNormal : SAMPLERTYPE_Normal;
+            break;
+        case TC_Masks:
+            Expected = bVT ? SAMPLERTYPE_VirtualMasks : SAMPLERTYPE_Masks;
+            break;
+        case TC_Alpha:
+            Expected = bVT ? SAMPLERTYPE_VirtualAlpha : SAMPLERTYPE_Alpha;
+            break;
+        case TC_DistanceFieldFont:
+            // no VT analog — fall back to non-VT
+            Expected = SAMPLERTYPE_DistanceFieldFont;
+            break;
+        case TC_Grayscale:
+            Expected = OutWarning.bSRGB
+                ? (bVT ? SAMPLERTYPE_VirtualGrayscale       : SAMPLERTYPE_Grayscale)
+                : (bVT ? SAMPLERTYPE_VirtualLinearGrayscale : SAMPLERTYPE_LinearGrayscale);
+            break;
+        case TC_HDR:
+        case TC_HDR_Compressed:
+            Expected = bVT ? SAMPLERTYPE_VirtualLinearColor : SAMPLERTYPE_LinearColor;
+            break;
+        case TC_Default:
+        case TC_BC7:
+        default:
+            Expected = OutWarning.bSRGB
+                ? (bVT ? SAMPLERTYPE_VirtualColor       : SAMPLERTYPE_Color)
+                : (bVT ? SAMPLERTYPE_VirtualLinearColor : SAMPLERTYPE_LinearColor);
+            break;
+    }
+
+    if (Expected == RequestedType)
+    {
+        return true;
+    }
+
+    OutWarning.Code = TEXT("SAMPLER_TEXTURE_MISMATCH");
+    OutWarning.Expected = SamplerName(Expected);
+    OutWarning.Message = FString::Printf(
+        TEXT("samplerType '%s' does not match texture compression. Texture has CompressionSettings=%s, SRGB=%s, which suggests samplerType '%s'. Material may render with incorrect color space."),
+        *OutWarning.Got,
+        *OutWarning.CompressionSettingsName,
+        OutWarning.bSRGB ? TEXT("true") : TEXT("false"),
+        *OutWarning.Expected);
+    return false;
+}
+
 // N10: find min/max X of all expressions to support smart default node placement
 static inline void McpFindExpressionsBoundingX(const FMcpMaterialGraphOwner& Owner, float& OutMinX, float& OutMaxX)
 {
