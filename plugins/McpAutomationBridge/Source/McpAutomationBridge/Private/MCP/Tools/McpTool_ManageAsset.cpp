@@ -38,35 +38,39 @@ public:
 		// 26 canonical plural action names per spec section 4. All material- and
 		// texture-specific actions live in the dedicated tools (manage_material,
 		// manage_texture).
+		const TArray<FString> ActionEnum = {
+			TEXT("list_assets"),
+			TEXT("search_assets"),
+			TEXT("assets_exist"),
+			TEXT("import_assets"),
+			TEXT("duplicate_assets"),
+			TEXT("rename_assets"),
+			TEXT("move_assets"),
+			TEXT("delete_assets"),
+			TEXT("create_folders"),
+			TEXT("get_assets_dependencies"),
+			TEXT("get_assets_graph"),
+			TEXT("analyze_assets_graph"),
+			TEXT("get_assets_metadata"),
+			TEXT("set_assets_metadata"),
+			TEXT("set_assets_tags"),
+			TEXT("find_assets_by_tag"),
+			TEXT("create_thumbnails"),
+			TEXT("generate_lods"),
+			TEXT("nanite_rebuild_meshes"),
+			TEXT("validate_assets"),
+			TEXT("fixup_redirectors"),
+			TEXT("generate_assets_report"),
+			TEXT("source_control_checkout_assets"),
+			TEXT("source_control_submit_assets"),
+			TEXT("get_assets_source_control_state"),
+			TEXT("create_render_targets")
+		};
 		return FMcpSchemaBuilder()
-			.StringEnum(TEXT("action"), {
-				TEXT("list_assets"),
-				TEXT("search_assets"),
-				TEXT("assets_exist"),
-				TEXT("import_assets"),
-				TEXT("duplicate_assets"),
-				TEXT("rename_assets"),
-				TEXT("move_assets"),
-				TEXT("delete_assets"),
-				TEXT("create_folders"),
-				TEXT("get_assets_dependencies"),
-				TEXT("get_assets_graph"),
-				TEXT("analyze_assets_graph"),
-				TEXT("get_assets_metadata"),
-				TEXT("set_assets_metadata"),
-				TEXT("set_assets_tags"),
-				TEXT("find_assets_by_tag"),
-				TEXT("create_thumbnails"),
-				TEXT("generate_lods"),
-				TEXT("nanite_rebuild_meshes"),
-				TEXT("validate_assets"),
-				TEXT("fixup_redirectors"),
-				TEXT("generate_assets_report"),
-				TEXT("source_control_checkout_assets"),
-				TEXT("source_control_submit_assets"),
-				TEXT("get_assets_source_control_state"),
-				TEXT("create_render_targets")
-			}, TEXT("Action to perform"))
+			.StringEnum(TEXT("subAction"), ActionEnum,
+				TEXT("Canonical manage_asset sub-action to perform."))
+			.StringEnum(TEXT("action"), ActionEnum,
+				TEXT("Compatibility alias for subAction. New callers should use subAction."))
 
 			// Single + batch asset path inputs
 			.String(TEXT("assetPath"), TEXT("Asset path (e.g., /Game/Path/Asset)."))
@@ -166,7 +170,7 @@ public:
 				TEXT("When true, show modal confirmation dialogs (default false to "
 					"keep automation headless)."))
 
-			.Required({TEXT("action")})
+			.Required({TEXT("subAction")})
 			.Build();
 	}
 };

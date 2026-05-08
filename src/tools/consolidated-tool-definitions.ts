@@ -1689,9 +1689,41 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
     "inputSchema": {
       "type": "object",
       "properties": {
+        "subAction": {
+          "type": "string",
+          "description": "Canonical manage_asset sub-action to perform.",
+          "enum": [
+            "list_assets",
+            "search_assets",
+            "assets_exist",
+            "import_assets",
+            "duplicate_assets",
+            "rename_assets",
+            "move_assets",
+            "delete_assets",
+            "create_folders",
+            "get_assets_dependencies",
+            "get_assets_graph",
+            "analyze_assets_graph",
+            "get_assets_metadata",
+            "set_assets_metadata",
+            "set_assets_tags",
+            "find_assets_by_tag",
+            "create_thumbnails",
+            "generate_lods",
+            "nanite_rebuild_meshes",
+            "validate_assets",
+            "fixup_redirectors",
+            "generate_assets_report",
+            "source_control_checkout_assets",
+            "source_control_submit_assets",
+            "get_assets_source_control_state",
+            "create_render_targets"
+          ]
+        },
         "action": {
           "type": "string",
-          "description": "Action to perform",
+          "description": "Compatibility alias for subAction. New callers should use subAction.",
           "enum": [
             "list_assets",
             "search_assets",
@@ -1888,7 +1920,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         }
       },
       "required": [
-        "action"
+        "subAction"
       ]
     },
     "annotations": {
