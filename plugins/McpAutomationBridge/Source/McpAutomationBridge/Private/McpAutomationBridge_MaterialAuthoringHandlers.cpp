@@ -229,6 +229,24 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     return McpHandle_BreakMaterialConnections(this, RequestId, Payload, Socket);
   }
 
+  // C.5: add_custom_expressions (transactional batch of UMaterialExpressionCustom).
+  // Lives in McpAutomationBridge_Material_CustomExpressions.cpp.
+  extern bool McpHandle_AddCustomExpressions(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("add_custom_expressions")) {
+    return McpHandle_AddCustomExpressions(this, RequestId, Payload, Socket);
+  }
+
+  // C.5: update_custom_expressions (transactional batch with onPinRemoved policy).
+  // Lives in McpAutomationBridge_Material_CustomExpressions.cpp.
+  extern bool McpHandle_UpdateCustomExpressions(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("update_custom_expressions")) {
+    return McpHandle_UpdateCustomExpressions(this, RequestId, Payload, Socket);
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {

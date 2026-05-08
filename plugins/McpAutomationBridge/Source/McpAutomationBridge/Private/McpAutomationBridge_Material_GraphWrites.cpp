@@ -15,6 +15,7 @@
 #include "McpHandlerUtils.h"
 #include "McpAutomationBridgeHelpers.h"
 #include "McpMaterialExpressionCatalog.h"
+#include "McpAutomationBridge_Material_Internal.h"
 
 #if WITH_EDITOR
 
@@ -54,23 +55,12 @@
 namespace
 {
 
-struct FMcpNodeValidationError
-{
-    int32           Index = INDEX_NONE;
-    FString         LocalId;
-    FString         Field;
-    FString         Code;
-    FString         Message;
-    TArray<FString> DidYouMean;
-};
-
-struct FMcpConnectionValidationError
-{
-    int32   Index = INDEX_NONE;
-    FString Field;
-    FString Code;
-    FString Message;
-};
+// Validation error types, format helpers, and the identifier resolver are
+// shared with Material_CustomExpressions.cpp via McpAutomationBridge_Material_Internal.h.
+// We pull them into this TU's anon namespace so existing call sites need no
+// renaming.
+using McpMaterialInternal::FMcpNodeValidationError;
+using McpMaterialInternal::FMcpConnectionValidationError;
 
 #if WITH_EDITOR
 
@@ -996,41 +986,51 @@ static void McpApplyReflectedFields(
     }
 }
 
-// =============================================================================
-// Format helpers
-// =============================================================================
-static TSharedPtr<FJsonValue> McpFormatNodeError(const FMcpNodeValidationError& E)
-{
-    TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
-    O->SetStringField(TEXT("scope"),   TEXT("node"));
-    O->SetNumberField(TEXT("index"),   E.Index);
-    if (!E.LocalId.IsEmpty()) O->SetStringField(TEXT("localId"), E.LocalId);
-    O->SetStringField(TEXT("field"),   E.Field);
-    O->SetStringField(TEXT("code"),    E.Code);
-    O->SetStringField(TEXT("message"), E.Message);
-    if (E.DidYouMean.Num() > 0)
-    {
-        TArray<TSharedPtr<FJsonValue>> Arr;
-        for (const FString& S : E.DidYouMean) Arr.Add(MakeShared<FJsonValueString>(S));
-        O->SetArrayField(TEXT("didYouMean"), Arr);
-    }
-    return MakeShared<FJsonValueObject>(O);
-}
-
-static TSharedPtr<FJsonValue> McpFormatConnError(const FMcpConnectionValidationError& E)
-{
-    TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
-    O->SetStringField(TEXT("scope"),   TEXT("connection"));
-    O->SetNumberField(TEXT("index"),   E.Index);
-    O->SetStringField(TEXT("field"),   E.Field);
-    O->SetStringField(TEXT("code"),    E.Code);
-    O->SetStringField(TEXT("message"), E.Message);
-    return MakeShared<FJsonValueObject>(O);
-}
+// Format helper definitions live in namespace McpMaterialInternal (after the
+// anon namespace closes) so Material_CustomExpressions.cpp can use them; the
+// using-declarations below keep the unqualified call sites in this file
+// unchanged.
+using McpMaterialInternal::McpFormatNodeError;
+using McpMaterialInternal::McpFormatConnError;
 
 #endif // WITH_EDITOR
 
 } // namespace
+
+// =============================================================================
+// Shared internal helpers (named namespace - reachable from sibling TUs)
+// =============================================================================
+namespace McpMaterialInternal
+{
+    TSharedPtr<FJsonValue> McpFormatNodeError(const FMcpNodeValidationError& E)
+    {
+        TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+        O->SetStringField(TEXT("scope"),   TEXT("node"));
+        O->SetNumberField(TEXT("index"),   E.Index);
+        if (!E.LocalId.IsEmpty()) O->SetStringField(TEXT("localId"), E.LocalId);
+        O->SetStringField(TEXT("field"),   E.Field);
+        O->SetStringField(TEXT("code"),    E.Code);
+        O->SetStringField(TEXT("message"), E.Message);
+        if (E.DidYouMean.Num() > 0)
+        {
+            TArray<TSharedPtr<FJsonValue>> Arr;
+            for (const FString& S : E.DidYouMean) Arr.Add(MakeShared<FJsonValueString>(S));
+            O->SetArrayField(TEXT("didYouMean"), Arr);
+        }
+        return MakeShared<FJsonValueObject>(O);
+    }
+
+    TSharedPtr<FJsonValue> McpFormatConnError(const FMcpConnectionValidationError& E)
+    {
+        TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+        O->SetStringField(TEXT("scope"),   TEXT("connection"));
+        O->SetNumberField(TEXT("index"),   E.Index);
+        O->SetStringField(TEXT("field"),   E.Field);
+        O->SetStringField(TEXT("code"),    E.Code);
+        O->SetStringField(TEXT("message"), E.Message);
+        return MakeShared<FJsonValueObject>(O);
+    }
+}
 
 // =============================================================================
 // External entry: McpHandle_AddMaterialNodes
@@ -1415,8 +1415,17 @@ static UMaterialExpression* McpFindExpressionByDesc(
     return nullptr;
 }
 
+#endif // WITH_EDITOR
+} // close anon namespace temporarily so the next two helpers can be defined
+  // with external linkage in namespace McpMaterialInternal (shared with
+  // Material_CustomExpressions.cpp).
+
+namespace McpMaterialInternal
+{
+
 // Captures original identifier value as a printable string (used in responses).
-static FString McpFormatIdentifierForDisplay(const TSharedPtr<FJsonValue>& V)
+// Pure JSON - available even in non-editor builds (matches header declaration).
+FString McpFormatIdentifierForDisplay(const TSharedPtr<FJsonValue>& V)
 {
     if (!V.IsValid()) return TEXT("<null>");
     switch (V->Type)
@@ -1441,6 +1450,7 @@ static FString McpFormatIdentifierForDisplay(const TSharedPtr<FJsonValue>& V)
     }
 }
 
+#if WITH_EDITOR
 // Resolves a single per-item identifier (mixed-type JSON value) to an
 // existing graph expression. Fills OutError on miss.
 //
@@ -1448,7 +1458,7 @@ static FString McpFormatIdentifierForDisplay(const TSharedPtr<FJsonValue>& V)
 //   GUID > expressionName > expressionPath > parameterName > desc
 // (note: McpFindGraphExpression handles GUID/name/path/parameterName in that
 // order; we add a desc fallback here.)
-static bool McpResolveUpdateIdentifier(
+bool McpResolveUpdateIdentifier(
     const FMcpMaterialGraphOwner& Owner,
     const TSharedPtr<FJsonValue>& IdentifierJson,
     UMaterialExpression*& OutExpression,
@@ -1558,6 +1568,19 @@ static bool McpResolveUpdateIdentifier(
         *McpFormatIdentifierForDisplay(IdentifierJson));
     return false;
 }
+#endif // WITH_EDITOR
+
+} // close namespace McpMaterialInternal; rest of TU stays in the anon namespace.
+
+namespace
+{
+#if WITH_EDITOR
+
+// Re-export the shared identifier helpers into this TU's anon namespace so the
+// existing call sites (which used the file-static names) keep compiling
+// without textual changes.
+using McpMaterialInternal::McpFormatIdentifierForDisplay;
+using McpMaterialInternal::McpResolveUpdateIdentifier;
 
 // Validates fields of a per-item update spec against the resolved class.
 // Wraps the shared applicability+enum loop, ignoring "identifier".
