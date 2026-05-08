@@ -211,6 +211,24 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     return McpHandle_RemoveMaterialNodes(this, RequestId, Payload, Socket);
   }
 
+  // C.4: connect_material_pins (transactional batch).
+  // Lives in McpAutomationBridge_Material_GraphWrites.cpp.
+  extern bool McpHandle_ConnectMaterialPins(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("connect_material_pins")) {
+    return McpHandle_ConnectMaterialPins(this, RequestId, Payload, Socket);
+  }
+
+  // C.4: break_material_connections (transactional batch).
+  // Lives in McpAutomationBridge_Material_GraphWrites.cpp.
+  extern bool McpHandle_BreakMaterialConnections(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("break_material_connections")) {
+    return McpHandle_BreakMaterialConnections(this, RequestId, Payload, Socket);
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {

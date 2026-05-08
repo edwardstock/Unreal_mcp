@@ -2155,3 +2155,812 @@ bool McpHandle_RemoveMaterialNodes(
     return true;
 #endif
 }
+
+// =============================================================================
+// connect_material_pins (Task C.4)
+//
+// Standalone batch handler. Re-uses McpValidateConnectionsBatch (the same
+// validator add_material_nodes uses for its inline connections[]). Passes an
+// empty BatchLocalIdToClass since no nodes are being created here - every
+// fromNode/toNode must resolve to an existing graph expression or the
+// $material sentinel.
+// =============================================================================
+extern bool McpHandle_ConnectMaterialPins(
+    UMcpAutomationBridgeSubsystem* Sub,
+    const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket);
+
+bool McpHandle_ConnectMaterialPins(
+    UMcpAutomationBridgeSubsystem* Sub,
+    const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket)
+{
+#if WITH_EDITOR
+    if (!Sub || !Payload.IsValid())
+    {
+        if (Sub) Sub->SendAutomationError(Socket, RequestId,
+            TEXT("Invalid payload"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    FString AssetPath;
+    if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("assetPath required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    if (AssetPath.StartsWith(TEXT("/Engine/")) || AssetPath.StartsWith(TEXT("/EnginePlugins/")))
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            FString::Printf(TEXT("Asset path '%s' is under engine content. Copy to /Game first."), *AssetPath),
+            TEXT("ENGINE_ASSET_BLOCKED"));
+        return true;
+    }
+
+    FMcpMaterialGraphOwner Owner;
+    FString OwnerErr;
+    if (!McpResolveMaterialGraphOwner(AssetPath, Owner, OwnerErr) || Owner.bReadOnly)
+    {
+        const FString Code = OwnerErr.Contains(TEXT("not found"))
+            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE");
+        Sub->SendAutomationError(Socket, RequestId,
+            OwnerErr.IsEmpty() ? TEXT("Cannot mutate this asset") : OwnerErr, Code);
+        return true;
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* ConnsArr = nullptr;
+    if (!Payload->TryGetArrayField(TEXT("connections"), ConnsArr) || !ConnsArr || ConnsArr->Num() == 0)
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("connections[] is required, minimum length 1"),
+            TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    // Phase A: validate connections against existing graph (no batch-localId pool)
+    TMap<FString, UClass*>                EmptyBatch;
+    TArray<FMcpResolvedConnection>        ResolvedConnections;
+    TArray<FMcpConnectionValidationError> ConnErrors;
+    TArray<FString>                       SentinelWarnings;
+    McpValidateConnectionsBatch(*ConnsArr, EmptyBatch, Owner,
+                                ResolvedConnections, ConnErrors, SentinelWarnings);
+
+    if (ConnErrors.Num() > 0)
+    {
+        TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+        Resp->SetBoolField  (TEXT("success"), false);
+        Resp->SetStringField(TEXT("errorCode"), TEXT("VALIDATION_FAILED"));
+        Resp->SetStringField(TEXT("message"),
+            FString::Printf(TEXT("Batch rejected; 0 mutations applied. %d connection errors."),
+                ConnErrors.Num()));
+        TArray<TSharedPtr<FJsonValue>> ErrorsJson;
+        for (const auto& E : ConnErrors) ErrorsJson.Add(McpFormatConnError(E));
+        Resp->SetArrayField(TEXT("errors"), ErrorsJson);
+        Sub->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("validation failed"), Resp, TEXT("VALIDATION_FAILED"));
+        return true;
+    }
+
+    // Phase B: apply
+    FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
+        "McpConnectMaterialPins", "MCP connect_material_pins"));
+    if (Owner.Asset) Owner.Asset->Modify();
+
+    int32 ConnectionsApplied = 0;
+    for (const FMcpResolvedConnection& C : ResolvedConnections)
+    {
+        // for connect_material_pins there are no batch-localIds; FromExpression
+        // and (when not bToMaterialRoot) ToExpression must be already resolved
+        UMaterialExpression* From = C.FromExpression;
+        if (!From) continue;
+
+        if (C.bToMaterialRoot)
+        {
+            const EMaterialProperty MP = McpMaterialPropertyFromName(C.ToPin);
+            if (MP != MP_MAX)
+            {
+                if (UMaterialEditingLibrary::ConnectMaterialProperty(From, C.FromPin, MP))
+                {
+                    ++ConnectionsApplied;
+                }
+            }
+        }
+        else
+        {
+            UMaterialExpression* To = C.ToExpression;
+            if (To)
+            {
+                if (UMaterialEditingLibrary::ConnectMaterialExpressions(From, C.FromPin, To, C.ToPin))
+                {
+                    ++ConnectionsApplied;
+                }
+            }
+        }
+    }
+
+    // single rebuild after all connections
+    FString RebuildErr;
+    McpRebuildMaterialGraphOwner(Owner, RebuildErr);
+
+    bool bSave = false;
+    Payload->TryGetBoolField(TEXT("save"), bSave);
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = McpSafeAssetSave(Owner.Asset);
+        if (!bSaved)
+        {
+            Tx.Cancel();
+            Sub->SendAutomationError(Socket, RequestId,
+                TEXT("Save failed; transaction rolled back"), TEXT("APPLY_FAILED"));
+            return true;
+        }
+    }
+
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+    Resp->SetBoolField  (TEXT("success"), true);
+    Resp->SetStringField(TEXT("assetPath"), AssetPath);
+    Resp->SetNumberField(TEXT("connectionsApplied"), ConnectionsApplied);
+    Resp->SetBoolField  (TEXT("saved"), bSaved);
+
+    TArray<TSharedPtr<FJsonValue>> WarnJson;
+    for (const FString& W : SentinelWarnings)
+    {
+        TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+        O->SetStringField(TEXT("code"),    TEXT("SENTINEL_RESOLVED"));
+        O->SetStringField(TEXT("message"), W);
+        WarnJson.Add(MakeShared<FJsonValueObject>(O));
+    }
+    if (WarnJson.Num() > 0) Resp->SetArrayField(TEXT("warnings"), WarnJson);
+
+    Sub->SendAutomationResponse(Socket, RequestId, true,
+        TEXT("connect_material_pins succeeded"), Resp, FString());
+    return true;
+#else
+    if (Sub) Sub->SendAutomationError(Socket, RequestId,
+        TEXT("connect_material_pins requires editor build"), TEXT("NOT_IMPLEMENTED"));
+    return true;
+#endif
+}
+
+// =============================================================================
+// break_material_connections (Task C.4)
+//
+// Per-item shape: { fromNode?, fromPin?, toNode, toPin }. The (toNode, toPin)
+// pair identifies the input being disconnected.
+//   - toNode == "$material" (or canonical aliases) => disconnect a root pin
+//     on the material's editor-only data (BaseColor, Metallic, etc.).
+//   - otherwise toNode resolves to an existing expression; toPin names one of
+//     its FExpressionInput fields.
+// fromNode (optional) lets the caller assert the current source; if provided
+// and the resolved input is bound to a different source, the entry fails with
+// CONNECTION_NOT_FOUND. If omitted, ALL connections to the named input are
+// broken (regardless of source).
+// =============================================================================
+namespace
+{
+#if WITH_EDITOR
+
+// Finds a (UStruct, FProperty) descriptor for an FExpressionInput-derived
+// struct field whose name matches PinName (case-insensitive). Walks all struct
+// properties of OwningClass; any UScriptStruct that is FExpressionInput or a
+// subtype of it counts as a candidate. Returns the matched FStructProperty
+// (or nullptr) and fills OutAllPinNames with every candidate seen.
+static FStructProperty* McpFindExpressionInputProperty(
+    UClass* OwningClass,
+    const FString& PinName,
+    TArray<FString>& OutAllPinNames)
+{
+    OutAllPinNames.Reset();
+    if (!OwningClass) return nullptr;
+    FStructProperty* Match = nullptr;
+    const FName ExprInputName(TEXT("ExpressionInput"));
+    for (TFieldIterator<FProperty> PropIt(OwningClass); PropIt; ++PropIt)
+    {
+        FStructProperty* SP = CastField<FStructProperty>(*PropIt);
+        if (!SP || !SP->Struct) continue;
+
+        // Walk the struct's super chain to detect FExpressionInput ancestry.
+        // Plain FExpressionInput pins (on UMaterialExpression subclasses) match
+        // directly; root pins on the material's editor-only data class are
+        // FColorMaterialInput / FScalarMaterialInput / etc., which derive from
+        // FMaterialInput<T> -> FExpressionInput.
+        bool bIsExprInput = false;
+        for (UStruct* S = SP->Struct; S; S = S->GetSuperStruct())
+        {
+            if (S->GetFName() == ExprInputName) { bIsExprInput = true; break; }
+        }
+        if (!bIsExprInput) continue;
+
+        const FString Name = SP->GetName();
+        OutAllPinNames.Add(Name);
+        if (!Match && Name.Equals(PinName, ESearchCase::IgnoreCase))
+        {
+            Match = SP;
+        }
+    }
+    return Match;
+}
+
+// Resolves the (Class, ContainerObj) pair for a break-side toNode.
+//   - root sentinel => Class = MaterialEditorOnlyData class, Container = the
+//     editor-only data UObject pointer.
+//   - expression => Class = expression class, Container = the expression.
+// Returns false on any resolution failure; OutCode/OutMessage describe it.
+struct FMcpBreakTarget
+{
+    bool                 bRoot = false;
+    UMaterialExpression* Expr = nullptr;     // when bRoot=false
+    UObject*             Container = nullptr; // expression OR editor-only data
+    UClass*              ContainerClass = nullptr;
+    FString              ResolvedToNodeDisplay; // for results[]
+};
+
+static bool McpResolveBreakTarget(
+    const FMcpMaterialGraphOwner& Owner,
+    const FString& ToNodeRaw,
+    FMcpBreakTarget& Out,
+    FString& OutCode,
+    FString& OutField,
+    FString& OutMessage,
+    bool& bOutSentinelAlias,
+    FString& OutAliasUsed)
+{
+    bOutSentinelAlias = false;
+    OutAliasUsed.Reset();
+
+    if (ToNodeRaw.IsEmpty())
+    {
+        OutCode = TEXT("INVALID_ARGUMENT");
+        OutField = TEXT("toNode");
+        OutMessage = TEXT("toNode is required");
+        return false;
+    }
+
+    // root sentinel + aliases (mirrors McpValidateConnectionsBatch)
+    bool bSentinel = false;
+    if (ToNodeRaw == TEXT("$material"))
+    {
+        bSentinel = true;
+    }
+    else if (ToNodeRaw.Equals(TEXT("$root"), ESearchCase::IgnoreCase) ||
+             ToNodeRaw.Equals(TEXT("MaterialOutput"), ESearchCase::IgnoreCase) ||
+             ToNodeRaw.Equals(TEXT("Material"), ESearchCase::IgnoreCase) ||
+             ToNodeRaw.Equals(TEXT("Root"), ESearchCase::IgnoreCase))
+    {
+        bSentinel = true;
+        bOutSentinelAlias = true;
+        OutAliasUsed = ToNodeRaw;
+    }
+
+    if (bSentinel)
+    {
+        if (Owner.Kind != EMcpMaterialGraphOwnerKind::Material)
+        {
+            OutCode = TEXT("UNSUPPORTED_OPERATION");
+            OutField = TEXT("toNode");
+            OutMessage = TEXT("Root pin disconnect requires a UMaterial owner; this asset is a MaterialFunction");
+            return false;
+        }
+        UMaterial* Mat = CastChecked<UMaterial>(Owner.GraphSource);
+#if MCP_HAS_MATERIAL_EDITOR_ONLY_DATA
+        UObject* EditorData = Mat->GetEditorOnlyData();
+        if (!EditorData)
+        {
+            OutCode = TEXT("APPLY_FAILED");
+            OutField = TEXT("toNode");
+            OutMessage = TEXT("Material has no editor-only data");
+            return false;
+        }
+        Out.bRoot = true;
+        Out.Container = EditorData;
+        Out.ContainerClass = EditorData->GetClass();
+        Out.ResolvedToNodeDisplay = TEXT("$material");
+        return true;
+#else
+        Out.bRoot = true;
+        Out.Container = Mat;
+        Out.ContainerClass = Mat->GetClass();
+        Out.ResolvedToNodeDisplay = TEXT("$material");
+        return true;
+#endif
+    }
+
+    // expression resolution
+    if (UMaterialExpression* Expr = McpFindGraphExpression(Owner, ToNodeRaw, -1))
+    {
+        Out.bRoot = false;
+        Out.Expr = Expr;
+        Out.Container = Expr;
+        Out.ContainerClass = Expr->GetClass();
+        Out.ResolvedToNodeDisplay = Expr->GetName();
+        return true;
+    }
+
+    OutCode = TEXT("NODE_NOT_FOUND");
+    OutField = TEXT("toNode");
+    OutMessage = FString::Printf(TEXT("toNode '%s' not found in graph"), *ToNodeRaw);
+    return false;
+}
+
+// Resolves the FExpressionInput* for a break target + pin name. For root
+// targets (bRoot=true) this MUST go through UMaterial::GetExpressionInputForProperty
+// because the concrete pin types (FColorMaterialInput, FScalarMaterialInput,
+// FShadingModelMaterialInput, FSubstrateMaterialInput, FVectorMaterialInput,
+// FVector2MaterialInput) derive from FMaterialInput<T>, which is declared
+// noexport in UE 5.7's reflection - the FExpressionInput ancestor is not
+// reachable via UStruct::GetSuperStruct walks.
+//
+// For non-root targets we fall back to the reflective McpFindExpressionInputProperty
+// path (works because plain UMaterialExpression pins ARE FExpressionInput-typed,
+// and FMaterialAttributesInput inherits FExpressionInput directly with full
+// reflection metadata).
+//
+// On miss, OutCode is set to INPUT_NOT_FOUND with a helpful message.
+static FExpressionInput* McpResolveBreakInputPointer(
+    UMaterial* OwnerMaterialOrNull,
+    const FMcpBreakTarget& Target,
+    const FString& ToPin,
+    EMaterialProperty& OutRootProperty,
+    FStructProperty*& OutInputProp,
+    FString& OutCode,
+    FString& OutMessage)
+{
+    OutRootProperty = MP_MAX;
+    OutInputProp = nullptr;
+    OutCode.Reset();
+    OutMessage.Reset();
+
+    if (Target.bRoot)
+    {
+        const EMaterialProperty Prop = McpMaterialPropertyFromName(ToPin);
+        if (Prop == MP_MAX)
+        {
+            static const TCHAR* const KnownRootPins =
+                TEXT("BaseColor, Metallic, Roughness, Specular, Normal, EmissiveColor, ")
+                TEXT("Opacity, OpacityMask, WorldPositionOffset, Refraction, ")
+                TEXT("AmbientOcclusion, PixelDepthOffset, MaterialAttributes");
+            OutCode = TEXT("INPUT_NOT_FOUND");
+            OutMessage = FString::Printf(
+                TEXT("toPin '%s' is not a valid root pin on $material. Valid pins: %s"),
+                *ToPin, KnownRootPins);
+            return nullptr;
+        }
+        if (!OwnerMaterialOrNull)
+        {
+            OutCode = TEXT("UNSUPPORTED_OPERATION");
+            OutMessage = TEXT("Root pin requires UMaterial owner");
+            return nullptr;
+        }
+        FExpressionInput* RootIn = OwnerMaterialOrNull->GetExpressionInputForProperty(Prop);
+        if (!RootIn)
+        {
+            OutCode = TEXT("INPUT_NOT_FOUND");
+            OutMessage = FString::Printf(
+                TEXT("Root pin '%s' is not available on this material (UMaterial::GetExpressionInputForProperty returned null)"),
+                *ToPin);
+            return nullptr;
+        }
+        OutRootProperty = Prop;
+        return RootIn;
+    }
+
+    TArray<FString> AvailablePins;
+    FStructProperty* Prop = McpFindExpressionInputProperty(Target.ContainerClass, ToPin, AvailablePins);
+    if (!Prop)
+    {
+        FString Joined;
+        for (int32 j = 0; j < AvailablePins.Num(); ++j)
+        {
+            if (j > 0) Joined += TEXT(", ");
+            Joined += AvailablePins[j];
+        }
+        OutCode = TEXT("INPUT_NOT_FOUND");
+        OutMessage = FString::Printf(
+            TEXT("toPin '%s' is not a valid input on %s. Valid pins: %s"),
+            *ToPin, Target.ContainerClass ? *Target.ContainerClass->GetName() : TEXT("?"), *Joined);
+        return nullptr;
+    }
+    OutInputProp = Prop;
+    return Prop->ContainerPtrToValuePtr<FExpressionInput>(Target.Container);
+}
+
+#endif // WITH_EDITOR
+} // namespace
+
+// =============================================================================
+// Test-only forwarder for break-side root-pin resolution. Mirrors the Phase A
+// path that maps (sentinel target, toPin) -> live FExpressionInput*. Tests
+// drive this with a transient UMaterial to verify that the new GetExpressionInputForProperty-
+// based root-pin lookup actually finds wired inputs (the prior reflection-only
+// path missed every root pin because FColorMaterialInput etc. derive from a
+// noexport FMaterialInput<T>).
+// =============================================================================
+namespace McpBreakMaterialConnectionsForTests
+{
+#if WITH_EDITOR
+    bool ResolveRootInput(
+        UMaterial* Material,
+        const FString& ToPin,
+        FExpressionInput*& OutInput,
+        EMaterialProperty& OutProperty,
+        FString& OutCode,
+        FString& OutMessage)
+    {
+        OutInput = nullptr;
+        OutProperty = MP_MAX;
+        OutCode.Reset();
+        OutMessage.Reset();
+        if (!Material)
+        {
+            OutCode = TEXT("UNSUPPORTED_OPERATION");
+            OutMessage = TEXT("Material is null");
+            return false;
+        }
+        FMcpBreakTarget T;
+        T.bRoot = true;
+#if MCP_HAS_MATERIAL_EDITOR_ONLY_DATA
+        T.Container = Material->GetEditorOnlyData();
+        T.ContainerClass = T.Container ? T.Container->GetClass() : nullptr;
+#else
+        T.Container = Material;
+        T.ContainerClass = Material->GetClass();
+#endif
+        FStructProperty* DummyProp = nullptr;
+        OutInput = McpResolveBreakInputPointer(Material, T, ToPin, OutProperty, DummyProp, OutCode, OutMessage);
+        return OutInput != nullptr;
+    }
+#endif
+}
+
+extern bool McpHandle_BreakMaterialConnections(
+    UMcpAutomationBridgeSubsystem* Sub,
+    const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket);
+
+bool McpHandle_BreakMaterialConnections(
+    UMcpAutomationBridgeSubsystem* Sub,
+    const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket)
+{
+#if WITH_EDITOR
+    if (!Sub || !Payload.IsValid())
+    {
+        if (Sub) Sub->SendAutomationError(Socket, RequestId,
+            TEXT("Invalid payload"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    FString AssetPath;
+    if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("assetPath required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    if (AssetPath.StartsWith(TEXT("/Engine/")) || AssetPath.StartsWith(TEXT("/EnginePlugins/")))
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            FString::Printf(TEXT("Asset path '%s' is under engine content. Copy to /Game first."), *AssetPath),
+            TEXT("ENGINE_ASSET_BLOCKED"));
+        return true;
+    }
+
+    FMcpMaterialGraphOwner Owner;
+    FString OwnerErr;
+    if (!McpResolveMaterialGraphOwner(AssetPath, Owner, OwnerErr) || Owner.bReadOnly)
+    {
+        const FString Code = OwnerErr.Contains(TEXT("not found"))
+            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE");
+        Sub->SendAutomationError(Socket, RequestId,
+            OwnerErr.IsEmpty() ? TEXT("Cannot mutate this asset") : OwnerErr, Code);
+        return true;
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* ConnsArr = nullptr;
+    if (!Payload->TryGetArrayField(TEXT("connections"), ConnsArr) || !ConnsArr || ConnsArr->Num() == 0)
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("connections[] is required, minimum length 1"),
+            TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    // Phase A: resolve every entry; collect ALL errors and abort all-or-nothing.
+    struct FResolvedBreak
+    {
+        int32                Index = INDEX_NONE;
+        // resolved target
+        FMcpBreakTarget      Target;
+        FStructProperty*     InputProp = nullptr;     // for non-root: FExpressionInput-typed property on Target.ContainerClass
+        FExpressionInput*    RootInput = nullptr;     // for root: pointer obtained via UMaterial::GetExpressionInputForProperty
+        EMaterialProperty    RootProperty = MP_MAX;   // for root: resolved EMaterialProperty
+        // optional source-match assertion
+        bool                 bMatchSource = false;
+        UMaterialExpression* MatchSource = nullptr;
+        bool                 bMatchFromPin = false;
+        FString              MatchFromPin;            // when fromPin specified, also assert OutputName/Mask
+        // echo fields
+        FString              FromNodeRaw;
+        FString              FromPin;
+        FString              ToNodeRaw;
+        FString              ToPin;
+        // pre-break source descriptor (filled at apply time)
+    };
+
+    TArray<FResolvedBreak>                Resolved;
+    TArray<FMcpConnectionValidationError> Errors;
+    TArray<FString>                       SentinelWarnings;
+    Resolved.Reserve(ConnsArr->Num());
+
+    for (int32 i = 0; i < ConnsArr->Num(); ++i)
+    {
+        const TSharedPtr<FJsonValue>& V = (*ConnsArr)[i];
+        const TSharedPtr<FJsonObject>* ObjPtr = nullptr;
+        if (!V.IsValid() || !V->TryGetObject(ObjPtr) || !ObjPtr || !ObjPtr->IsValid())
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = TEXT("connections[]");
+            E.Code = TEXT("INVALID_CONNECTION");
+            E.Message = TEXT("Connection entry is not an object");
+            Errors.Add(E);
+            continue;
+        }
+        const TSharedPtr<FJsonObject>& Obj = *ObjPtr;
+
+        FResolvedBreak R;
+        R.Index = i;
+        Obj->TryGetStringField(TEXT("fromNode"), R.FromNodeRaw);
+        Obj->TryGetStringField(TEXT("fromPin"),  R.FromPin);
+        Obj->TryGetStringField(TEXT("toNode"),   R.ToNodeRaw);
+        Obj->TryGetStringField(TEXT("toPin"),    R.ToPin);
+
+        if (R.ToNodeRaw.IsEmpty())
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = TEXT("toNode");
+            E.Code = TEXT("NODE_NOT_FOUND");
+            E.Message = TEXT("toNode is required");
+            Errors.Add(E);
+            continue;
+        }
+        if (R.ToPin.IsEmpty())
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = TEXT("toPin");
+            E.Code = TEXT("INVALID_ARGUMENT");
+            E.Message = TEXT("toPin is required");
+            Errors.Add(E);
+            continue;
+        }
+
+        // resolve toNode (sentinel or expression)
+        FString TgtCode, TgtField, TgtMsg, AliasUsed;
+        bool bAlias = false;
+        if (!McpResolveBreakTarget(Owner, R.ToNodeRaw, R.Target, TgtCode, TgtField, TgtMsg, bAlias, AliasUsed))
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = TgtField;
+            E.Code = TgtCode;
+            E.Message = TgtMsg;
+            Errors.Add(E);
+            continue;
+        }
+        if (bAlias)
+        {
+            SentinelWarnings.Add(FString::Printf(
+                TEXT("toNode '%s' resolved to canonical '$material'; future calls should use '$material'"),
+                *AliasUsed));
+        }
+
+        // resolve toPin: root pins use UMaterial::GetExpressionInputForProperty
+        // (concrete types like FColorMaterialInput derive from FMaterialInput<T>
+        // which is noexport in 5.7's reflection - super-walk never finds the
+        // FExpressionInput ancestor). Expression-to-expression breaks still use
+        // the reflective path.
+        UMaterial* OwnerMatOrNull = (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+            ? Cast<UMaterial>(Owner.GraphSource) : nullptr;
+
+        FString PinCode, PinMsg;
+        FExpressionInput* CurrentInput = McpResolveBreakInputPointer(
+            OwnerMatOrNull, R.Target, R.ToPin,
+            R.RootProperty, R.InputProp, PinCode, PinMsg);
+        if (!CurrentInput)
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = TEXT("toPin");
+            E.Code = PinCode.IsEmpty() ? TEXT("INPUT_NOT_FOUND") : PinCode;
+            E.Message = PinMsg;
+            Errors.Add(E);
+            continue;
+        }
+        if (R.Target.bRoot) R.RootInput = CurrentInput;
+
+        if (CurrentInput->Expression == nullptr)
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = TEXT("toPin");
+            E.Code = TEXT("CONNECTION_NOT_FOUND");
+            E.Message = FString::Printf(
+                TEXT("Input '%s' on '%s' is not currently connected"),
+                *R.ToPin, *R.Target.ResolvedToNodeDisplay);
+            Errors.Add(E);
+            continue;
+        }
+
+        // optional fromNode assertion: input must be bound to that source
+        if (!R.FromNodeRaw.IsEmpty())
+        {
+            UMaterialExpression* Asserted = McpFindGraphExpression(Owner, R.FromNodeRaw, -1);
+            if (!Asserted)
+            {
+                FMcpConnectionValidationError E;
+                E.Index = i;
+                E.Field = TEXT("fromNode");
+                E.Code = TEXT("NODE_NOT_FOUND");
+                E.Message = FString::Printf(TEXT("fromNode '%s' not found in graph"), *R.FromNodeRaw);
+                Errors.Add(E);
+                continue;
+            }
+            if (CurrentInput->Expression != Asserted)
+            {
+                FMcpConnectionValidationError E;
+                E.Index = i;
+                E.Field = TEXT("fromNode");
+                E.Code = TEXT("CONNECTION_NOT_FOUND");
+                E.Message = FString::Printf(
+                    TEXT("the input is connected, but to a different source than fromNode='%s'"),
+                    *R.FromNodeRaw);
+                Errors.Add(E);
+                continue;
+            }
+            R.bMatchSource = true;
+            R.MatchSource = Asserted;
+        }
+
+        Resolved.Add(R);
+    }
+
+    if (Errors.Num() > 0)
+    {
+        TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+        Resp->SetBoolField  (TEXT("success"), false);
+        Resp->SetStringField(TEXT("errorCode"), TEXT("VALIDATION_FAILED"));
+        Resp->SetStringField(TEXT("message"),
+            FString::Printf(TEXT("Batch rejected; 0 mutations applied. %d connection errors."),
+                Errors.Num()));
+        TArray<TSharedPtr<FJsonValue>> ErrorsJson;
+        for (const auto& E : Errors) ErrorsJson.Add(McpFormatConnError(E));
+        Resp->SetArrayField(TEXT("errors"), ErrorsJson);
+        Sub->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("validation failed"), Resp, TEXT("VALIDATION_FAILED"));
+        return true;
+    }
+
+    // Phase B: apply
+    FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
+        "McpBreakMaterialConnections", "MCP break_material_connections"));
+    if (Owner.Asset) Owner.Asset->Modify();
+
+    TArray<TSharedPtr<FJsonObject>> ResultsJson;
+    int32 ConnectionsBroken = 0;
+
+    for (const FResolvedBreak& R : Resolved)
+    {
+        if (!R.Target.Container) continue;
+
+        // Resolve the live FExpressionInput pointer the same way Phase A did.
+        // For root pins: re-fetch via GetExpressionInputForProperty (handles
+        // FColorMaterialInput etc. without reflection). For non-root: reflective
+        // ContainerPtrToValuePtr through the cached FStructProperty.
+        FExpressionInput* In = nullptr;
+        if (R.Target.bRoot)
+        {
+            UMaterial* Mat = Cast<UMaterial>(Owner.GraphSource);
+            if (Mat) In = Mat->GetExpressionInputForProperty(R.RootProperty);
+        }
+        else if (R.InputProp)
+        {
+            In = R.InputProp->ContainerPtrToValuePtr<FExpressionInput>(R.Target.Container);
+        }
+        if (!In) continue;
+
+        // capture pre-break source for the response
+        FString BrokenSourceName;
+        FString BrokenSourcePin;
+        if (In->Expression)
+        {
+            BrokenSourceName = In->Expression->GetName();
+            // Derive the source pin name from the connected expression's
+            // Outputs[OutputIndex] (FExpressionInput stores only the index;
+            // the name lives on the source's output array).
+            const TArray<FExpressionOutput>& Outs = In->Expression->GetOutputs();
+            if (Outs.IsValidIndex(In->OutputIndex))
+            {
+                const FExpressionOutput& Out = Outs[In->OutputIndex];
+                if (!Out.OutputName.IsNone())
+                {
+                    BrokenSourcePin = Out.OutputName.ToString();
+                }
+            }
+        }
+
+        // Modify the holder so transaction snapshots both sides
+        if (R.Target.Container) R.Target.Container->Modify();
+        if (R.Target.Expr) R.Target.Expr->Modify();
+
+        In->Expression = nullptr;
+        In->OutputIndex = 0;
+        ++ConnectionsBroken;
+
+        TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+        if (!R.FromNodeRaw.IsEmpty()) Item->SetStringField(TEXT("fromNode"), R.FromNodeRaw);
+        if (!R.FromPin.IsEmpty())     Item->SetStringField(TEXT("fromPin"),  R.FromPin);
+        Item->SetStringField(TEXT("toNode"), R.Target.ResolvedToNodeDisplay);
+        Item->SetStringField(TEXT("toPin"),  R.ToPin);
+        Item->SetStringField(TEXT("brokenSourceName"), BrokenSourceName);
+        Item->SetStringField(TEXT("brokenSourcePin"),  BrokenSourcePin);
+        ResultsJson.Add(Item);
+    }
+
+    // single rebuild after all breaks
+    FString RebuildErr;
+    McpRebuildMaterialGraphOwner(Owner, RebuildErr);
+
+    bool bSave = false;
+    Payload->TryGetBoolField(TEXT("save"), bSave);
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = McpSafeAssetSave(Owner.Asset);
+        if (!bSaved)
+        {
+            Tx.Cancel();
+            Sub->SendAutomationError(Socket, RequestId,
+                TEXT("Save failed; transaction rolled back"), TEXT("APPLY_FAILED"));
+            return true;
+        }
+    }
+
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+    Resp->SetBoolField  (TEXT("success"), true);
+    Resp->SetStringField(TEXT("assetPath"), AssetPath);
+    Resp->SetNumberField(TEXT("connectionsBroken"), ConnectionsBroken);
+    Resp->SetBoolField  (TEXT("saved"), bSaved);
+
+    TArray<TSharedPtr<FJsonValue>> ResultsArr;
+    for (const auto& R : ResultsJson) ResultsArr.Add(MakeShared<FJsonValueObject>(R));
+    Resp->SetArrayField(TEXT("results"), ResultsArr);
+
+    TArray<TSharedPtr<FJsonValue>> WarnJson;
+    for (const FString& W : SentinelWarnings)
+    {
+        TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+        O->SetStringField(TEXT("code"),    TEXT("SENTINEL_RESOLVED"));
+        O->SetStringField(TEXT("message"), W);
+        WarnJson.Add(MakeShared<FJsonValueObject>(O));
+    }
+    if (WarnJson.Num() > 0) Resp->SetArrayField(TEXT("warnings"), WarnJson);
+
+    Sub->SendAutomationResponse(Socket, RequestId, true,
+        TEXT("break_material_connections succeeded"), Resp, FString());
+    return true;
+#else
+    if (Sub) Sub->SendAutomationError(Socket, RequestId,
+        TEXT("break_material_connections requires editor build"), TEXT("NOT_IMPLEMENTED"));
+    return true;
+#endif
+}
