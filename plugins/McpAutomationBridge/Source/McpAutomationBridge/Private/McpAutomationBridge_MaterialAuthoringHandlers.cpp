@@ -4,7 +4,8 @@
  * Phase 8: Material Authoring System Handlers
  *
  * Provides advanced material creation and shader authoring capabilities for the MCP
- * Automation Bridge. This file implements the `manage_material_authoring` tool.
+ * Automation Bridge. This file implements the `manage_material` tool (formerly
+ * `manage_material_authoring`).
  *
  * HANDLERS BY CATEGORY:
  * ---------------------
@@ -164,7 +165,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     const FString &RequestId, const FString &Action,
     const TSharedPtr<FJsonObject> &Payload,
     TSharedPtr<FMcpBridgeWebSocket> Socket) {
-  if (Action != TEXT("manage_material_authoring")) {
+  if (Action != TEXT("manage_material")) {
     return false;
   }
 
@@ -179,7 +180,7 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
   if (!Payload->TryGetStringField(TEXT("subAction"), SubAction) || SubAction.IsEmpty())
   {
     SendAutomationError(Socket, RequestId,
-                        TEXT("Missing 'subAction' for manage_material_authoring"),
+                        TEXT("Missing 'subAction' for manage_material"),
                         TEXT("MISSING_SUB_ACTION"));
     return true;
   }

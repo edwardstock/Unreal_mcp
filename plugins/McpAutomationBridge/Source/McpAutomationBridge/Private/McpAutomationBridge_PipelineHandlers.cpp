@@ -150,7 +150,7 @@ bool UMcpAutomationBridgeSubsystem::HandlePipelineAction(
         // Visual & Effects Tools
         Categories.Add(MakeShared<FJsonValueString>(TEXT("manage_lighting")));
         Categories.Add(MakeShared<FJsonValueString>(TEXT("manage_effect")));
-        Categories.Add(MakeShared<FJsonValueString>(TEXT("manage_material_authoring")));
+        Categories.Add(MakeShared<FJsonValueString>(TEXT("manage_material")));
         Categories.Add(MakeShared<FJsonValueString>(TEXT("manage_texture")));
 
         // Animation & Physics Tools

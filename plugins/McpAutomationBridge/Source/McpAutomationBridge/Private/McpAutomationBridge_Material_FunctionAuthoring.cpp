@@ -76,7 +76,7 @@ static EFunctionInputType McpParseFunctionInputType(const FString& S)
 }
 
 // Builds an INVALID_ENUM_VALUE error citing the allowed list.
-static void McpFillEnumError(
+static void McpFillEnumError_FunctionAuthoring(
     int32 Index, const FString& LocalId, const FString& Field,
     const FString& Got, const TArray<FString>& Allowed,
     FMcpNodeValidationError& Out)
@@ -345,7 +345,7 @@ bool McpHandle_AddFunctionInputs(
         }
         if (McpParseFunctionInputType(InputType) == FunctionInput_MAX)
         {
-            McpFillEnumError(i, LocalId, TEXT("inputType"),
+            McpFillEnumError_FunctionAuthoring(i, LocalId, TEXT("inputType"),
                 InputType, McpAllowedFunctionInputTypes(), E);
             NodeErrors.Add(E);
             continue;
@@ -927,7 +927,7 @@ bool McpHandle_UpdateFunctionInputs(
             if (McpParseFunctionInputType(IT) == FunctionInput_MAX)
             {
                 FMcpNodeValidationError E;
-                McpFillEnumError(i, FString(), TEXT("inputType"),
+                McpFillEnumError_FunctionAuthoring(i, FString(), TEXT("inputType"),
                     IT, McpAllowedFunctionInputTypes(), E);
                 NodeErrors.Add(E);
                 Resolved.Add(R);
@@ -1797,7 +1797,7 @@ bool McpHandle_UpdateMaterialFunctionCalls(
         if (!PinPolicy.Equals(TEXT("preserve")) && !PinPolicy.Equals(TEXT("break")))
         {
             FMcpNodeValidationError E;
-            McpFillEnumError(i, FString(), TEXT("onPinRemoved"),
+            McpFillEnumError_FunctionAuthoring(i, FString(), TEXT("onPinRemoved"),
                 PinPolicy, TArray<FString>{ TEXT("preserve"), TEXT("break") }, E);
             NodeErrors.Add(E);
             Resolved.Add(U);

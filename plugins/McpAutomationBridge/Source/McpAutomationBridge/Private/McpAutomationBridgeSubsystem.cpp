@@ -1042,18 +1042,11 @@ void UMcpAutomationBridgeSubsystem::InitializeHandlers() {
                     return HandleGetSourceControlState(R, A, P, S);
                   });
 
-  RegisterHandler(TEXT("manage_material_authoring"),
+  RegisterHandler(TEXT("manage_material"),
                   [this](const FString &R, const FString &A,
                          const TSharedPtr<FJsonObject> &P,
                          TSharedPtr<FMcpBridgeWebSocket> S) {
                     return HandleManageMaterialAuthoringAction(R, A, P, S);
-                  });
-
-  RegisterHandler(TEXT("manage_material_diagnostics"),
-                  [this](const FString &R, const FString &A,
-                         const TSharedPtr<FJsonObject> &P,
-                         TSharedPtr<FMcpBridgeWebSocket> S) {
-                    return HandleManageMaterialDiagnosticsAction(R, A, P, S);
                   });
 
   // === Missing registrations for Phase 35+ tools ===
