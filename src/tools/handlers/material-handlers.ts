@@ -1,7 +1,7 @@
 /**
- * Material Authoring Handlers — thin passthrough.
+ * Material Handlers — thin passthrough.
  *
- * Architecture: native C++ FMcpToolRegistry's manage_material_authoring schema is
+ * Architecture: native C++ FMcpToolRegistry's manage_material schema is
  * the single source of truth for which subActions exist. This file no longer
  * duplicates the dispatch table — the default branch passes any unknown action
  * directly to native via executeAutomationRequest. C++ returns its own
@@ -47,9 +47,9 @@ function parseMaterialPath(fullPath: string | undefined): { name: string; path: 
 }
 
 /**
- * Handle material authoring actions
+ * Handle material actions
  */
-export async function handleMaterialAuthoringTools(
+export async function handleMaterialTools(
   action: string,
   args: HandlerArgs,
   tools: ITools
@@ -89,7 +89,7 @@ export async function handleMaterialAuthoringTools(
         const twoSided = extractOptionalBoolean(rawArgs, 'twoSided') ?? false;
         const save = extractOptionalBoolean(rawArgs, 'save') ?? true;
 
-        const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_MATERIAL_AUTHORING, {
+        const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_MATERIAL, {
           subAction: 'create_material',
           name,
           path,
@@ -146,7 +146,7 @@ export async function handleMaterialAuthoringTools(
 
         const save = extractOptionalBoolean(rawArgs, 'save') ?? true;
 
-        const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_MATERIAL_AUTHORING, {
+        const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_MATERIAL, {
           subAction: 'create_material_instance',
           name,
           path,
@@ -181,7 +181,7 @@ export async function handleMaterialAuthoringTools(
         const effectiveSourceId = sourceNodeId || sourcePin;
         const effectiveTargetId = targetNodeId || targetPin;
 
-        const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_MATERIAL_AUTHORING, {
+        const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_MATERIAL, {
           subAction: 'connect_nodes',
           assetPath,
           sourceNodeId: effectiveSourceId,
@@ -198,7 +198,7 @@ export async function handleMaterialAuthoringTools(
 
       // ===== Shim: rebuild_material — alias for compile_material =====
       case 'rebuild_material':
-        return handleMaterialAuthoringTools('compile_material', args, tools);
+        return handleMaterialTools('compile_material', args, tools);
 
       // ===== Shim: set_material_parameter — TS-side generic dispatcher =====
       case 'set_material_parameter': {
@@ -221,7 +221,7 @@ export async function handleMaterialAuthoringTools(
           return ResponseFactory.error('Missing required argument: value', 'MISSING_VALUE');
         }
 
-        const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_MATERIAL_AUTHORING, {
+        const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_MATERIAL, {
           subAction: 'set_material_parameter',
           assetPath,
           parameterName,
@@ -242,7 +242,7 @@ export async function handleMaterialAuthoringTools(
       case 'get_parameter_defaults': {
         const res = (await executeAutomationRequest(
           tools,
-          TOOL_ACTIONS.MANAGE_MATERIAL_AUTHORING,
+          TOOL_ACTIONS.MANAGE_MATERIAL,
           { subAction: action, ...(args as Record<string, unknown>) }
         )) as AutomationResponse;
 
@@ -253,7 +253,7 @@ export async function handleMaterialAuthoringTools(
       }
 
       // ===== Default: passthrough =====
-      // The native C++ schema for manage_material_authoring is the source of
+      // The native C++ schema for manage_material is the source of
       // truth for which subActions are valid. Pass everything through as-is and
       // let C++ either dispatch it or return UNKNOWN_SUBACTION itself. This is
       // what unblocks ~50 actions the old hardcoded switch used to silently
@@ -262,7 +262,7 @@ export async function handleMaterialAuthoringTools(
       default: {
         const res = (await executeAutomationRequest(
           tools,
-          TOOL_ACTIONS.MANAGE_MATERIAL_AUTHORING,
+          TOOL_ACTIONS.MANAGE_MATERIAL,
           { subAction: action, ...(args as Record<string, unknown>) }
         )) as AutomationResponse;
 
@@ -274,6 +274,6 @@ export async function handleMaterialAuthoringTools(
     }
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
-    return ResponseFactory.error(`Material authoring error: ${err.message}`, 'MATERIAL_ERROR');
+    return ResponseFactory.error(`Material error: ${err.message}`, 'MATERIAL_ERROR');
   }
 }

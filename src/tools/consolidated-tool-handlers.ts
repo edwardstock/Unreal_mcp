@@ -23,7 +23,7 @@ import { handlePerformanceTools } from './handlers/performance-handlers.js';
 import { handleInputTools } from './handlers/input-handlers.js';
 import { handleGeometryTools } from './handlers/geometry-handlers.js';
 import { handleSkeletonTools } from './handlers/skeleton-handlers.js';
-import { handleMaterialAuthoringTools } from './handlers/material-authoring-handlers.js';
+import { handleMaterialTools } from './handlers/material-handlers.js';
 import { handleTextureTools } from './handlers/texture-handlers.js';
 import { handleAnimationAuthoringTools } from './handlers/animation-authoring-handlers.js';
 import { handleAudioAuthoringTools } from './handlers/audio-authoring-handlers.js';
@@ -393,8 +393,8 @@ function registerDefaultHandlers() {
   // 21. SKELETON MANAGER (Phase 7)
   toolRegistry.register('manage_skeleton', async (args, tools) => await handleSkeletonTools(getAction(args), args, tools));
 
-  // 22. MATERIAL AUTHORING (Phase 8)
-  toolRegistry.register('manage_material_authoring', async (args, tools) => await handleMaterialAuthoringTools(getAction(args), args, tools));
+  // 22. MATERIAL (Phase 8)
+  toolRegistry.register('manage_material', async (args, tools) => await handleMaterialTools(getAction(args), args, tools));
 
   // 23. TEXTURE MANAGEMENT (Phase 9)
   toolRegistry.register('manage_texture', async (args, tools) => await handleTextureTools(getAction(args), args, tools));

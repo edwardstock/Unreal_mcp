@@ -2055,7 +2055,7 @@
 	},
 	{
 		"name": "manage_asset",
-		"description": "Create, import, duplicate, rename, delete assets. Edit Material graphs and instances. Analyze dependencies.",
+		"description": "Generic, type-agnostic asset operations: list, search, import, duplicate, rename, move, delete, dependency analysis, metadata/tags, thumbnails, LODs, Nanite rebuild, validation, redirector cleanup, reports, source control, and render target creation.",
 		"category": "core",
 		"inputSchema":
 		{
@@ -2067,74 +2067,47 @@
 					"type": "string",
 					"description": "Action to perform",
 					"enum": [
-						"list",
-						"import",
-						"duplicate",
-						"duplicate_asset",
-						"rename",
-						"rename_asset",
-						"move",
-						"move_asset",
-						"delete",
-						"delete_asset",
-						"delete_assets",
-						"create_folder",
+						"list_assets",
 						"search_assets",
-						"get_dependencies",
-						"get_source_control_state",
-						"analyze_graph",
-						"get_asset_graph",
-						"create_thumbnail",
-						"set_tags",
-						"get_metadata",
-						"set_metadata",
-						"validate",
-						"fixup_redirectors",
-						"find_by_tag",
-						"generate_report",
-						"create_material",
-						"create_material_instance",
-						"create_render_target",
+						"assets_exist",
+						"import_assets",
+						"duplicate_assets",
+						"rename_assets",
+						"move_assets",
+						"delete_assets",
+						"create_folders",
+						"get_assets_dependencies",
+						"get_assets_graph",
+						"analyze_assets_graph",
+						"get_assets_metadata",
+						"set_assets_metadata",
+						"set_assets_tags",
+						"find_assets_by_tag",
+						"create_thumbnails",
 						"generate_lods",
-						"add_material_parameter",
-						"list_instances",
-						"reset_instance_parameters",
-						"exists",
-						"get_material_stats",
-						"get_material_instance_info",
-						"find_material_expressions",
-						"get_material_expression_details",
-						"bulk_get_material_expression_details",
-						"get_material_expression_connections",
-						"get_landscape_material_context",
-						"compile_material_diagnostics",
-						"nanite_rebuild_mesh",
-						"bulk_rename",
-						"bulk_delete",
-						"source_control_checkout",
-						"source_control_submit",
-						"add_material_node",
-						"set_material_node_position",
-						"move_material_node",
-						"bulk_set_material_node_positions",
-						"bulk_move_material_nodes",
-						"connect_material_pins",
-						"remove_material_node",
-						"break_material_connections",
-						"create_material_comment",
-						"wrap_material_nodes_in_comment",
-						"create_named_reroute",
-						"use_named_reroute",
-						"replace_long_connection_with_named_reroute",
-						"align_material_nodes",
-						"get_material_node_details",
-						"rebuild_material"
+						"nanite_rebuild_meshes",
+						"validate_assets",
+						"fixup_redirectors",
+						"generate_assets_report",
+						"source_control_checkout_assets",
+						"source_control_submit_assets",
+						"get_assets_source_control_state",
+						"create_render_targets"
 					]
 				},
 				"assetPath":
 				{
 					"type": "string",
 					"description": "Asset path (e.g., /Game/Path/Asset)."
+				},
+				"assetPaths":
+				{
+					"type": "array",
+					"description": "List of asset paths for batch operations (delete_assets, rename_assets, move_assets, source_control_submit_assets, etc.).",
+					"items":
+					{
+						"type": "string"
+					}
 				},
 				"directory":
 				{
@@ -2144,7 +2117,7 @@
 				"classNames":
 				{
 					"type": "array",
-					"description": "UClass names to filter by (e.g., 'Material', 'StaticMesh') for list / search_assets.",
+					"description": "UClass names to filter by (e.g., 'Material', 'StaticMesh') for list_assets / search_assets.",
 					"items":
 					{
 						"type": "string"
@@ -2153,7 +2126,7 @@
 				"packagePaths":
 				{
 					"type": "array",
-					"description": "Package paths to scope list / search_assets. Empty means all paths.",
+					"description": "Package paths to scope list_assets / search_assets. Empty means all paths.",
 					"items":
 					{
 						"type": "string"
@@ -2162,22 +2135,22 @@
 				"recursivePaths":
 				{
 					"type": "boolean",
-					"description": "When true, list / search_assets descends into subdirectories of packagePaths."
+					"description": "When true, list_assets / search_assets descends into subdirectories of packagePaths."
 				},
 				"recursiveClasses":
 				{
 					"type": "boolean",
-					"description": "When true, list / search_assets includes subclasses of classNames."
+					"description": "When true, list_assets / search_assets includes subclasses of classNames."
 				},
 				"limit":
 				{
 					"type": "number",
-					"description": "Maximum number of results to return (paginated list / search_assets)."
+					"description": "Maximum number of results to return (paginated list_assets / search_assets)."
 				},
 				"offset":
 				{
 					"type": "number",
-					"description": "Skip this many results before returning (paginated list / search_assets)."
+					"description": "Skip this many results before returning (paginated list_assets / search_assets)."
 				},
 				"sourcePath":
 				{
@@ -2188,51 +2161,6 @@
 				{
 					"type": "string",
 					"description": "Destination path for move/copy."
-				},
-				"assetPaths":
-				{
-					"type": "array",
-					"description": "List of asset paths for batch operations (delete_assets, bulk_rename, bulk_delete, source_control_submit, etc.).",
-					"items":
-					{
-						"type": "string"
-					}
-				},
-				"lodCount":
-				{
-					"type": "number",
-					"description": "Number of LODs to generate via generate_lods."
-				},
-				"reductionSettings":
-				{
-					"type": "object",
-					"description": "Per-LOD mesh reduction settings for generate_lods (e.g., screen size, percent triangles).",
-					"additionalProperties": true
-				},
-				"nodeName":
-				{
-					"type": "string",
-					"description": "Name identifier."
-				},
-				"eventName":
-				{
-					"type": "string",
-					"description": "Name of the event."
-				},
-				"memberClass":
-				{
-					"type": "string",
-					"description": "Variable/member class name (e.g., 'StaticMeshComponent') when adding parameters or member entries via authoring actions."
-				},
-				"posX":
-				{
-					"type": "number",
-					"description": "Material graph X target absolute position for set_material_node_position / move_material_node."
-				},
-				"posY":
-				{
-					"type": "number",
-					"description": "Material graph Y target absolute position for set_material_node_position / move_material_node."
 				},
 				"newName":
 				{
@@ -2254,7 +2182,37 @@
 					"type": "boolean",
 					"description": "After move/rename, run fixup-redirectors to consolidate references and delete redirector stubs."
 				},
+				"prefix":
+				{
+					"type": "string",
+					"description": "Prefix to prepend to asset names during batch rename."
+				},
+				"suffix":
+				{
+					"type": "string",
+					"description": "Suffix to append to asset names during batch rename."
+				},
+				"searchText":
+				{
+					"type": "string",
+					"description": "Substring to find in asset names during batch rename."
+				},
+				"replaceText":
+				{
+					"type": "string",
+					"description": "Replacement text for searchText during batch rename."
+				},
 				"directoryPath":
+				{
+					"type": "string",
+					"description": "Path to a directory."
+				},
+				"folderPath":
+				{
+					"type": "string",
+					"description": "Path to a directory."
+				},
+				"path":
 				{
 					"type": "string",
 					"description": "Path to a directory."
@@ -2264,303 +2222,75 @@
 					"type": "string",
 					"description": "Name identifier."
 				},
-				"path":
+				"meshPath":
 				{
 					"type": "string",
-					"description": "Path to a directory."
+					"description": "Mesh asset path."
 				},
-				"parentMaterial":
+				"lodCount":
 				{
-					"type": "string",
-					"description": "Material asset path."
+					"type": "number",
+					"description": "Number of LODs to generate via generate_lods."
 				},
-				"parameters":
+				"reductionSettings":
 				{
 					"type": "object",
-					"description": "Parameter overrides for create_material_instance: key/value pairs whose value shape matches the parameter type (number for scalar, {r,g,b,a} for vector, asset path for texture, bool for switch).",
+					"description": "Per-LOD mesh reduction settings for generate_lods (e.g., screen size, percent triangles).",
 					"additionalProperties": true
 				},
 				"width":
 				{
 					"type": "number",
-					"description": "Width in pixels for create_thumbnail / create_render_target."
+					"description": "Width in pixels for create_thumbnails / create_render_targets."
 				},
 				"height":
 				{
 					"type": "number",
-					"description": "Height in pixels for create_thumbnail / create_render_target."
+					"description": "Height in pixels for create_thumbnails / create_render_targets."
 				},
 				"format":
 				{
 					"type": "string",
-					"description": "Format identifier: pixel format (e.g., 'RGBA16f') for create_render_target, output format ('png'/'json'/'csv') for export/report actions."
-				},
-				"meshPath":
-				{
-					"type": "string",
-					"description": "Mesh asset path."
+					"description": "Format identifier: pixel format (e.g., 'RGBA16f') for create_render_targets, output format ('png'/'json'/'csv') for export/report actions."
 				},
 				"tag":
 				{
 					"type": "string",
 					"description": "Name of the tag."
 				},
-				"metadata":
-				{
-					"type": "object",
-					"description": "Key-value metadata pairs to attach via set_metadata.",
-					"additionalProperties": true
-				},
-				"graphName":
-				{
-					"type": "string",
-					"description": "Name of the graph."
-				},
-				"nodeType":
-				{
-					"type": "string",
-					"description": "Material node type identifier for add_material_node (e.g., 'MaterialExpressionConstant', 'TextureSampleParameter2D')."
-				},
-				"nodeId":
-				{
-					"type": "string",
-					"description": "ID of the node."
-				},
-				"expressionPath":
-				{
-					"type": "string",
-					"description": "Material expression path."
-				},
-				"expressionName":
-				{
-					"type": "string",
-					"description": "Material expression object name."
-				},
-				"expressionGuid":
-				{
-					"type": "string",
-					"description": "Material expression GUID."
-				},
-				"className":
-				{
-					"type": "string",
-					"description": "Material expression class name."
-				},
-				"sourceExpressionIndex":
-				{
-					"type": "number",
-					"description": "Source expression index."
-				},
-				"targetExpressionIndex":
-				{
-					"type": "number",
-					"description": "Target expression index."
-				},
-				"sourceExpressionPath":
-				{
-					"type": "string",
-					"description": "Source expression path."
-				},
-				"targetExpressionPath":
-				{
-					"type": "string",
-					"description": "Target expression path."
-				},
-				"anchorExpressionPath":
-				{
-					"type": "string",
-					"description": "Anchor expression path."
-				},
-				"anchorExpressionIndex":
-				{
-					"type": "number",
-					"description": "Anchor expression index."
-				},
-				"anchorNodeId":
-				{
-					"type": "string",
-					"description": "Anchor node ID."
-				},
-				"sourceNodeId":
-				{
-					"type": "string",
-					"description": "ID of the source node."
-				},
-				"targetNodeId":
-				{
-					"type": "string",
-					"description": "ID of the target node."
-				},
-				"sourceOutputIndex":
-				{
-					"type": "number",
-					"description": "Source output index."
-				},
-				"inputName":
-				{
-					"type": "string",
-					"description": "Name of the pin."
-				},
-				"targetInputPin":
-				{
-					"type": "string",
-					"description": "Name of the target input pin."
-				},
-				"fromNodeId":
-				{
-					"type": "string",
-					"description": "ID of the source node."
-				},
-				"fromPin":
-				{
-					"type": "string",
-					"description": "Name of the source pin."
-				},
-				"toNodeId":
-				{
-					"type": "string",
-					"description": "ID of the target node."
-				},
-				"toPin":
-				{
-					"type": "string",
-					"description": "Name of the target pin."
-				},
-				"parameterName":
-				{
-					"type": "string",
-					"description": "Name of the parameter."
-				},
-				"value":
-				{
-					"type": "object",
-					"description": "Generic value (any type).",
-					"additionalProperties": true
-				},
-				"x":
-				{
-					"type": "number",
-					"description": "Material graph X position for add_material_node placement (use posX for set_material_node_position / move_material_node)."
-				},
-				"y":
-				{
-					"type": "number",
-					"description": "Material graph Y position for add_material_node placement (use posY for set_material_node_position / move_material_node)."
-				},
-				"comment":
-				{
-					"type": "string",
-					"description": "Comment text for create_material_comment / wrap_material_nodes_in_comment."
-				},
-				"operation":
-				{
-					"type": "string",
-					"description": "Alignment or distribution operation."
-				},
-				"backend":
-				{
-					"type": "string",
-					"description": "native or graph_editor."
-				},
-				"placementMode":
-				{
-					"type": "string",
-					"description": "absolute, next_to, or free."
-				},
-				"direction":
-				{
-					"type": "string",
-					"description": "right, left, above, or below."
-				},
-				"avoidOverlap":
-				{
-					"type": "boolean",
-					"description": "Avoid overlapping existing material nodes."
-				},
-				"placement":
-				{
-					"type": "object",
-					"description": "Material node placement options.",
-					"additionalProperties": true
-				},
-				"padding":
-				{
-					"type": "number",
-					"description": "Padding for comment wrapping."
-				},
-				"groupMode":
-				{
-					"type": "boolean",
-					"description": "Whether comment moves grouped nodes."
-				},
-				"minDistance":
-				{
-					"type": "number",
-					"description": "Minimum distance for long connection replacement."
-				},
-				"declarationId":
-				{
-					"type": "string",
-					"description": "Named reroute declaration ID."
-				},
-				"declarationGuid":
-				{
-					"type": "string",
-					"description": "Named reroute declaration GUID."
-				},
-				"declarationName":
-				{
-					"type": "string",
-					"description": "Named reroute declaration name."
-				},
-				"parentNodeId":
-				{
-					"type": "string",
-					"description": "ID of the node."
-				},
-				"childNodeId":
-				{
-					"type": "string",
-					"description": "ID of the node."
-				},
-				"maxDepth":
-				{
-					"type": "number",
-					"description": "Maximum recursion depth for get_dependencies / analyze_graph. Zero or unset means unlimited."
-				},
-				"prefix":
-				{
-					"type": "string",
-					"description": "Prefix to prepend to asset names during bulk_rename."
-				},
-				"suffix":
-				{
-					"type": "string",
-					"description": "Suffix to append to asset names during bulk_rename."
-				},
-				"searchText":
-				{
-					"type": "string",
-					"description": "Substring to find in asset names during bulk_rename."
-				},
-				"replaceText":
-				{
-					"type": "string",
-					"description": "Replacement text for searchText during bulk_rename."
-				},
-				"paths":
+				"tags":
 				{
 					"type": "array",
-					"description": "List of paths for bulk operations like fixup_redirectors and source_control_submit.",
+					"description": "Asset tag list (string array) for set_assets_tags / find_assets_by_tag. Use 'tag' (singular) for single-tag actions.",
 					"items":
 					{
 						"type": "string"
 					}
 				},
+				"metadata":
+				{
+					"type": "object",
+					"description": "Key-value metadata pairs to attach via set_assets_metadata.",
+					"additionalProperties": true
+				},
 				"description":
 				{
 					"type": "string",
-					"description": "Free-text description body. For set_metadata, the human-readable description value; for material comments, the comment text body. Distinct from the short label 'desc'."
+					"description": "Free-text description body for set_assets_metadata."
+				},
+				"maxDepth":
+				{
+					"type": "number",
+					"description": "Maximum recursion depth for get_assets_dependencies / analyze_assets_graph. Zero or unset means unlimited."
+				},
+				"paths":
+				{
+					"type": "array",
+					"description": "List of paths for bulk operations like fixup_redirectors and source_control_submit_assets.",
+					"items":
+					{
+						"type": "string"
+					}
 				},
 				"checkoutFiles":
 				{
@@ -2571,162 +2301,6 @@
 				{
 					"type": "boolean",
 					"description": "When true, show modal confirmation dialogs (default false to keep automation headless)."
-				},
-				"pinName":
-				{
-					"type": "string",
-					"description": "Name of the pin."
-				},
-				"desc":
-				{
-					"type": "string",
-					"description": "Short label/identifier (e.g., named-reroute display name, report short title). Distinct from the longer free-text 'description'."
-				},
-				"materialPath":
-				{
-					"type": "string",
-					"description": "Material asset path."
-				},
-				"texturePath":
-				{
-					"type": "string",
-					"description": "Texture asset path."
-				},
-				"expressionClass":
-				{
-					"type": "string",
-					"description": "Fully-qualified material expression class name for add_material_node (e.g., 'MaterialExpressionMultiply'). Same role as 'className' on material-graph actions."
-				},
-				"coordinateIndex":
-				{
-					"type": "number",
-					"description": "UV coordinate index (0-based) for texture-sample expression nodes."
-				},
-				"parameterType":
-				{
-					"type": "string",
-					"description": "Parameter type for add_material_parameter: 'scalar', 'vector', 'static_switch', 'texture_object', or 'texture_sample'."
-				},
-				"nodes":
-				{
-					"type": "array",
-					"description": "Batch list of material node specs for bulk_set_material_node_positions / bulk_move_material_nodes / wrap_material_nodes_in_comment.",
-					"items":
-					{
-						"type": "object"
-					}
-				},
-				"tags":
-				{
-					"type": "array",
-					"description": "Asset tag list (string array) for set_tags / find_by_tag. Use 'tag' (singular) for single-tag actions.",
-					"items":
-					{
-						"type": "string"
-					}
-				},
-				"actorName":
-				{
-					"type": "string",
-					"description": "Actor name for landscape context diagnostics."
-				},
-				"actorPath":
-				{
-					"type": "string",
-					"description": "Actor object path for landscape context diagnostics."
-				},
-				"landscapeName":
-				{
-					"type": "string",
-					"description": "Landscape actor name."
-				},
-				"landscapePath":
-				{
-					"type": "string",
-					"description": "Landscape actor object path."
-				},
-				"includeEffective":
-				{
-					"type": "boolean",
-					"description": "Include effective inherited parameter values."
-				},
-				"overriddenOnly":
-				{
-					"type": "boolean",
-					"description": "Restrict diagnostics to explicitly overridden parameters."
-				},
-				"includeConsumers":
-				{
-					"type": "boolean",
-					"description": "Include downstream consumers in expression connection diagnostics."
-				},
-				"folderPath":
-				{
-					"type": "string",
-					"description": "Path to a directory."
-				},
-				"sourceNode":
-				{
-					"type": "string",
-					"description": "ID of the source node."
-				},
-				"targetNode":
-				{
-					"type": "string",
-					"description": "ID of the target node."
-				},
-				"outputPin":
-				{
-					"type": "string",
-					"description": "Name of the source pin."
-				},
-				"inputPin":
-				{
-					"type": "string",
-					"description": "Name of the target pin."
-				},
-				"type":
-				{
-					"type": "string",
-					"description": "Action-specific type discriminator. Prefer the more specific 'parameterType' / 'expressionClass' / 'nodeType' when the action exposes them; this generic 'type' exists only for actions that have not yet been migrated to a specific name."
-				},
-				"defaultValue":
-				{
-					"type": "object",
-					"description": "Generic value (any type).",
-					"additionalProperties": true
-				},
-				"expressionIndex":
-				{
-					"type": "number",
-					"description": "Material expression index."
-				},
-				"indices":
-				{
-					"type": "array",
-					"description": "Indices of expressions to fetch details for in one round-trip. Provide exactly one of indices, guids, or nodeIds.",
-					"items":
-					{
-						"type": "string"
-					}
-				},
-				"guids":
-				{
-					"type": "array",
-					"description": "Expression GUIDs to fetch details for in one round-trip. Provide exactly one of indices, guids, or nodeIds.",
-					"items":
-					{
-						"type": "string"
-					}
-				},
-				"nodeIds":
-				{
-					"type": "array",
-					"description": "Node IDs to fetch details for in one round-trip. Provide exactly one of indices, guids, or nodeIds.",
-					"items":
-					{
-						"type": "string"
-					}
 				}
 			},
 			"required": [
@@ -8699,8 +8273,8 @@
 		}
 	},
 	{
-		"name": "manage_material_authoring",
-		"description": "Create materials with expressions, parameters, functions, instances, and landscape blend layers.",
+		"name": "manage_material",
+		"description": "Consolidated material authoring tool. Create materials, instances, functions, function instances, landscape/decal/post-process variants. Edit material graphs (nodes, connections, comments, named reroutes). Read and set material/function instance parameters with typed batch setters. Author function inputs/outputs and custom HLSL expressions. Compile and diagnose materials.",
 		"category": "authoring",
 		"inputSchema":
 		{
@@ -8710,74 +8284,63 @@
 				"subAction":
 				{
 					"type": "string",
-					"description": "Canonical material authoring sub-action to perform.",
+					"description": "Canonical manage_material sub-action to perform.",
 					"enum": [
-						"create_material",
-						"set_blend_mode",
-						"set_shading_model",
-						"set_material_domain",
-						"add_texture_sample",
-						"add_texture_coordinate",
-						"add_scalar_parameter",
-						"add_vector_parameter",
-						"add_static_switch_parameter",
-						"add_math_node",
-						"add_world_position",
-						"add_vertex_normal",
-						"add_pixel_depth",
-						"add_fresnel",
-						"add_reflection_vector",
-						"add_panner",
-						"add_rotator",
-						"add_noise",
-						"add_voronoi",
-						"add_if",
-						"add_switch",
-						"add_custom_expression",
-						"connect_nodes",
-						"disconnect_nodes",
-						"create_material_function",
-						"add_function_input",
-						"add_function_output",
-						"use_material_function",
-						"create_material_instance",
-						"set_scalar_parameter_value",
-						"set_vector_parameter_value",
-						"set_texture_parameter_value",
-						"create_landscape_material",
-						"create_decal_material",
-						"create_post_process_material",
-						"add_landscape_layer",
-						"configure_layer_blend",
-						"compile_material",
-						"get_material_info",
-						"add_material_node",
-						"update_function_input",
-						"update_function_output",
-						"add_material_function_call",
-						"update_material_function_call",
-						"add_texture_object",
-						"add_texture_object_parameter",
-						"add_texture_sample_parameter",
-						"disconnect_input_pin",
-						"remove_material_node",
-						"move_material_node",
-						"set_material_attributes_mode",
-						"get_material_instance_info",
-						"set_material_instance_parent",
+						"create_materials",
+						"create_material_instances",
+						"create_material_functions",
+						"create_material_function_instances",
+						"create_landscape_materials",
+						"create_decal_materials",
+						"create_post_process_materials",
+						"set_blend_modes",
+						"set_shading_models",
+						"set_material_domains",
+						"set_material_attributes_modes",
+						"set_two_sided_flags",
+						"find_material_expressions",
+						"get_materials_info",
+						"get_material_stats",
+						"list_material_expression_classes",
+						"add_material_nodes",
+						"update_material_nodes",
+						"remove_material_nodes",
+						"connect_material_pins",
+						"break_material_connections",
+						"set_material_node_positions",
+						"align_material_nodes",
+						"create_material_comments",
+						"wrap_material_nodes_in_comments",
+						"create_named_reroutes",
+						"use_named_reroutes",
+						"replace_long_connections_with_named_reroutes",
 						"get_material_instance_parameters",
-						"set_material_instance_parameter",
-						"reset_material_instance_parameter",
+						"reset_material_instance_parameters",
 						"clear_material_instance_parameters",
-						"bulk_set_material_instance_parameters",
-						"create_material_function_instance",
-						"get_material_function_instance_info",
-						"set_material_function_instance_parent",
+						"set_material_instance_scalar_parameters",
+						"set_material_instance_vector_parameters",
+						"set_material_instance_texture_parameters",
+						"set_material_instance_static_switch_parameters",
 						"get_material_function_instance_parameters",
-						"set_material_function_instance_parameter",
-						"reset_material_function_instance_parameter",
+						"reset_material_function_instance_parameters",
 						"clear_material_function_instance_parameters",
-						"bulk_set_material_function_instance_parameters"
+						"set_material_function_instance_scalar_parameters",
+						"set_material_function_instance_vector_parameters",
+						"set_material_function_instance_texture_parameters",
+						"set_material_function_instance_static_switch_parameters",
+						"add_function_inputs",
+						"add_function_outputs",
+						"update_function_inputs",
+						"update_function_outputs",
+						"add_material_function_calls",
+						"update_material_function_calls",
+						"add_custom_expressions",
+						"update_custom_expressions",
+						"add_landscape_layers",
+						"configure_landscape_layer_blends",
+						"get_landscape_material_context",
+						"compile_materials",
+						"compile_materials_diagnostics"
 					]
 				},
 				"action":
@@ -8785,78 +8348,76 @@
 					"type": "string",
 					"description": "Compatibility alias for subAction. New callers should use subAction.",
 					"enum": [
-						"create_material",
-						"set_blend_mode",
-						"set_shading_model",
-						"set_material_domain",
-						"add_texture_sample",
-						"add_texture_coordinate",
-						"add_scalar_parameter",
-						"add_vector_parameter",
-						"add_static_switch_parameter",
-						"add_math_node",
-						"add_world_position",
-						"add_vertex_normal",
-						"add_pixel_depth",
-						"add_fresnel",
-						"add_reflection_vector",
-						"add_panner",
-						"add_rotator",
-						"add_noise",
-						"add_voronoi",
-						"add_if",
-						"add_switch",
-						"add_custom_expression",
-						"connect_nodes",
-						"disconnect_nodes",
-						"create_material_function",
-						"add_function_input",
-						"add_function_output",
-						"use_material_function",
-						"create_material_instance",
-						"set_scalar_parameter_value",
-						"set_vector_parameter_value",
-						"set_texture_parameter_value",
-						"create_landscape_material",
-						"create_decal_material",
-						"create_post_process_material",
-						"add_landscape_layer",
-						"configure_layer_blend",
-						"compile_material",
-						"get_material_info",
-						"add_material_node",
-						"update_function_input",
-						"update_function_output",
-						"add_material_function_call",
-						"update_material_function_call",
-						"add_texture_object",
-						"add_texture_object_parameter",
-						"add_texture_sample_parameter",
-						"disconnect_input_pin",
-						"remove_material_node",
-						"move_material_node",
-						"set_material_attributes_mode",
-						"get_material_instance_info",
-						"set_material_instance_parent",
+						"create_materials",
+						"create_material_instances",
+						"create_material_functions",
+						"create_material_function_instances",
+						"create_landscape_materials",
+						"create_decal_materials",
+						"create_post_process_materials",
+						"set_blend_modes",
+						"set_shading_models",
+						"set_material_domains",
+						"set_material_attributes_modes",
+						"set_two_sided_flags",
+						"find_material_expressions",
+						"get_materials_info",
+						"get_material_stats",
+						"list_material_expression_classes",
+						"add_material_nodes",
+						"update_material_nodes",
+						"remove_material_nodes",
+						"connect_material_pins",
+						"break_material_connections",
+						"set_material_node_positions",
+						"align_material_nodes",
+						"create_material_comments",
+						"wrap_material_nodes_in_comments",
+						"create_named_reroutes",
+						"use_named_reroutes",
+						"replace_long_connections_with_named_reroutes",
 						"get_material_instance_parameters",
-						"set_material_instance_parameter",
-						"reset_material_instance_parameter",
+						"reset_material_instance_parameters",
 						"clear_material_instance_parameters",
-						"bulk_set_material_instance_parameters",
-						"create_material_function_instance",
-						"get_material_function_instance_info",
-						"set_material_function_instance_parent",
+						"set_material_instance_scalar_parameters",
+						"set_material_instance_vector_parameters",
+						"set_material_instance_texture_parameters",
+						"set_material_instance_static_switch_parameters",
 						"get_material_function_instance_parameters",
-						"set_material_function_instance_parameter",
-						"reset_material_function_instance_parameter",
+						"reset_material_function_instance_parameters",
 						"clear_material_function_instance_parameters",
-						"bulk_set_material_function_instance_parameters"
+						"set_material_function_instance_scalar_parameters",
+						"set_material_function_instance_vector_parameters",
+						"set_material_function_instance_texture_parameters",
+						"set_material_function_instance_static_switch_parameters",
+						"add_function_inputs",
+						"add_function_outputs",
+						"update_function_inputs",
+						"update_function_outputs",
+						"add_material_function_calls",
+						"update_material_function_calls",
+						"add_custom_expressions",
+						"update_custom_expressions",
+						"add_landscape_layers",
+						"configure_landscape_layer_blends",
+						"get_landscape_material_context",
+						"compile_materials",
+						"compile_materials_diagnostics"
 					]
 				},
 				"assetPath":
 				{
 					"type": "string",
 					"description": "Asset path (e.g., /Game/Path/Asset)."
+				},
+				"assetPaths":
+				{
+					"type": "array",
+					"description": "List of asset paths for batch operations.",
+					"items":
+					{
+						"type": "string"
+					}
 				},
 				"name":
 				{
@@ -8876,12 +8437,32 @@
 				"parentMaterial":
 				{
 					"type": "string",
-					"description": "Path to parent material for instances."
+					"description": "Path to parent material for material instances."
 				},
-				"nodeType":
+				"functionPath":
 				{
 					"type": "string",
-					"description": "Material expression node type or class name."
+					"description": "Path to function asset."
+				},
+				"localId":
+				{
+					"type": "string",
+					"description": "Caller-supplied local node id used to refer to a node within a single batch payload (resolved against materialRootSentinel for top-level pins)."
+				},
+				"x":
+				{
+					"type": "number",
+					"description": "Node X position."
+				},
+				"y":
+				{
+					"type": "number",
+					"description": "Node Y position."
+				},
+				"save":
+				{
+					"type": "boolean",
+					"description": "Save the asset(s) after the operation."
 				},
 				"materialDomain":
 				{
@@ -8933,40 +8514,97 @@
 					"type": "boolean",
 					"description": "Enable two-sided rendering."
 				},
-				"x":
+				"nodes":
 				{
-					"type": "number",
-					"description": "Node X position."
+					"type": "array",
+					"description": "Batch list of material node specs. Each item: { localId, nodeType|expressionClass, x, y, desc, ... }.",
+					"items":
+					{
+						"type": "object"
+					}
 				},
-				"y":
+				"connections":
 				{
-					"type": "number",
-					"description": "Node Y position."
+					"type": "array",
+					"description": "Batch list of pin connections. Each item: { fromNode, fromPin, fromOutputIndex, toNode, toPin }.",
+					"items":
+					{
+						"type": "object"
+					}
 				},
-				"texturePath":
+				"updates":
+				{
+					"type": "array",
+					"description": "Batch list of node-update specs (per-node property overrides for update_material_nodes / update_material_function_calls / update_custom_expressions / update_function_inputs / update_function_outputs).",
+					"items":
+					{
+						"type": "object"
+					}
+				},
+				"identifiers":
+				{
+					"type": "array",
+					"description": "Batch list of mixed-type expression identifiers (number index, string nodeId/guid, or {expressionPath, expressionIndex}). Used by find/get/remove and reset/clear parameter actions.",
+					"items":
+					{
+						"type": "object"
+					}
+				},
+				"items":
+				{
+					"type": "array",
+					"description": "Generic batch items array used by plural actions whose payload shape varies per sub-action.",
+					"items":
+					{
+						"type": "object"
+					}
+				},
+				"calls":
+				{
+					"type": "array",
+					"description": "Batch list of material function call specs for add_material_function_calls / update_material_function_calls.",
+					"items":
+					{
+						"type": "object"
+					}
+				},
+				"inputs":
+				{
+					"type": "array",
+					"description": "Batch list of function input or custom-expression input specs.",
+					"items":
+					{
+						"type": "object"
+					}
+				},
+				"outputs":
+				{
+					"type": "array",
+					"description": "Batch list of function output or custom-expression additional output specs.",
+					"items":
+					{
+						"type": "object"
+					}
+				},
+				"filter":
 				{
 					"type": "string",
-					"description": "Texture asset path."
+					"description": "Free-text filter string for find_material_expressions / list_material_expression_classes."
 				},
-				"runtimeVirtualTexturePath":
+				"category":
 				{
 					"type": "string",
-					"description": "Runtime virtual texture asset path."
+					"description": "Category name filter (list_material_expression_classes)."
 				},
-				"sparseVolumeTexturePath":
+				"parameterName":
 				{
 					"type": "string",
-					"description": "Sparse volume texture asset path."
+					"description": "Name of the parameter."
 				},
-				"fontPath":
+				"parameterGroup":
 				{
 					"type": "string",
-					"description": "Font asset path."
-				},
-				"fontPage":
-				{
-					"type": "integer",
-					"description": "Font page index."
+					"description": "Parameter group name filter."
 				},
 				"samplerType":
 				{
@@ -8982,212 +8620,60 @@
 						"VirtualNormal"
 					]
 				},
-				"coordinateIndex":
-				{
-					"type": "number",
-					"description": "UV channel index (0-7)."
-				},
-				"uTiling":
-				{
-					"type": "number",
-					"description": "U tiling factor."
-				},
-				"vTiling":
-				{
-					"type": "number",
-					"description": "V tiling factor."
-				},
-				"parameterName":
+				"referencesTexture":
 				{
 					"type": "string",
-					"description": "Name of the parameter."
+					"description": "Find expressions that reference this texture path."
 				},
-				"channelNames":
-				{
-					"type": "object",
-					"description": "Vector parameter channel names. Available keys: r, g, b, a.",
-					"additionalProperties": true
-				},
-				"parameter":
-				{
-					"type": "object",
-					"description": "Material parameter identity: name, type, association, and index.",
-					"additionalProperties": true
-				},
-				"defaultValue":
-				{
-					"type": "object",
-					"description": "Default value for parameter (number for scalar, object for vector, bool for switch).",
-					"additionalProperties": true
-				},
-				"previewValue":
-				{
-					"type": "object",
-					"description": "Preview value for material function input authoring.",
-					"additionalProperties": true
-				},
-				"group":
+				"expressionName":
 				{
 					"type": "string",
-					"description": "Group name."
+					"description": "Material expression object name filter."
 				},
-				"sortPriority":
+				"desc":
 				{
-					"type": "integer",
-					"description": "Sort priority for function inputs and parameters."
+					"type": "string",
+					"description": "Short label/identifier for nodes, comments, named reroutes."
 				},
-				"usePreviewValueAsDefault":
+				"limit":
+				{
+					"type": "number",
+					"description": "Maximum number of results (paginated find/list)."
+				},
+				"offset":
+				{
+					"type": "number",
+					"description": "Skip this many results before returning (paginated)."
+				},
+				"includeDetails":
 				{
 					"type": "boolean",
-					"description": "Use preview value as default for function input."
+					"description": "Include detailed expression properties in find results."
 				},
-				"blendInputRelevance":
+				"includeConnections":
+				{
+					"type": "boolean",
+					"description": "Include pin connections in get_materials_info / find_material_expressions output."
+				},
+				"includeConsumers":
+				{
+					"type": "boolean",
+					"description": "Include downstream consumers in expression diagnostics."
+				},
+				"isOrphan":
+				{
+					"type": "boolean",
+					"description": "Filter to expressions that have no graph consumers."
+				},
+				"nodeType":
 				{
 					"type": "string",
-					"description": "Material function input relevance. Authoring currently accepts only General.",
-					"enum": [
-						"General"
-					]
+					"description": "Material expression node type or class name."
 				},
-				"value":
-				{
-					"type": "object",
-					"description": "Value to set (number, vector object, or texture path).",
-					"additionalProperties": true
-				},
-				"overrides":
-				{
-					"type": "array",
-					"description": "Bulk parameter override list.",
-					"items":
-					{
-						"type": "object"
-					}
-				},
-				"operation":
+				"expressionClass":
 				{
 					"type": "string",
-					"description": "Math operation type.",
-					"enum": [
-						"Add",
-						"Subtract",
-						"Multiply",
-						"Divide",
-						"Lerp",
-						"Clamp",
-						"Power",
-						"SquareRoot",
-						"Abs",
-						"Floor",
-						"Ceil",
-						"Frac",
-						"Sine",
-						"Cosine",
-						"Saturate",
-						"OneMinus",
-						"Min",
-						"Max",
-						"Dot",
-						"Cross",
-						"Normalize",
-						"Append"
-					]
-				},
-				"constA":
-				{
-					"type": "number",
-					"description": "Constant A input value."
-				},
-				"constB":
-				{
-					"type": "number",
-					"description": "Constant B input value."
-				},
-				"code":
-				{
-					"type": "string",
-					"description": "Code or expression."
-				},
-				"outputType":
-				{
-					"type": "string",
-					"description": "Output type of custom expression.",
-					"enum": [
-						"Float1",
-						"Float2",
-						"Float3",
-						"Float4",
-						"MaterialAttributes"
-					]
-				},
-				"description":
-				{
-					"type": "string",
-					"description": "Description for custom expression or function."
-				},
-				"sourceNodeId":
-				{
-					"type": "string",
-					"description": "Source node ID for connection."
-				},
-				"sourceExpression":
-				{
-					"type": "object",
-					"description": "ExpressionTarget object for source expression.",
-					"additionalProperties": true
-				},
-				"targetExpression":
-				{
-					"type": "object",
-					"description": "ExpressionTarget object for target expression.",
-					"additionalProperties": true
-				},
-				"expression":
-				{
-					"type": "object",
-					"description": "ExpressionTarget object.",
-					"additionalProperties": true
-				},
-				"target":
-				{
-					"type": "object",
-					"description": "Connection target object.",
-					"additionalProperties": true
-				},
-				"sourceOutputIndex":
-				{
-					"type": "integer",
-					"description": "Source expression output index."
-				},
-				"sourceOutputName":
-				{
-					"type": "string",
-					"description": "Source expression output name."
-				},
-				"targetInputName":
-				{
-					"type": "string",
-					"description": "Target expression input name."
-				},
-				"targetMaterialPin":
-				{
-					"type": "string",
-					"description": "Main material pin name."
-				},
-				"sourcePin":
-				{
-					"type": "string",
-					"description": "Source pin name (output)."
-				},
-				"targetNodeId":
-				{
-					"type": "string",
-					"description": "Target node ID for connection."
-				},
-				"targetPin":
-				{
-					"type": "string",
-					"description": "Target pin name (input)."
+					"description": "Fully-qualified material expression class name."
 				},
 				"nodeId":
 				{
@@ -9199,91 +8685,118 @@
 					"type": "string",
 					"description": "Name of the pin."
 				},
-				"functionPath":
+				"texturePath":
 				{
 					"type": "string",
-					"description": "Path to function asset."
+					"description": "Texture asset path."
 				},
-				"exposeToLibrary":
-				{
-					"type": "boolean",
-					"description": "Expose function to material library."
-				},
-				"inputName":
+				"code":
 				{
 					"type": "string",
-					"description": "Name of the input."
-				},
-				"outputName":
-				{
-					"type": "string",
-					"description": "Name of the output."
-				},
-				"inputType":
-				{
-					"type": "string",
-					"description": "Type of function input/output.",
-					"enum": [
-						"Float1",
-						"Float2",
-						"Float3",
-						"Float4",
-						"Texture2D",
-						"TextureCube",
-						"Bool",
-						"MaterialAttributes"
-					]
-				},
-				"instanceKind":
-				{
-					"type": "string",
-					"description": "Material function instance kind.",
-					"enum": [
-						"function",
-						"materialLayer",
-						"materialLayerBlend"
-					]
-				},
-				"inputs":
-				{
-					"type": "array",
-					"description": "Custom expression input definitions.",
-					"items":
-					{
-						"type": "object"
-					}
-				},
-				"additionalOutputs":
-				{
-					"type": "array",
-					"description": "Custom expression additional output definitions.",
-					"items":
-					{
-						"type": "object"
-					}
+					"description": "HLSL source code for add_custom_expressions / update_custom_expressions."
 				},
 				"additionalDefines":
 				{
 					"type": "array",
-					"description": "Custom expression additional define definitions.",
-					"items":
-					{
-						"type": "object"
-					}
-				},
-				"includeFilePaths":
-				{
-					"type": "array",
-					"description": "Custom expression include file paths.",
+					"description": "Custom expression #define entries.",
 					"items":
 					{
 						"type": "string"
 					}
 				},
+				"includeFilePaths":
+				{
+					"type": "array",
+					"description": "Custom expression #include file paths.",
+					"items":
+					{
+						"type": "string"
+					}
+				},
+				"outputType":
+				{
+					"type": "string",
+					"description": "Output type for custom expression / function output.",
+					"enum": [
+						"Float1",
+						"Float2",
+						"Float3",
+						"Float4",
+						"MaterialAttributes"
+					]
+				},
+				"onPinRemoved":
+				{
+					"type": "string",
+					"description": "Behavior when an update removes a pin: 'break' to drop existing connections, 'preserve' to keep them where possible.",
+					"enum": [
+						"break",
+						"preserve"
+					]
+				},
+				"worldPositionShaderOffset":
+				{
+					"type": "string",
+					"description": "World-position-offset shader behavior toggle.",
+					"enum": [
+						"Default",
+						"ExcludeFromMain"
+					]
+				},
+				"comment":
+				{
+					"type": "string",
+					"description": "Comment text body for create_material_comments / wrap_material_nodes_in_comments."
+				},
+				"padding":
+				{
+					"type": "number",
+					"description": "Padding for comment wrapping."
+				},
+				"minDistance":
+				{
+					"type": "number",
+					"description": "Minimum connection distance for replace_long_connections_with_named_reroutes."
+				},
+				"operation":
+				{
+					"type": "string",
+					"description": "Alignment / distribution operation for align_material_nodes."
+				},
+				"value":
+				{
+					"type": "object",
+					"description": "Polymorphic value: number for scalar setters, {r,g,b,a} object for vector setters, asset path string for texture setters, bool for static-switch setters.",
+					"additionalProperties": true
+				},
+				"defaultValue":
+				{
+					"type": "object",
+					"description": "Default value for parameter / function input.",
+					"additionalProperties": true
+				},
+				"previewValue":
+				{
+					"type": "object",
+					"description": "Preview value for material function input authoring.",
+					"additionalProperties": true
+				},
+				"parameter":
+				{
+					"type": "object",
+					"description": "Material parameter identity: name, type, association, index.",
+					"additionalProperties": true
+				},
+				"channelNames":
+				{
+					"type": "object",
+					"description": "Vector parameter channel names. Available keys: r, g, b, a.",
+					"additionalProperties": true
+				},
 				"layerName":
 				{
 					"type": "string",
-					"description": "Name of the layer."
+					"description": "Name of the landscape layer."
 				},
 				"blendType":
 				{
@@ -9298,146 +8811,45 @@
 				"layers":
 				{
 					"type": "array",
-					"description": "Array of layer configurations for layer blend.",
+					"description": "Array of landscape layer configurations.",
 					"items":
 					{
 						"type": "object"
 					}
 				},
-				"save":
-				{
-					"type": "boolean",
-					"description": "Save the asset(s) after the operation."
-				}
-			},
-			"required": [
-				"subAction"
-			]
-		}
-	},
-	{
-		"name": "manage_material_diagnostics",
-		"description": "Inspect, validate, repair, compile, save, and reload material-family assets.",
-		"category": "authoring",
-		"inputSchema":
-		{
-			"type": "object",
-			"properties":
-			{
-				"subAction":
+				"actorName":
 				{
 					"type": "string",
-					"description": "Material diagnostics sub-action to perform.",
-					"enum": [
-						"dump_raw_graph",
-						"dump_raw_expression",
-						"dump_pins",
-						"dump_parameter_namespace",
-						"validate_material_graph",
-						"repair_function_call_pins",
-						"repair_custom_expression_outputs",
-						"repair_missing_expression_guids",
-						"remove_null_expressions",
-						"compile_material_diagnostics",
-						"verify_save_reload"
-					]
+					"description": "Actor name for landscape context diagnostics."
 				},
-				"assetPath":
+				"actorPath":
 				{
 					"type": "string",
-					"description": "Material, material function, material instance, or material function instance asset path."
+					"description": "Actor object path for landscape context diagnostics."
 				},
-				"expression":
-				{
-					"type": "object",
-					"description": "ExpressionTarget object or string reference.",
-					"additionalProperties": true
-				},
-				"maxDepth":
-				{
-					"type": "integer",
-					"description": "Maximum reflected dump depth. Default: 3."
-				},
-				"verbosity":
+				"landscapeName":
 				{
 					"type": "string",
-					"description": "Raw dump verbosity. Default: normal.",
-					"enum": [
-						"summary",
-						"normal",
-						"full"
-					]
+					"description": "Landscape actor name."
 				},
-				"classAllowList":
+				"landscapePath":
 				{
-					"type": "array",
-					"description": "Allowed expression class names. Empty means all classes.",
-					"items":
-					{
-						"type": "string"
-					}
-				},
-				"propertyAllowList":
-				{
-					"type": "array",
-					"description": "Allowed reflected property names. Empty means all properties.",
-					"items":
-					{
-						"type": "string"
-					}
-				},
-				"includeMainMaterialPins":
-				{
-					"type": "boolean",
-					"description": "Include owner-level material pins for UMaterial assets."
-				},
-				"includeInherited":
-				{
-					"type": "boolean",
-					"description": "Include inherited parameter values when available."
-				},
-				"includeLayered":
-				{
-					"type": "boolean",
-					"description": "Include layered parameter identities when available."
-				},
-				"checks":
-				{
-					"type": "array",
-					"description": "Validation checks to run. Empty means default checks.",
-					"items":
-					{
-						"type": "string"
-					}
-				},
-				"expressions":
-				{
-					"type": "array",
-					"description": "ExpressionTarget objects for selective repair.",
-					"items":
-					{
-						"type": "object"
-					}
+					"type": "string",
+					"description": "Landscape actor object path."
 				},
 				"timeoutSeconds":
 				{
 					"type": "number",
-					"description": "Compile poll timeout in seconds. Default: 10."
+					"description": "Compile poll timeout in seconds for compile_materials / compile_materials_diagnostics."
 				},
-				"save":
+				"materialRootSentinel":
 				{
-					"type": "boolean",
-					"description": "Save before repair or reload verification."
-				},
-				"includeRawSummary":
-				{
-					"type": "boolean",
-					"description": "Include before/after raw graph summaries for reload verification."
+					"type": "string",
+					"description": "Informational sentinel localId returned in batch responses to identify the material's root pin set when resolving connections that target main material pins."
 				}
 			},
 			"required": [
-				"subAction",
-				"assetPath"
+				"subAction"
 			]
 		}
 	},
