@@ -8,7 +8,7 @@
     "system_control",
     "manage_pipeline",
     "manage_tools",
-    "manage_material_authoring",
+    "manage_material",
     "manage_texture",
     "manage_lighting"
   ]
