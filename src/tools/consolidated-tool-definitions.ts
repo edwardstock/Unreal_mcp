@@ -6999,7 +6999,7 @@ export const consolidatedToolDefinitions: ToolDefinition[] = [
         },
         "calls": {
           "type": "array",
-          "description": "Batch list of material function call specs for add_material_function_calls / update_material_function_calls.",
+          "description": "Batch list of material function call specs for add_material_function_calls. Update operations use the unified `updates` field per spec section 7.",
           "items": {
             "type": "object"
           }

@@ -194,7 +194,8 @@ public:
 					"shape varies per sub-action."))
 			.ArrayOfObjects(TEXT("calls"),
 				TEXT("Batch list of material function call specs for "
-					"add_material_function_calls / update_material_function_calls."))
+					"add_material_function_calls. Update operations use "
+					"the unified `updates` field per spec section 7."))
 			.ArrayOfObjects(TEXT("inputs"),
 				TEXT("Batch list of function input or custom-expression input specs."))
 			.ArrayOfObjects(TEXT("outputs"),

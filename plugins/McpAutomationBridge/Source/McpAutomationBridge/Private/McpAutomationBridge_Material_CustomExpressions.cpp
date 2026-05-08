@@ -1131,10 +1131,10 @@ bool McpHandle_UpdateCustomExpressions(
     }
 
     const TArray<TSharedPtr<FJsonValue>>* NodesArr = nullptr;
-    if (!Payload->TryGetArrayField(TEXT("nodes"), NodesArr) || !NodesArr || NodesArr->Num() == 0)
+    if (!Payload->TryGetArrayField(TEXT("updates"), NodesArr) || !NodesArr || NodesArr->Num() == 0)
     {
         Sub->SendAutomationError(Socket, RequestId,
-            TEXT("nodes[] is required, minimum length 1"),
+            TEXT("updates[] is required, minimum length 1"),
             TEXT("INVALID_ARGUMENT"));
         return true;
     }

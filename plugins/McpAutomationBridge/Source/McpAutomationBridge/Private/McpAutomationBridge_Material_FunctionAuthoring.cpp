@@ -855,10 +855,10 @@ bool McpHandle_UpdateFunctionInputs(
     }
 
     const TArray<TSharedPtr<FJsonValue>>* InputsArr = nullptr;
-    if (!Payload->TryGetArrayField(TEXT("inputs"), InputsArr) || !InputsArr || InputsArr->Num() == 0)
+    if (!Payload->TryGetArrayField(TEXT("updates"), InputsArr) || !InputsArr || InputsArr->Num() == 0)
     {
         Sub->SendAutomationError(Socket, RequestId,
-            TEXT("inputs[] is required, minimum length 1"),
+            TEXT("updates[] is required, minimum length 1"),
             TEXT("INVALID_ARGUMENT"));
         return true;
     }
@@ -1117,10 +1117,10 @@ bool McpHandle_UpdateFunctionOutputs(
     }
 
     const TArray<TSharedPtr<FJsonValue>>* OutputsArr = nullptr;
-    if (!Payload->TryGetArrayField(TEXT("outputs"), OutputsArr) || !OutputsArr || OutputsArr->Num() == 0)
+    if (!Payload->TryGetArrayField(TEXT("updates"), OutputsArr) || !OutputsArr || OutputsArr->Num() == 0)
     {
         Sub->SendAutomationError(Socket, RequestId,
-            TEXT("outputs[] is required, minimum length 1"),
+            TEXT("updates[] is required, minimum length 1"),
             TEXT("INVALID_ARGUMENT"));
         return true;
     }
@@ -1725,10 +1725,10 @@ bool McpHandle_UpdateMaterialFunctionCalls(
     }
 
     const TArray<TSharedPtr<FJsonValue>>* CallsArr = nullptr;
-    if (!Payload->TryGetArrayField(TEXT("calls"), CallsArr) || !CallsArr || CallsArr->Num() == 0)
+    if (!Payload->TryGetArrayField(TEXT("updates"), CallsArr) || !CallsArr || CallsArr->Num() == 0)
     {
         Sub->SendAutomationError(Socket, RequestId,
-            TEXT("calls[] is required, minimum length 1"),
+            TEXT("updates[] is required, minimum length 1"),
             TEXT("INVALID_ARGUMENT"));
         return true;
     }
