@@ -91,3 +91,24 @@ npm run lint:tool-defs  # Audit tool manifest for missing descriptions
 - **Engine Reference**: Check engine code at `X:\Unreal_Engine\UE_5.7\Engine`, `UE_5.6`, `UE_5.5`, `UE_5.4`, `UE_5.3`, `UE_5.2`, `UE_5.1`, `UE_5.0`.
 - **Version Files**: Version in `package.json`, `server.json`, `src/index.ts`.
 - **Test Patterns**: Integration tests use pipe-separated expectations (`success|error|timeout`).
+
+## File organization
+
+One domain per file. Don't dump everything into a single mega-handler file.
+The `McpAutomationBridge_AssetWorkflowHandlers.cpp` 7000-line monolith
+mixing asset CRUD with material graph operations is the anti-pattern
+this convention exists to prevent.
+
+**File naming:** `McpAutomationBridge_<ToolName>_<Domain>.cpp` for native
+handlers; one TS handler file per tool under `src/tools/handlers/`.
+
+**Soft size guideline: 3000 lines.** When a file approaches that size with
+one more handler, split before adding.
+
+**Scope rule for refactors:** apply this convention to files you touch in
+a given change, not to the whole codebase at once.
+
+The TS-side `consolidated-tool-definitions.ts` is auto-generated from native
+`McpTool_*.cpp` schemas via `npm run mcp:rebuild` — exempt from manual-split
+rules, never hand-edited. The hand-edited dispatch file is
+`consolidated-tool-handlers.ts` (different file).
