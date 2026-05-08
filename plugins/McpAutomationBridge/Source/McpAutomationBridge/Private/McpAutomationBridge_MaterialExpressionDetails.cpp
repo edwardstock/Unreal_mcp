@@ -208,6 +208,8 @@ namespace McpMaterialExpressionDetails
                 Resp->SetStringField(TEXT("functionName"), FuncCall->MaterialFunction->GetName());
             }
 
+            // Spec §7.11 + §6: emit `name` and `type` fields per pin so callers can
+            // discover the function's interface without round-tripping to the function asset.
             TArray<TSharedPtr<FJsonValue>> FunctionInputs;
             for (int32 InputIndex = 0; InputIndex < FuncCall->FunctionInputs.Num(); ++InputIndex)
             {
@@ -217,6 +219,14 @@ namespace McpMaterialExpressionDetails
                 if (FunctionInput.ExpressionInput)
                 {
                     InputObj->SetStringField(TEXT("functionInputId"), FunctionInput.ExpressionInput->Id.ToString());
+                    InputObj->SetStringField(TEXT("name"), FunctionInput.ExpressionInput->InputName.ToString());
+                    InputObj->SetStringField(TEXT("type"),
+                        ::McpFunctionInputTypeName(static_cast<EFunctionInputType>(FunctionInput.ExpressionInput->InputType)));
+                }
+                else
+                {
+                    // Fall back to FunctionInput.Input.InputName when the live ExpressionInput pointer is missing.
+                    InputObj->SetStringField(TEXT("name"), FunctionInput.Input.InputName.ToString());
                 }
                 ::McpEmitInputPinJson(Owner, &FunctionInput.Input, FuncCall->GetInputName(InputIndex).ToString(), InputObj.ToSharedRef());
                 FunctionInputs.Add(MakeShared<FJsonValueObject>(InputObj));
@@ -242,6 +252,9 @@ namespace McpMaterialExpressionDetails
                     OutputObj->SetStringField(TEXT("name"), OutputName);
                 }
                 OutputObj->SetBoolField(TEXT("nameResolved"), bResolvedOutputName);
+                // Per spec §7.11, FunctionOutput's type is determined by what's wired to its 'A'
+                // input; emit "Wire" as a sentinel so callers don't expect a static type.
+                OutputObj->SetStringField(TEXT("type"), TEXT("Wire"));
                 FunctionOutputs.Add(MakeShared<FJsonValueObject>(OutputObj));
             }
             Resp->SetArrayField(TEXT("functionOutputs"), FunctionOutputs);

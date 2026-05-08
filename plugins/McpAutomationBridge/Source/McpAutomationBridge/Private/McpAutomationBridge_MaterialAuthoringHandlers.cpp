@@ -247,6 +247,45 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     return McpHandle_UpdateCustomExpressions(this, RequestId, Payload, Socket);
   }
 
+  // C.6: function authoring + function calls.
+  // All live in McpAutomationBridge_Material_FunctionAuthoring.cpp.
+  extern bool McpHandle_AddFunctionInputs(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("add_function_inputs")) {
+    return McpHandle_AddFunctionInputs(this, RequestId, Payload, Socket);
+  }
+  extern bool McpHandle_AddFunctionOutputs(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("add_function_outputs")) {
+    return McpHandle_AddFunctionOutputs(this, RequestId, Payload, Socket);
+  }
+  extern bool McpHandle_UpdateFunctionInputs(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("update_function_inputs")) {
+    return McpHandle_UpdateFunctionInputs(this, RequestId, Payload, Socket);
+  }
+  extern bool McpHandle_UpdateFunctionOutputs(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("update_function_outputs")) {
+    return McpHandle_UpdateFunctionOutputs(this, RequestId, Payload, Socket);
+  }
+  extern bool McpHandle_AddMaterialFunctionCalls(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("add_material_function_calls")) {
+    return McpHandle_AddMaterialFunctionCalls(this, RequestId, Payload, Socket);
+  }
+  extern bool McpHandle_UpdateMaterialFunctionCalls(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("update_material_function_calls")) {
+    return McpHandle_UpdateMaterialFunctionCalls(this, RequestId, Payload, Socket);
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {

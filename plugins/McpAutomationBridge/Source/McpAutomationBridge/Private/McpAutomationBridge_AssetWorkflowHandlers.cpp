@@ -6323,6 +6323,15 @@ bool UMcpAutomationBridgeSubsystem::HandleFindMaterialExpressions(
         if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr)) {
           Match->SetStringField(TEXT("parameterName"), Param->ParameterName.ToString());
         }
+        // Spec §7.11: functionPath and functionName must be available on every
+        // MaterialFunctionCall expression at top-level, regardless of includeDetails.
+        if (UMaterialExpressionMaterialFunctionCall* FuncCall =
+                Cast<UMaterialExpressionMaterialFunctionCall>(Expr)) {
+          if (FuncCall->MaterialFunction) {
+            Match->SetStringField(TEXT("functionPath"), FuncCall->MaterialFunction->GetPathName());
+            Match->SetStringField(TEXT("functionName"), FuncCall->MaterialFunction->GetName());
+          }
+        }
         if (bIncludeDetails) {
           // NEW3: inline type-specific details (code for Custom, attributeSetTypes for SetMaterialAttributes, etc.)
           McpAppendTypedExpressionDetails(GraphOwner, Expr, Match.ToSharedRef());
