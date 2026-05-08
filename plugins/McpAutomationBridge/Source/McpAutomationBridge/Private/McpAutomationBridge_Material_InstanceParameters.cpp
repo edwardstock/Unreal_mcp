@@ -203,13 +203,11 @@ static TSharedPtr<FJsonObject> McpApplyTypedSetter(
         else
         {
             const float V = (float)ValueField->AsNumber();
-            bApplied = UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(
-                MIC, PName, V);
-            if (!bApplied)
-            {
-                FailMsg = FString::Printf(TEXT("Parameter '%s' not found on this instance's material."), *ParameterName);
-                FailCode = TEXT("PARAMETER_NOT_FOUND");
-            }
+            // UE 5.7 quirk: UMaterialEditingLibrary::SetMaterialInstance*ParameterValue always returns false
+            // (MaterialEditingLibrary.cpp:1165 has bResult initialized to false and never set to true).
+            // The mutation itself succeeds via SetScalarParameterValueEditorOnly. Treat call as success.
+            UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MIC, PName, V);
+            bApplied = true;
         }
     }
     else if (ValueKind == TEXT("vector"))
@@ -223,13 +221,8 @@ static TSharedPtr<FJsonObject> McpApplyTypedSetter(
         }
         else
         {
-            bApplied = UMaterialEditingLibrary::SetMaterialInstanceVectorParameterValue(
-                MIC, PName, Color);
-            if (!bApplied)
-            {
-                FailMsg = FString::Printf(TEXT("Parameter '%s' not found on this instance's material."), *ParameterName);
-                FailCode = TEXT("PARAMETER_NOT_FOUND");
-            }
+            UMaterialEditingLibrary::SetMaterialInstanceVectorParameterValue(MIC, PName, Color);
+            bApplied = true;
         }
     }
     else if (ValueKind == TEXT("texture"))
@@ -256,13 +249,8 @@ static TSharedPtr<FJsonObject> McpApplyTypedSetter(
             }
             else
             {
-                bApplied = UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(
-                    MIC, PName, Tex);
-                if (!bApplied)
-                {
-                    FailMsg = FString::Printf(TEXT("Parameter '%s' not found on this instance's material."), *ParameterName);
-                    FailCode = TEXT("PARAMETER_NOT_FOUND");
-                }
+                UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(MIC, PName, Tex);
+                bApplied = true;
             }
         }
     }
@@ -277,13 +265,8 @@ static TSharedPtr<FJsonObject> McpApplyTypedSetter(
         else
         {
             const bool V = ValueField->AsBool();
-            bApplied = UMaterialEditingLibrary::SetMaterialInstanceStaticSwitchParameterValue(
-                MIC, PName, V);
-            if (!bApplied)
-            {
-                FailMsg = FString::Printf(TEXT("Parameter '%s' not found on this instance's material."), *ParameterName);
-                FailCode = TEXT("PARAMETER_NOT_FOUND");
-            }
+            UMaterialEditingLibrary::SetMaterialInstanceStaticSwitchParameterValue(MIC, PName, V);
+            bApplied = true;
         }
     }
     else
