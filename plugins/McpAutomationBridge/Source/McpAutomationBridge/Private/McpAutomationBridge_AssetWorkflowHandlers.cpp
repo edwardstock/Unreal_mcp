@@ -304,7 +304,7 @@ UMaterialExpression* McpFindGraphExpressionFromPayload(
   return nullptr;
 }
 
-static FExpressionInput* McpFindExpressionInputByName(
+FExpressionInput* McpFindExpressionInputByName(
     UMaterialExpression* Expression,
     FString& InOutInputName)
 {
@@ -344,7 +344,7 @@ static FExpressionInput* McpFindExpressionInputByName(
   return nullptr;
 }
 
-static FIntPoint McpEstimateExpressionSize(UMaterialExpression* Expr)
+FIntPoint McpEstimateExpressionSize(UMaterialExpression* Expr)
 {
   if (!Expr)
   {
@@ -396,11 +396,15 @@ static TArray<FMcpMaterialNodeRect> McpCollectExpressionRects(const FMcpMaterial
   return Rects;
 }
 
-static FIntPoint McpFindFreePosition(
+// Note: this function was previously static; some material handlers were
+// moved to sibling TUs (Material_NamedReroutes.cpp etc.) and now call it via
+// extern declaration. To avoid default-argument redefinition under unity
+// builds, all callers (in this TU and others) pass StepY explicitly.
+FIntPoint McpFindFreePosition(
     const FMcpMaterialGraphOwner& Owner,
     const FIntPoint& Start,
     const FIntPoint& Size,
-    int32 StepY = 180)
+    int32 StepY)
 {
   const TArray<FMcpMaterialNodeRect> Existing = McpCollectExpressionRects(Owner);
   FIntPoint Candidate = Start;
@@ -425,7 +429,10 @@ static FIntPoint McpFindFreePosition(
   return Candidate;
 }
 
-static FIntPoint McpResolvePlacement(
+// Note: this function was previously static; some material handlers were moved
+// to sibling TUs (Material_NamedReroutes.cpp etc.) and now call it via extern
+// declaration.
+FIntPoint McpResolvePlacement(
     const FMcpMaterialGraphOwner& Owner,
     const TSharedPtr<FJsonObject>& Payload,
     UMaterialExpression* NewExpression)
@@ -508,10 +515,10 @@ static FIntPoint McpResolvePlacement(
   {
     return Start;
   }
-  return McpFindFreePosition(Owner, Start, Size);
+  return McpFindFreePosition(Owner, Start, Size, 180);
 }
 
-static bool McpAddExpressionToGraph(const FMcpMaterialGraphOwner& Owner, UMaterialExpression* Expression)
+bool McpAddExpressionToGraph(const FMcpMaterialGraphOwner& Owner, UMaterialExpression* Expression)
 {
   if (!Expression)
   {
@@ -535,7 +542,7 @@ static bool McpAddExpressionToGraph(const FMcpMaterialGraphOwner& Owner, UMateri
   return true;
 }
 
-static bool McpAddCommentToGraph(const FMcpMaterialGraphOwner& Owner, UMaterialExpressionComment* Comment)
+bool McpAddCommentToGraph(const FMcpMaterialGraphOwner& Owner, UMaterialExpressionComment* Comment)
 {
   if (!Comment)
   {
@@ -623,7 +630,7 @@ static TSharedRef<FJsonObject> McpBuildCommentJson(UMaterialExpressionComment* C
   return Item;
 }
 
-static UMaterialExpressionNamedRerouteDeclaration* McpFindNamedRerouteDeclaration(
+UMaterialExpressionNamedRerouteDeclaration* McpFindNamedRerouteDeclaration(
     const FMcpMaterialGraphOwner& Owner,
     const FString& NameOrGuid)
 {
@@ -1124,25 +1131,26 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
   // Material Authoring
   if (Lower == TEXT("add_material_node"))
     return HandleAddMaterialNode(RequestId, Lower, Payload, RequestingSocket);
-  if (Lower == TEXT("set_material_node_position") || Lower == TEXT("move_material_node"))
-    return HandleSetMaterialNodePosition(RequestId, Lower, Payload, RequestingSocket);
-  if (Lower == TEXT("bulk_set_material_node_positions") || Lower == TEXT("bulk_move_material_nodes"))
-    return HandleBulkSetMaterialNodePositions(RequestId, Lower, Payload, RequestingSocket);
+  // D.1: canonical plural form; legacy singular/move aliases removed
+  if (Lower == TEXT("set_material_node_positions"))
+    return HandleSetMaterialNodePositions(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("connect_material_pins"))
     return HandleConnectMaterialPins(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("remove_material_node"))
     return HandleRemoveMaterialNode(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("break_material_connections"))
     return HandleBreakMaterialConnections(RequestId, Lower, Payload, RequestingSocket);
-  if (Lower == TEXT("create_material_comment"))
+  // D.2: plural-renamed actions; handlers accept either legacy single-item shape
+  // or new top-level array shape.
+  if (Lower == TEXT("create_material_comments"))
     return HandleCreateMaterialComment(RequestId, Lower, Payload, RequestingSocket);
-  if (Lower == TEXT("wrap_material_nodes_in_comment"))
+  if (Lower == TEXT("wrap_material_nodes_in_comments"))
     return HandleWrapMaterialNodesInComment(RequestId, Lower, Payload, RequestingSocket);
-  if (Lower == TEXT("create_named_reroute"))
+  if (Lower == TEXT("create_named_reroutes"))
     return HandleCreateNamedReroute(RequestId, Lower, Payload, RequestingSocket);
-  if (Lower == TEXT("use_named_reroute"))
+  if (Lower == TEXT("use_named_reroutes"))
     return HandleUseNamedReroute(RequestId, Lower, Payload, RequestingSocket);
-  if (Lower == TEXT("replace_long_connection_with_named_reroute"))
+  if (Lower == TEXT("replace_long_connections_with_named_reroutes"))
     return HandleReplaceLongConnectionWithNamedReroute(RequestId, Lower, Payload, RequestingSocket);
   if (Lower == TEXT("align_material_nodes"))
     return HandleAlignMaterialNodes(RequestId, Lower, Payload, RequestingSocket);
@@ -4840,161 +4848,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
 #endif
 }
 
-bool UMcpAutomationBridgeSubsystem::HandleSetMaterialNodePosition(
-    const FString &RequestId, const FString &Action,
-    const TSharedPtr<FJsonObject> &Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket) {
-  const FString Lower = Action.ToLower();
-  if (!Lower.Equals(TEXT("set_material_node_position"), ESearchCase::IgnoreCase) &&
-      !Lower.Equals(TEXT("move_material_node"), ESearchCase::IgnoreCase)) {
-    return false;
-  }
-
-#if WITH_EDITOR
-  if (!Payload.IsValid()) {
-    SendAutomationError(Socket, RequestId, TEXT("set_material_node_position payload missing"), TEXT("INVALID_PAYLOAD"));
-    return true;
-  }
-
-  FString MaterialPath;
-  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
-      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
-    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  FMcpMaterialGraphOwner GraphOwner;
-  FString GraphOwnerError;
-  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
-    SendAutomationError(Socket, RequestId, GraphOwnerError,
-                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
-    return true;
-  }
-  if (GraphOwner.bReadOnly) {
-    SendAutomationError(Socket, RequestId, TEXT("Cannot move nodes on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
-    return true;
-  }
-
-  UMaterialExpression* Expression = McpFindGraphExpressionFromPayload(GraphOwner, Payload);
-  if (!Expression) {
-    SendAutomationError(Socket, RequestId, TEXT("Node not found. Provide expressionIndex, expressionPath, or nodeId"), TEXT("NODE_NOT_FOUND"));
-    return true;
-  }
-
-  double NewX = 0.0;
-  double NewY = 0.0;
-  if (!(Payload->TryGetNumberField(TEXT("x"), NewX) || Payload->TryGetNumberField(TEXT("posX"), NewX)) ||
-      !(Payload->TryGetNumberField(TEXT("y"), NewY) || Payload->TryGetNumberField(TEXT("posY"), NewY))) {
-    SendAutomationError(Socket, RequestId, TEXT("x/y or posX/posY are required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  const int32 OldX = Expression->MaterialExpressionEditorX;
-  const int32 OldY = Expression->MaterialExpressionEditorY;
-  Expression->Modify();
-  Expression->MaterialExpressionEditorX = static_cast<int32>(NewX);
-  Expression->MaterialExpressionEditorY = static_cast<int32>(NewY);
-
-  FString RebuildErr;
-  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
-
-  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
-  McpAddExpressionIdentity(GraphOwner, Expression, McpExpressionIndex(GraphOwner, Expression), Resp.ToSharedRef());
-  Resp->SetNumberField(TEXT("oldX"), OldX);
-  Resp->SetNumberField(TEXT("oldY"), OldY);
-  Resp->SetNumberField(TEXT("newX"), Expression->MaterialExpressionEditorX);
-  Resp->SetNumberField(TEXT("newY"), Expression->MaterialExpressionEditorY);
-  SendAutomationResponse(Socket, RequestId, true, TEXT("Material node position updated"), Resp, FString());
-  return true;
-#else
-  SendAutomationResponse(Socket, RequestId, false, TEXT("set_material_node_position requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
-  return true;
-#endif
-}
-
-bool UMcpAutomationBridgeSubsystem::HandleBulkSetMaterialNodePositions(
-    const FString &RequestId, const FString &Action,
-    const TSharedPtr<FJsonObject> &Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket) {
-  const FString Lower = Action.ToLower();
-  if (!Lower.Equals(TEXT("bulk_set_material_node_positions"), ESearchCase::IgnoreCase) &&
-      !Lower.Equals(TEXT("bulk_move_material_nodes"), ESearchCase::IgnoreCase)) {
-    return false;
-  }
-
-#if WITH_EDITOR
-  if (!Payload.IsValid()) {
-    SendAutomationError(Socket, RequestId, TEXT("bulk_set_material_node_positions payload missing"), TEXT("INVALID_PAYLOAD"));
-    return true;
-  }
-
-  FString MaterialPath;
-  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
-      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
-    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
-  if (!Payload->TryGetArrayField(TEXT("nodes"), Nodes) || !Nodes || Nodes->Num() == 0) {
-    SendAutomationError(Socket, RequestId, TEXT("nodes array is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  FMcpMaterialGraphOwner GraphOwner;
-  FString GraphOwnerError;
-  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
-    SendAutomationError(Socket, RequestId, GraphOwnerError,
-                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
-    return true;
-  }
-  if (GraphOwner.bReadOnly) {
-    SendAutomationError(Socket, RequestId, TEXT("Cannot move nodes on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
-    return true;
-  }
-
-  int32 UpdatedCount = 0;
-  TArray<TSharedPtr<FJsonValue>> UpdatedNodes;
-  for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes) {
-    const TSharedPtr<FJsonObject>* NodeObj = nullptr;
-    if (!NodeValue.IsValid() || !NodeValue->TryGetObject(NodeObj) || !NodeObj) {
-      continue;
-    }
-
-    UMaterialExpression* Expression = McpFindGraphExpressionFromPayload(GraphOwner, *NodeObj);
-    double NewX = 0.0;
-    double NewY = 0.0;
-    const bool bHasX = (*NodeObj)->TryGetNumberField(TEXT("x"), NewX) || (*NodeObj)->TryGetNumberField(TEXT("posX"), NewX);
-    const bool bHasY = (*NodeObj)->TryGetNumberField(TEXT("y"), NewY) || (*NodeObj)->TryGetNumberField(TEXT("posY"), NewY);
-    if (!Expression || !bHasX || !bHasY) {
-      continue;
-    }
-
-    Expression->Modify();
-    Expression->MaterialExpressionEditorX = static_cast<int32>(NewX);
-    Expression->MaterialExpressionEditorY = static_cast<int32>(NewY);
-    UpdatedCount++;
-
-    TSharedPtr<FJsonObject> UpdatedObj = McpHandlerUtils::CreateResultObject();
-    McpAddExpressionIdentity(GraphOwner, Expression, McpExpressionIndex(GraphOwner, Expression), UpdatedObj.ToSharedRef());
-    UpdatedNodes.Add(MakeShared<FJsonValueObject>(UpdatedObj));
-  }
-
-  FString RebuildErr;
-  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
-
-  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
-  Resp->SetNumberField(TEXT("affectedNodeCount"), UpdatedCount);
-  Resp->SetArrayField(TEXT("nodes"), UpdatedNodes);
-  SendAutomationResponse(Socket, RequestId, true, TEXT("Material node positions updated"), Resp, FString());
-  return true;
-#else
-  SendAutomationResponse(Socket, RequestId, false, TEXT("bulk_set_material_node_positions requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
-  return true;
-#endif
-}
+// HandleSetMaterialNodePositions - moved to McpAutomationBridge_Material_NodePositioning.cpp (D.1)
 
 bool UMcpAutomationBridgeSubsystem::HandleConnectMaterialPins(
     const FString &RequestId, const FString &Action,
@@ -5548,660 +5402,13 @@ bool UMcpAutomationBridgeSubsystem::HandleBreakMaterialConnections(
 #endif
 }
 
-bool UMcpAutomationBridgeSubsystem::HandleCreateMaterialComment(
-    const FString &RequestId, const FString &Action,
-    const TSharedPtr<FJsonObject> &Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket) {
-  const FString Lower = Action.ToLower();
-  if (!Lower.Equals(TEXT("create_material_comment"), ESearchCase::IgnoreCase)) {
-    return false;
-  }
-
-#if WITH_EDITOR
-  if (!Payload.IsValid()) {
-    SendAutomationError(Socket, RequestId, TEXT("create_material_comment payload missing"), TEXT("INVALID_PAYLOAD"));
-    return true;
-  }
-
-  FString MaterialPath;
-  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
-      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
-    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  FMcpMaterialGraphOwner GraphOwner;
-  FString GraphOwnerError;
-  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
-    SendAutomationError(Socket, RequestId, GraphOwnerError,
-                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
-    return true;
-  }
-  if (GraphOwner.bReadOnly) {
-    SendAutomationError(Socket, RequestId, TEXT("Cannot create comments on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
-    return true;
-  }
-
-  FString Text;
-  Payload->TryGetStringField(TEXT("text"), Text);
-  if (Text.IsEmpty()) {
-    Payload->TryGetStringField(TEXT("comment"), Text);
-  }
-
-  double X = 0.0, Y = 0.0, Width = 800.0, Height = 400.0;
-  Payload->TryGetNumberField(TEXT("x"), X);
-  Payload->TryGetNumberField(TEXT("y"), Y);
-  Payload->TryGetNumberField(TEXT("width"), Width);
-  Payload->TryGetNumberField(TEXT("height"), Height);
-
-  UMaterialExpressionComment* Comment = NewObject<UMaterialExpressionComment>(GraphOwner.GraphSource, UMaterialExpressionComment::StaticClass(), NAME_None, RF_Transactional);
-  Comment->Text = Text;
-  Comment->MaterialExpressionEditorX = static_cast<int32>(X);
-  Comment->MaterialExpressionEditorY = static_cast<int32>(Y);
-  Comment->SizeX = static_cast<int32>(Width);
-  Comment->SizeY = static_cast<int32>(Height);
-
-  bool bGroupMode = true;
-  Payload->TryGetBoolField(TEXT("groupMode"), bGroupMode);
-  Comment->bGroupMode = bGroupMode;
-
-  const TSharedPtr<FJsonObject>* ColorObj = nullptr;
-  if (Payload->TryGetObjectField(TEXT("color"), ColorObj) && ColorObj) {
-    double R = 1.0, G = 1.0, B = 1.0, A = 1.0;
-    (*ColorObj)->TryGetNumberField(TEXT("r"), R);
-    (*ColorObj)->TryGetNumberField(TEXT("g"), G);
-    (*ColorObj)->TryGetNumberField(TEXT("b"), B);
-    (*ColorObj)->TryGetNumberField(TEXT("a"), A);
-    Comment->CommentColor = FLinearColor(static_cast<float>(R), static_cast<float>(G), static_cast<float>(B), static_cast<float>(A));
-  }
-
-  if (!McpAddCommentToGraph(GraphOwner, Comment)) {
-    SendAutomationError(Socket, RequestId, TEXT("Material comments require UE 5.1+ expression collections"), TEXT("UNSUPPORTED_OPERATION"));
-    return true;
-  }
-
-  FString RebuildErr;
-  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
-
-  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
-  Resp->SetStringField(TEXT("commentId"), Comment->GetPathName());
-  Resp->SetStringField(TEXT("text"), Comment->Text);
-  Resp->SetNumberField(TEXT("x"), Comment->MaterialExpressionEditorX);
-  Resp->SetNumberField(TEXT("y"), Comment->MaterialExpressionEditorY);
-  Resp->SetNumberField(TEXT("width"), Comment->SizeX);
-  Resp->SetNumberField(TEXT("height"), Comment->SizeY);
-  Resp->SetBoolField(TEXT("groupMode"), Comment->bGroupMode);
-  SendAutomationResponse(Socket, RequestId, true, TEXT("Material comment created"), Resp, FString());
-  return true;
-#else
-  SendAutomationResponse(Socket, RequestId, false, TEXT("create_material_comment requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
-  return true;
-#endif
-}
-
-bool UMcpAutomationBridgeSubsystem::HandleWrapMaterialNodesInComment(
-    const FString &RequestId, const FString &Action,
-    const TSharedPtr<FJsonObject> &Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket) {
-  const FString Lower = Action.ToLower();
-  if (!Lower.Equals(TEXT("wrap_material_nodes_in_comment"), ESearchCase::IgnoreCase)) {
-    return false;
-  }
-
-#if WITH_EDITOR
-  if (!Payload.IsValid()) {
-    SendAutomationError(Socket, RequestId, TEXT("wrap_material_nodes_in_comment payload missing"), TEXT("INVALID_PAYLOAD"));
-    return true;
-  }
-
-  FString MaterialPath;
-  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
-      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
-    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
-  if (!Payload->TryGetArrayField(TEXT("nodes"), Nodes) || !Nodes || Nodes->Num() == 0) {
-    SendAutomationError(Socket, RequestId, TEXT("nodes array is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  FMcpMaterialGraphOwner GraphOwner;
-  FString GraphOwnerError;
-  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
-    SendAutomationError(Socket, RequestId, GraphOwnerError,
-                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
-    return true;
-  }
-  if (GraphOwner.bReadOnly) {
-    SendAutomationError(Socket, RequestId, TEXT("Cannot create comments on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
-    return true;
-  }
-
-  int32 MinX = TNumericLimits<int32>::Max();
-  int32 MinY = TNumericLimits<int32>::Max();
-  int32 MaxX = TNumericLimits<int32>::Min();
-  int32 MaxY = TNumericLimits<int32>::Min();
-  int32 ResolvedCount = 0;
-
-  for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes) {
-    const TSharedPtr<FJsonObject>* NodeObj = nullptr;
-    if (!NodeValue.IsValid() || !NodeValue->TryGetObject(NodeObj) || !NodeObj) {
-      continue;
-    }
-    UMaterialExpression* Expr = McpFindGraphExpressionFromPayload(GraphOwner, *NodeObj);
-    if (!Expr) {
-      continue;
-    }
-    const FIntPoint Size = McpEstimateExpressionSize(Expr);
-    MinX = FMath::Min(MinX, Expr->MaterialExpressionEditorX);
-    MinY = FMath::Min(MinY, Expr->MaterialExpressionEditorY);
-    MaxX = FMath::Max(MaxX, Expr->MaterialExpressionEditorX + Size.X);
-    MaxY = FMath::Max(MaxY, Expr->MaterialExpressionEditorY + Size.Y);
-    ResolvedCount++;
-  }
-
-  if (ResolvedCount == 0) {
-    SendAutomationError(Socket, RequestId, TEXT("No nodes could be resolved"), TEXT("NODE_NOT_FOUND"));
-    return true;
-  }
-
-  double Padding = 80.0;
-  Payload->TryGetNumberField(TEXT("padding"), Padding);
-  TSharedPtr<FJsonObject> LocalPayload = McpHandlerUtils::CreateResultObject();
-  LocalPayload->SetStringField(TEXT("assetPath"), MaterialPath);
-  FString Text;
-  Payload->TryGetStringField(TEXT("text"), Text);
-  if (Text.IsEmpty()) {
-    Payload->TryGetStringField(TEXT("comment"), Text);
-  }
-  LocalPayload->SetStringField(TEXT("text"), Text);
-  LocalPayload->SetNumberField(TEXT("x"), MinX - Padding);
-  LocalPayload->SetNumberField(TEXT("y"), MinY - Padding);
-  LocalPayload->SetNumberField(TEXT("width"), (MaxX - MinX) + Padding * 2.0);
-  LocalPayload->SetNumberField(TEXT("height"), (MaxY - MinY) + Padding * 2.0);
-  bool bGroupMode = true;
-  Payload->TryGetBoolField(TEXT("groupMode"), bGroupMode);
-  LocalPayload->SetBoolField(TEXT("groupMode"), bGroupMode);
-  return HandleCreateMaterialComment(RequestId, TEXT("create_material_comment"), LocalPayload, Socket);
-#else
-  SendAutomationResponse(Socket, RequestId, false, TEXT("wrap_material_nodes_in_comment requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
-  return true;
-#endif
-}
-
-bool UMcpAutomationBridgeSubsystem::HandleCreateNamedReroute(
-    const FString &RequestId, const FString &Action,
-    const TSharedPtr<FJsonObject> &Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket) {
-  const FString Lower = Action.ToLower();
-  if (!Lower.Equals(TEXT("create_named_reroute"), ESearchCase::IgnoreCase)) {
-    return false;
-  }
-
-#if WITH_EDITOR
-  if (!Payload.IsValid()) {
-    SendAutomationError(Socket, RequestId, TEXT("create_named_reroute payload missing"), TEXT("INVALID_PAYLOAD"));
-    return true;
-  }
-
-  FString MaterialPath, RerouteName;
-  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
-      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
-    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-  if (!Payload->TryGetStringField(TEXT("name"), RerouteName) || RerouteName.IsEmpty()) {
-    SendAutomationError(Socket, RequestId, TEXT("name is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  FMcpMaterialGraphOwner GraphOwner;
-  FString GraphOwnerError;
-  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
-    SendAutomationError(Socket, RequestId, GraphOwnerError,
-                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
-    return true;
-  }
-  if (GraphOwner.bReadOnly) {
-    SendAutomationError(Socket, RequestId, TEXT("Cannot create named reroutes on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
-    return true;
-  }
-
-  UMaterialExpression* Source = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("sourceExpressionIndex"), TEXT("sourceNodeId"), TEXT("sourceExpressionPath"));
-  if (!Source) {
-    Source = McpFindGraphExpressionFromPayload(GraphOwner, Payload);
-  }
-  if (!Source) {
-    SendAutomationError(Socket, RequestId, TEXT("Source node not found"), TEXT("SOURCE_NODE_NOT_FOUND"));
-    return true;
-  }
-
-  int32 SourceOutputIndex = 0;
-  Payload->TryGetNumberField(TEXT("sourceOutputIndex"), SourceOutputIndex);
-
-  UMaterialExpressionNamedRerouteDeclaration* Declaration =
-      NewObject<UMaterialExpressionNamedRerouteDeclaration>(GraphOwner.GraphSource, UMaterialExpressionNamedRerouteDeclaration::StaticClass(), NAME_None, RF_Transactional);
-  Declaration->Name = FName(*RerouteName);
-  Declaration->Input.Expression = Source;
-  Declaration->Input.OutputIndex = SourceOutputIndex;
-  const FIntPoint Position = McpResolvePlacement(GraphOwner, Payload, Declaration);
-  Declaration->MaterialExpressionEditorX = Position.X;
-  Declaration->MaterialExpressionEditorY = Position.Y;
-  McpAddExpressionToGraph(GraphOwner, Declaration);
-
-  FString RebuildErr;
-  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
-
-  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
-  McpAddExpressionIdentity(GraphOwner, Declaration, McpExpressionIndex(GraphOwner, Declaration), Resp.ToSharedRef());
-  Resp->SetStringField(TEXT("rerouteName"), Declaration->Name.ToString());
-  Resp->SetStringField(TEXT("rerouteGuid"), Declaration->VariableGuid.ToString());
-  Resp->SetNumberField(TEXT("sourceExpressionIndex"), McpExpressionIndex(GraphOwner, Source));
-  SendAutomationResponse(Socket, RequestId, true, TEXT("Named reroute declaration created"), Resp, FString());
-  return true;
-#else
-  SendAutomationResponse(Socket, RequestId, false, TEXT("create_named_reroute requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
-  return true;
-#endif
-}
-
-bool UMcpAutomationBridgeSubsystem::HandleUseNamedReroute(
-    const FString &RequestId, const FString &Action,
-    const TSharedPtr<FJsonObject> &Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket) {
-  const FString Lower = Action.ToLower();
-  if (!Lower.Equals(TEXT("use_named_reroute"), ESearchCase::IgnoreCase)) {
-    return false;
-  }
-
-#if WITH_EDITOR
-  if (!Payload.IsValid()) {
-    SendAutomationError(Socket, RequestId, TEXT("use_named_reroute payload missing"), TEXT("INVALID_PAYLOAD"));
-    return true;
-  }
-
-  FString MaterialPath;
-  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
-      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
-    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  FMcpMaterialGraphOwner GraphOwner;
-  FString GraphOwnerError;
-  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
-    SendAutomationError(Socket, RequestId, GraphOwnerError,
-                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
-    return true;
-  }
-  if (GraphOwner.bReadOnly) {
-    SendAutomationError(Socket, RequestId, TEXT("Cannot create named reroute usages on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
-    return true;
-  }
-
-  FString DeclarationRef;
-  Payload->TryGetStringField(TEXT("declarationId"), DeclarationRef);
-  if (DeclarationRef.IsEmpty()) Payload->TryGetStringField(TEXT("declarationGuid"), DeclarationRef);
-  if (DeclarationRef.IsEmpty()) Payload->TryGetStringField(TEXT("declarationName"), DeclarationRef);
-  if (DeclarationRef.IsEmpty()) Payload->TryGetStringField(TEXT("name"), DeclarationRef);
-  UMaterialExpressionNamedRerouteDeclaration* Declaration = McpFindNamedRerouteDeclaration(GraphOwner, DeclarationRef);
-  if (!Declaration) {
-    SendAutomationError(Socket, RequestId, TEXT("Named reroute declaration not found"), TEXT("DECLARATION_NOT_FOUND"));
-    return true;
-  }
-
-  UMaterialExpression* Target = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("targetExpressionIndex"), TEXT("targetNodeId"), TEXT("targetExpressionPath"));
-  if (!Target) {
-    SendAutomationError(Socket, RequestId, TEXT("Target node not found"), TEXT("TARGET_NODE_NOT_FOUND"));
-    return true;
-  }
-
-  FString TargetInputName;
-  Payload->TryGetStringField(TEXT("targetInputPin"), TargetInputName);
-  if (TargetInputName.IsEmpty()) Payload->TryGetStringField(TEXT("targetPin"), TargetInputName);
-  if (TargetInputName.IsEmpty()) Payload->TryGetStringField(TEXT("inputName"), TargetInputName);
-  FExpressionInput* TargetInput = McpFindExpressionInputByName(Target, TargetInputName);
-  if (!TargetInput) {
-    SendAutomationError(Socket, RequestId, TEXT("Target input pin not found"), TEXT("INPUT_NOT_FOUND"));
-    return true;
-  }
-
-  UMaterialExpressionNamedRerouteUsage* Usage =
-      NewObject<UMaterialExpressionNamedRerouteUsage>(GraphOwner.GraphSource, UMaterialExpressionNamedRerouteUsage::StaticClass(), NAME_None, RF_Transactional);
-  Usage->Declaration = Declaration;
-  Usage->DeclarationGuid = Declaration->VariableGuid;
-  const FIntPoint Position = McpResolvePlacement(GraphOwner, Payload, Usage);
-  Usage->MaterialExpressionEditorX = Position.X;
-  Usage->MaterialExpressionEditorY = Position.Y;
-  McpAddExpressionToGraph(GraphOwner, Usage);
-  TargetInput->Expression = Usage;
-  TargetInput->OutputIndex = 0;
-
-  FString RebuildErr;
-  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
-
-  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
-  McpAddExpressionIdentity(GraphOwner, Usage, McpExpressionIndex(GraphOwner, Usage), Resp.ToSharedRef());
-  Resp->SetStringField(TEXT("targetInputPin"), TargetInputName);
-  Resp->SetNumberField(TEXT("targetExpressionIndex"), McpExpressionIndex(GraphOwner, Target));
-  SendAutomationResponse(Socket, RequestId, true, TEXT("Named reroute usage created"), Resp, FString());
-  return true;
-#else
-  SendAutomationResponse(Socket, RequestId, false, TEXT("use_named_reroute requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
-  return true;
-#endif
-}
-
-bool UMcpAutomationBridgeSubsystem::HandleReplaceLongConnectionWithNamedReroute(
-    const FString &RequestId, const FString &Action,
-    const TSharedPtr<FJsonObject> &Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket) {
-  const FString Lower = Action.ToLower();
-  if (!Lower.Equals(TEXT("replace_long_connection_with_named_reroute"), ESearchCase::IgnoreCase)) {
-    return false;
-  }
-
-#if WITH_EDITOR
-  if (!Payload.IsValid()) {
-    SendAutomationError(Socket, RequestId, TEXT("replace_long_connection_with_named_reroute payload missing"), TEXT("INVALID_PAYLOAD"));
-    return true;
-  }
-
-  FString MaterialPath, RerouteName;
-  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
-      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
-    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-  if (!Payload->TryGetStringField(TEXT("name"), RerouteName) || RerouteName.IsEmpty()) {
-    SendAutomationError(Socket, RequestId, TEXT("name is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  FMcpMaterialGraphOwner GraphOwner;
-  FString GraphOwnerError;
-  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
-    SendAutomationError(Socket, RequestId, GraphOwnerError,
-                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
-    return true;
-  }
-  if (GraphOwner.bReadOnly) {
-    SendAutomationError(Socket, RequestId, TEXT("Cannot edit named reroutes on a MaterialFunctionInstance - edit the parent function instead"), TEXT("UNSUPPORTED_OPERATION"));
-    return true;
-  }
-
-  UMaterialExpression* Source = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("sourceExpressionIndex"), TEXT("sourceNodeId"), TEXT("sourceExpressionPath"));
-  UMaterialExpression* Target = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("targetExpressionIndex"), TEXT("targetNodeId"), TEXT("targetExpressionPath"));
-  if (!Source || !Target) {
-    SendAutomationError(Socket, RequestId, TEXT("Source or target node not found"), TEXT("NODE_NOT_FOUND"));
-    return true;
-  }
-
-  FString TargetInputName;
-  Payload->TryGetStringField(TEXT("targetInputPin"), TargetInputName);
-  if (TargetInputName.IsEmpty()) Payload->TryGetStringField(TEXT("targetPin"), TargetInputName);
-  if (TargetInputName.IsEmpty()) Payload->TryGetStringField(TEXT("inputName"), TargetInputName);
-  FExpressionInput* TargetInput = McpFindExpressionInputByName(Target, TargetInputName);
-  if (!TargetInput) {
-    SendAutomationError(Socket, RequestId, TEXT("Target input pin not found"), TEXT("INPUT_NOT_FOUND"));
-    return true;
-  }
-
-  double MinDistance = 0.0;
-  Payload->TryGetNumberField(TEXT("minDistance"), MinDistance);
-  const int32 Distance = FMath::Abs(Source->MaterialExpressionEditorX - Target->MaterialExpressionEditorX);
-  if (MinDistance > 0.0 && Distance < MinDistance) {
-    SendAutomationError(Socket, RequestId, TEXT("Connection is shorter than minDistance"), TEXT("DISTANCE_BELOW_THRESHOLD"));
-    return true;
-  }
-
-  int32 SourceOutputIndex = TargetInput->OutputIndex;
-  Payload->TryGetNumberField(TEXT("sourceOutputIndex"), SourceOutputIndex);
-
-  UMaterialExpressionNamedRerouteDeclaration* Declaration =
-      NewObject<UMaterialExpressionNamedRerouteDeclaration>(GraphOwner.GraphSource, UMaterialExpressionNamedRerouteDeclaration::StaticClass(), NAME_None, RF_Transactional);
-  Declaration->Name = FName(*RerouteName);
-  Declaration->Input.Expression = Source;
-  Declaration->Input.OutputIndex = SourceOutputIndex;
-  Declaration->MaterialExpressionEditorX = Source->MaterialExpressionEditorX + McpEstimateExpressionSize(Source).X + 220;
-  Declaration->MaterialExpressionEditorY = Source->MaterialExpressionEditorY;
-  const FIntPoint DeclarationPos = McpFindFreePosition(GraphOwner, FIntPoint(Declaration->MaterialExpressionEditorX, Declaration->MaterialExpressionEditorY), McpEstimateExpressionSize(Declaration));
-  Declaration->MaterialExpressionEditorX = DeclarationPos.X;
-  Declaration->MaterialExpressionEditorY = DeclarationPos.Y;
-  McpAddExpressionToGraph(GraphOwner, Declaration);
-
-  UMaterialExpressionNamedRerouteUsage* Usage =
-      NewObject<UMaterialExpressionNamedRerouteUsage>(GraphOwner.GraphSource, UMaterialExpressionNamedRerouteUsage::StaticClass(), NAME_None, RF_Transactional);
-  Usage->Declaration = Declaration;
-  Usage->DeclarationGuid = Declaration->VariableGuid;
-  Usage->MaterialExpressionEditorX = Target->MaterialExpressionEditorX - 260;
-  Usage->MaterialExpressionEditorY = Target->MaterialExpressionEditorY;
-  const FIntPoint UsagePos = McpFindFreePosition(GraphOwner, FIntPoint(Usage->MaterialExpressionEditorX, Usage->MaterialExpressionEditorY), McpEstimateExpressionSize(Usage));
-  Usage->MaterialExpressionEditorX = UsagePos.X;
-  Usage->MaterialExpressionEditorY = UsagePos.Y;
-  McpAddExpressionToGraph(GraphOwner, Usage);
-  TargetInput->Expression = Usage;
-  TargetInput->OutputIndex = 0;
-
-  FString RebuildErr;
-  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
-
-  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
-  Resp->SetStringField(TEXT("rerouteName"), Declaration->Name.ToString());
-  Resp->SetStringField(TEXT("rerouteGuid"), Declaration->VariableGuid.ToString());
-  Resp->SetNumberField(TEXT("declarationExpressionIndex"), McpExpressionIndex(GraphOwner, Declaration));
-  Resp->SetNumberField(TEXT("usageExpressionIndex"), McpExpressionIndex(GraphOwner, Usage));
-  Resp->SetNumberField(TEXT("sourceExpressionIndex"), McpExpressionIndex(GraphOwner, Source));
-  Resp->SetNumberField(TEXT("targetExpressionIndex"), McpExpressionIndex(GraphOwner, Target));
-  Resp->SetStringField(TEXT("targetInputPin"), TargetInputName);
-  SendAutomationResponse(Socket, RequestId, true, TEXT("Long material connection replaced with named reroute"), Resp, FString());
-  return true;
-#else
-  SendAutomationResponse(Socket, RequestId, false, TEXT("replace_long_connection_with_named_reroute requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
-  return true;
-#endif
-}
-
-bool UMcpAutomationBridgeSubsystem::HandleAlignMaterialNodes(
-    const FString &RequestId, const FString &Action,
-    const TSharedPtr<FJsonObject> &Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket) {
-  const FString Lower = Action.ToLower();
-  if (!Lower.Equals(TEXT("align_material_nodes"), ESearchCase::IgnoreCase)) {
-    return false;
-  }
-
-#if WITH_EDITOR
-  if (!Payload.IsValid()) {
-    SendAutomationError(Socket, RequestId, TEXT("align_material_nodes payload missing"), TEXT("INVALID_PAYLOAD"));
-    return true;
-  }
-
-  FString Backend = TEXT("native");
-  Payload->TryGetStringField(TEXT("backend"), Backend);
-
-  FString MaterialPath, Operation;
-  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
-      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
-    SendAutomationError(Socket, RequestId, TEXT("assetPath or materialPath is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-  if (!Payload->TryGetStringField(TEXT("operation"), Operation) || Operation.IsEmpty()) {
-    SendAutomationError(Socket, RequestId, TEXT("operation is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
-  if (!Payload->TryGetArrayField(TEXT("nodes"), Nodes) || !Nodes || Nodes->Num() < 2) {
-    SendAutomationError(Socket, RequestId, TEXT("nodes array with at least two nodes is required"), TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  FMcpMaterialGraphOwner GraphOwner;
-  FString GraphOwnerError;
-  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError)) {
-    SendAutomationError(Socket, RequestId, GraphOwnerError,
-                        GraphOwnerError.Contains(TEXT("not found")) ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
-    return true;
-  }
-
-  TArray<UMaterialExpression*> Resolved;
-  for (const TSharedPtr<FJsonValue>& NodeValue : *Nodes) {
-    const TSharedPtr<FJsonObject>* NodeObj = nullptr;
-    if (NodeValue.IsValid() && NodeValue->TryGetObject(NodeObj) && NodeObj) {
-      if (UMaterialExpression* Expr = McpFindGraphExpressionFromPayload(GraphOwner, *NodeObj)) {
-        Resolved.Add(Expr);
-      }
-    }
-  }
-  if (Resolved.Num() < 2) {
-    SendAutomationError(Socket, RequestId, TEXT("Fewer than two nodes could be resolved"), TEXT("NODE_NOT_FOUND"));
-    return true;
-  }
-
-  if (Backend.Equals(TEXT("graph_editor"), ESearchCase::IgnoreCase)) {
-    UEdGraph* Graph = nullptr;
-    TArray<UEdGraphNode*> GraphNodes;
-    for (UMaterialExpression* Expr : Resolved) {
-      UEdGraphNode* GraphNode = Expr ? Expr->GraphNode : nullptr;
-      if (!GraphNode) {
-        SendAutomationError(Socket, RequestId, TEXT("Selected material expression does not have a graph editor node"), TEXT("GRAPH_EDITOR_NODE_NOT_FOUND"));
-        return true;
-      }
-      UEdGraph* NodeGraph = GraphNode->GetGraph();
-      if (!NodeGraph) {
-        SendAutomationError(Socket, RequestId, TEXT("Selected material expression graph node is not attached to a graph"), TEXT("GRAPH_EDITOR_NODE_NOT_FOUND"));
-        return true;
-      }
-      if (!Graph) {
-        Graph = NodeGraph;
-      } else if (Graph != NodeGraph) {
-        SendAutomationError(Socket, RequestId, TEXT("Selected material expressions are not in the same graph editor"), TEXT("INVALID_ARGUMENT"));
-        return true;
-      }
-      GraphNodes.Add(GraphNode);
-    }
-
-    TSharedPtr<SGraphEditor> GraphEditor = SGraphEditor::FindGraphEditorForGraph(Graph);
-    if (!GraphEditor.IsValid()) {
-      SendAutomationError(Socket, RequestId, TEXT("No open graph editor widget found for the requested material graph"), TEXT("GRAPH_EDITOR_UNAVAILABLE"));
-      return true;
-    }
-
-    const FGraphPanelSelectionSet PreviousSelection = GraphEditor->GetSelectedNodes();
-    GraphEditor->ClearSelectionSet();
-    for (UEdGraphNode* GraphNode : GraphNodes) {
-      GraphEditor->SetNodeSelection(GraphNode, true);
-    }
-
-    if (Operation.Equals(TEXT("align_left"), ESearchCase::IgnoreCase)) {
-      GraphEditor->OnAlignLeft();
-    } else if (Operation.Equals(TEXT("align_right"), ESearchCase::IgnoreCase)) {
-      GraphEditor->OnAlignRight();
-    } else if (Operation.Equals(TEXT("align_top"), ESearchCase::IgnoreCase)) {
-      GraphEditor->OnAlignTop();
-    } else if (Operation.Equals(TEXT("align_bottom"), ESearchCase::IgnoreCase)) {
-      GraphEditor->OnAlignBottom();
-    } else if (Operation.Equals(TEXT("align_center"), ESearchCase::IgnoreCase)) {
-      GraphEditor->OnAlignCenter();
-    } else if (Operation.Equals(TEXT("align_middle"), ESearchCase::IgnoreCase)) {
-      GraphEditor->OnAlignMiddle();
-    } else if (Operation.Equals(TEXT("distribute_horizontal"), ESearchCase::IgnoreCase)) {
-      GraphEditor->OnDistributeNodesH();
-    } else if (Operation.Equals(TEXT("distribute_vertical"), ESearchCase::IgnoreCase)) {
-      GraphEditor->OnDistributeNodesV();
-    } else if (Operation.Equals(TEXT("straighten_connections"), ESearchCase::IgnoreCase)) {
-      GraphEditor->OnStraightenConnections();
-    } else {
-      GraphEditor->ClearSelectionSet();
-      for (UObject* SelectedObject : PreviousSelection) {
-        if (UEdGraphNode* PreviousNode = Cast<UEdGraphNode>(SelectedObject)) {
-          GraphEditor->SetNodeSelection(PreviousNode, true);
-        }
-      }
-      SendAutomationError(Socket, RequestId, TEXT("Unsupported alignment operation"), TEXT("INVALID_ARGUMENT"));
-      return true;
-    }
-
-    GraphEditor->ClearSelectionSet();
-    for (UObject* SelectedObject : PreviousSelection) {
-      if (UEdGraphNode* PreviousNode = Cast<UEdGraphNode>(SelectedObject)) {
-        GraphEditor->SetNodeSelection(PreviousNode, true);
-      }
-    }
-
-    FString RebuildErr;
-    McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
-    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-    McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
-    Resp->SetStringField(TEXT("backend"), TEXT("graph_editor"));
-    Resp->SetStringField(TEXT("operation"), Operation);
-    Resp->SetNumberField(TEXT("affectedNodeCount"), Resolved.Num());
-    SendAutomationResponse(Socket, RequestId, true, TEXT("Material nodes aligned with graph editor"), Resp, FString());
-    return true;
-  }
-
-  int32 MinX = TNumericLimits<int32>::Max(), MinY = TNumericLimits<int32>::Max();
-  int32 MaxX = TNumericLimits<int32>::Min(), MaxY = TNumericLimits<int32>::Min();
-  for (UMaterialExpression* Expr : Resolved) {
-    const FIntPoint Size = McpEstimateExpressionSize(Expr);
-    MinX = FMath::Min(MinX, Expr->MaterialExpressionEditorX);
-    MinY = FMath::Min(MinY, Expr->MaterialExpressionEditorY);
-    MaxX = FMath::Max(MaxX, Expr->MaterialExpressionEditorX + Size.X);
-    MaxY = FMath::Max(MaxY, Expr->MaterialExpressionEditorY + Size.Y);
-  }
-
-  Resolved.Sort([](const UMaterialExpression& A, const UMaterialExpression& B) {
-    return A.MaterialExpressionEditorX == B.MaterialExpressionEditorX
-        ? A.MaterialExpressionEditorY < B.MaterialExpressionEditorY
-        : A.MaterialExpressionEditorX < B.MaterialExpressionEditorX;
-  });
-
-  for (int32 i = 0; i < Resolved.Num(); ++i) {
-    UMaterialExpression* Expr = Resolved[i];
-    const FIntPoint Size = McpEstimateExpressionSize(Expr);
-    Expr->Modify();
-    if (Operation.Equals(TEXT("align_left"), ESearchCase::IgnoreCase)) {
-      Expr->MaterialExpressionEditorX = MinX;
-    } else if (Operation.Equals(TEXT("align_right"), ESearchCase::IgnoreCase)) {
-      Expr->MaterialExpressionEditorX = MaxX - Size.X;
-    } else if (Operation.Equals(TEXT("align_top"), ESearchCase::IgnoreCase)) {
-      Expr->MaterialExpressionEditorY = MinY;
-    } else if (Operation.Equals(TEXT("align_bottom"), ESearchCase::IgnoreCase)) {
-      Expr->MaterialExpressionEditorY = MaxY - Size.Y;
-    } else if (Operation.Equals(TEXT("align_center"), ESearchCase::IgnoreCase)) {
-      Expr->MaterialExpressionEditorX = (MinX + MaxX - Size.X) / 2;
-    } else if (Operation.Equals(TEXT("align_middle"), ESearchCase::IgnoreCase)) {
-      Expr->MaterialExpressionEditorY = (MinY + MaxY - Size.Y) / 2;
-    } else if (Operation.Equals(TEXT("distribute_horizontal"), ESearchCase::IgnoreCase) && Resolved.Num() > 2) {
-      Expr->MaterialExpressionEditorX = MinX + ((MaxX - MinX) * i / (Resolved.Num() - 1));
-    } else if (Operation.Equals(TEXT("distribute_vertical"), ESearchCase::IgnoreCase) && Resolved.Num() > 2) {
-      Expr->MaterialExpressionEditorY = MinY + ((MaxY - MinY) * i / (Resolved.Num() - 1));
-    } else if (Operation.Equals(TEXT("straighten_connections"), ESearchCase::IgnoreCase)) {
-      Expr->MaterialExpressionEditorY = MinY;
-    }
-  }
-
-  FString RebuildErr;
-  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
-  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
-  Resp->SetStringField(TEXT("backend"), TEXT("native"));
-  Resp->SetStringField(TEXT("operation"), Operation);
-  Resp->SetNumberField(TEXT("affectedNodeCount"), Resolved.Num());
-  SendAutomationResponse(Socket, RequestId, true, TEXT("Material nodes aligned"), Resp, FString());
-  return true;
-#else
-  SendAutomationResponse(Socket, RequestId, false, TEXT("align_material_nodes requires editor build"), nullptr, TEXT("NOT_IMPLEMENTED"));
-  return true;
-#endif
-}
+// HandleCreateMaterialComment       - moved to McpAutomationBridge_Material_Comments.cpp (D.2)
+// HandleWrapMaterialNodesInComment   - moved to McpAutomationBridge_Material_Comments.cpp (D.2)
+
+// HandleCreateNamedReroute                    - moved to McpAutomationBridge_Material_NamedReroutes.cpp (D.2)
+// HandleUseNamedReroute                       - moved to McpAutomationBridge_Material_NamedReroutes.cpp (D.2)
+// HandleReplaceLongConnectionWithNamedReroute - moved to McpAutomationBridge_Material_NamedReroutes.cpp (D.2)
+// HandleAlignMaterialNodes                    - moved to McpAutomationBridge_Material_NodePositioning.cpp (D.1)
 
 bool UMcpAutomationBridgeSubsystem::HandleGetMaterialInstanceInfo(
     const FString &RequestId, const FString &Action,

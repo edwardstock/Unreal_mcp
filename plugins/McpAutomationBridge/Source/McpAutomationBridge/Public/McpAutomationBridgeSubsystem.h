@@ -527,14 +527,12 @@ private:
   HandleAddMaterialNode(const FString &RequestId, const FString &Action,
                         const TSharedPtr<FJsonObject> &Payload,
                         TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  // D.1: canonical plural form; replaces HandleSetMaterialNodePosition and
+  // HandleBulkSetMaterialNodePositions.
   bool
-  HandleSetMaterialNodePosition(const FString &RequestId, const FString &Action,
-                                const TSharedPtr<FJsonObject> &Payload,
-                                TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool
-  HandleBulkSetMaterialNodePositions(const FString &RequestId, const FString &Action,
-                                     const TSharedPtr<FJsonObject> &Payload,
-                                     TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  HandleSetMaterialNodePositions(const FString &RequestId, const FString &Action,
+                                 const TSharedPtr<FJsonObject> &Payload,
+                                 TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
   bool
   HandleConnectMaterialPins(const FString &RequestId, const FString &Action,
                             const TSharedPtr<FJsonObject> &Payload,

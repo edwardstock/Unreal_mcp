@@ -217,7 +217,19 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_NodeOps(
   }
 
   if (SubAction == TEXT("move_material_node")) {
-    return HandleSetMaterialNodePosition(RequestId, TEXT("move_material_node"), Payload, Socket);
+    // D.1: forward to canonical plural handler with a synthesized single-item nodes[]
+    // (the legacy singular handler has been removed).
+    TSharedPtr<FJsonObject> Forward = MakeShared<FJsonObject>();
+    FString AssetPath;
+    if (Payload->TryGetStringField(TEXT("assetPath"), AssetPath)) {
+      Forward->SetStringField(TEXT("assetPath"), AssetPath);
+    } else if (Payload->TryGetStringField(TEXT("materialPath"), AssetPath)) {
+      Forward->SetStringField(TEXT("materialPath"), AssetPath);
+    }
+    TArray<TSharedPtr<FJsonValue>> NodesArray;
+    NodesArray.Add(MakeShared<FJsonValueObject>(Payload));
+    Forward->SetArrayField(TEXT("nodes"), NodesArray);
+    return HandleSetMaterialNodePositions(RequestId, TEXT("set_material_node_positions"), Forward, Socket);
   }
 
   if (SubAction == TEXT("remove_material_node")) {
