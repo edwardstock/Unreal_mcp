@@ -415,6 +415,53 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     }
   }
 
+  // F.4: 7 plural-batched creation actions.
+  // All live in McpAutomationBridge_Material_Creation.cpp.
+  {
+    extern bool McpHandle_CreateMaterials(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_CreateMaterialInstances(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_CreateMaterialFunctions(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_CreateMaterialFunctionInstances(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_CreateLandscapeMaterials(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_CreateDecalMaterials(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_CreatePostProcessMaterials(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    if (SubAction == TEXT("create_materials")) {
+      return McpHandle_CreateMaterials(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("create_material_instances")) {
+      return McpHandle_CreateMaterialInstances(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("create_material_functions")) {
+      return McpHandle_CreateMaterialFunctions(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("create_material_function_instances")) {
+      return McpHandle_CreateMaterialFunctionInstances(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("create_landscape_materials")) {
+      return McpHandle_CreateLandscapeMaterials(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("create_decal_materials")) {
+      return McpHandle_CreateDecalMaterials(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("create_post_process_materials")) {
+      return McpHandle_CreatePostProcessMaterials(this, RequestId, Payload, Socket);
+    }
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {
