@@ -295,6 +295,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     return McpHandle_FindMaterialExpressions(this, RequestId, Payload, Socket);
   }
 
+  // E.2: list_material_expression_classes - discovery action.
+  // Lives in McpAutomationBridge_Material_GraphReads.cpp.
+  extern bool McpHandle_ListMaterialExpressionClasses(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("list_material_expression_classes")) {
+    return McpHandle_ListMaterialExpressionClasses(this, RequestId, Payload, Socket);
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {

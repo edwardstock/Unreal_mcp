@@ -1205,3 +1205,270 @@ bool McpHandle_FindMaterialExpressions(
     return true;
 #endif
 }
+
+// =============================================================================
+// E.2 - list_material_expression_classes discovery action.
+// Spec: docs/superpowers/specs/2026-05-07-mcp-material-tools-redesign-design.md (sec 8a)
+//
+// Returns the cached FMcpMaterialExpressionCatalog filtered by optional `filter`
+// (Contains, case-insensitive on class name) and `category` (UE menu category,
+// case-insensitive exact match). Always emits the static material root pin
+// schema (sentinel + aliases + pins) so the agent gets the catalog and the root
+// addressing in a single round-trip.
+// =============================================================================
+#if WITH_EDITOR
+namespace
+{
+
+// Spec sec 8a: 13 root pins, in declared order.
+struct FMcpRootPinSpec
+{
+    const TCHAR* Name;
+    const TCHAR* Type;
+    const TCHAR* ApplicableWhen; // nullptr when always applicable
+};
+
+static const FMcpRootPinSpec GMcpRootPinSpecs[] = {
+    { TEXT("BaseColor"),           TEXT("FVector3"),             nullptr },
+    { TEXT("Metallic"),            TEXT("FScalar"),              nullptr },
+    { TEXT("Roughness"),           TEXT("FScalar"),              nullptr },
+    { TEXT("Specular"),            TEXT("FScalar"),              nullptr },
+    { TEXT("Normal"),              TEXT("FVector3"),             nullptr },
+    { TEXT("EmissiveColor"),       TEXT("FVector3"),             nullptr },
+    { TEXT("Opacity"),             TEXT("FScalar"),              TEXT("blendMode in [Translucent, AlphaComposite]") },
+    { TEXT("OpacityMask"),         TEXT("FScalar"),              TEXT("blendMode in [Masked]") },
+    { TEXT("WorldPositionOffset"), TEXT("FVector3"),             nullptr },
+    { TEXT("Refraction"),          TEXT("FVector3"),             nullptr },
+    { TEXT("AmbientOcclusion"),    TEXT("FScalar"),              nullptr },
+    { TEXT("PixelDepthOffset"),    TEXT("FScalar"),              nullptr },
+    { TEXT("MaterialAttributes"),  TEXT("FMaterialAttributes"),  TEXT("materialAttributesMode = true") },
+};
+
+TArray<TSharedPtr<FJsonValue>> McpBuildMaterialRootPinsJson()
+{
+    TArray<TSharedPtr<FJsonValue>> Out;
+    Out.Reserve(UE_ARRAY_COUNT(GMcpRootPinSpecs));
+    for (const FMcpRootPinSpec& P : GMcpRootPinSpecs)
+    {
+        TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.Name);
+        Obj->SetStringField(TEXT("type"), P.Type);
+        if (P.ApplicableWhen)
+        {
+            Obj->SetStringField(TEXT("applicableWhen"), P.ApplicableWhen);
+        }
+        Out.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    return Out;
+}
+
+// Aggregate the union of categories the catalog has registered. Walks the
+// catalog's full class list and unions GetCategories(class). Sorted ascending
+// for deterministic output.
+TArray<FString> McpCollectAllCategories(const FMcpMaterialExpressionCatalog& Cat)
+{
+    TSet<FString> Set;
+    for (const FString& ClassName : Cat.GetAllClasses())
+    {
+        if (const TArray<FString>* Cats = Cat.GetCategories(ClassName))
+        {
+            for (const FString& C : *Cats)
+            {
+                if (!C.IsEmpty()) Set.Add(C);
+            }
+        }
+    }
+    TArray<FString> Out = Set.Array();
+    Out.Sort();
+    return Out;
+}
+
+// Case-insensitive exact-match against the class's category list.
+bool McpClassMatchesCategory(
+    const FMcpMaterialExpressionCatalog& Cat,
+    const FString& ClassName,
+    const FString& Category)
+{
+    const TArray<FString>* Cats = Cat.GetCategories(ClassName);
+    if (!Cats) return false;
+    for (const FString& C : *Cats)
+    {
+        if (C.Equals(Category, ESearchCase::IgnoreCase)) return true;
+    }
+    return false;
+}
+
+} // namespace
+#endif // WITH_EDITOR
+
+bool McpHandle_ListMaterialExpressionClasses(
+    UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket)
+{
+    if (!Sub)
+    {
+        return true;
+    }
+
+#if WITH_EDITOR
+    const FMcpMaterialExpressionCatalog& Cat = FMcpMaterialExpressionCatalog::Get();
+
+    // Optional filters
+    FString Filter;
+    FString Category;
+    if (Payload.IsValid())
+    {
+        Payload->TryGetStringField(TEXT("filter"), Filter);
+        Payload->TryGetStringField(TEXT("category"), Category);
+    }
+
+    // Aggregate categories up front; needed for both INVALID_CATEGORY error
+    // path and the response payload.
+    const TArray<FString> AllCategories = McpCollectAllCategories(Cat);
+
+    // Validate `category` against the registered set (case-insensitive).
+    if (!Category.IsEmpty())
+    {
+        bool bKnown = false;
+        for (const FString& C : AllCategories)
+        {
+            if (C.Equals(Category, ESearchCase::IgnoreCase)) { bKnown = true; break; }
+        }
+        if (!bKnown)
+        {
+            // Build "[a, b, c]" available list in the message.
+            FString List;
+            for (int32 i = 0; i < AllCategories.Num(); ++i)
+            {
+                if (i > 0) List += TEXT(", ");
+                List += AllCategories[i];
+            }
+            const FString Message = FString::Printf(
+                TEXT("Unknown category '%s'. Available: [%s]"),
+                *Category, *List);
+            Sub->SendAutomationError(Socket, RequestId, Message, TEXT("INVALID_CATEGORY"));
+            return true;
+        }
+    }
+
+    // Walk catalog, apply both filters with AND semantics.
+    TArray<TSharedPtr<FJsonValue>> Classes;
+    Classes.Reserve(Cat.GetAllClasses().Num());
+
+    for (const FString& ClassName : Cat.GetAllClasses())
+    {
+        if (!Filter.IsEmpty() && !ClassName.Contains(Filter, ESearchCase::IgnoreCase))
+        {
+            continue;
+        }
+        if (!Category.IsEmpty() && !McpClassMatchesCategory(Cat, ClassName, Category))
+        {
+            continue;
+        }
+
+        TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+        Entry->SetStringField(TEXT("nodeType"), ClassName);
+
+        // Category: spec shows a single string. Use the first registered category
+        // as the canonical one; classes can have multiple in MenuCategories metadata
+        // but the discovery payload picks the primary.
+        if (const TArray<FString>* Cats = Cat.GetCategories(ClassName))
+        {
+            if (Cats->Num() > 0)
+            {
+                Entry->SetStringField(TEXT("category"), (*Cats)[0]);
+            }
+        }
+
+        Entry->SetStringField(TEXT("description"), Cat.GetDescription(ClassName));
+
+        // applicableFields[] - always emit (may be empty for unusual classes).
+        TArray<TSharedPtr<FJsonValue>> Fields;
+        if (const TArray<FString>* AppFields = Cat.GetApplicableFields(ClassName))
+        {
+            Fields.Reserve(AppFields->Num());
+            for (const FString& F : *AppFields)
+            {
+                Fields.Add(MakeShared<FJsonValueString>(F));
+            }
+        }
+        Entry->SetArrayField(TEXT("applicableFields"), Fields);
+
+        // fieldEnums{} - emit only when at least one applicable field has enum values.
+        TSharedPtr<FJsonObject> FieldEnums;
+        if (const TArray<FString>* AppFields = Cat.GetApplicableFields(ClassName))
+        {
+            for (const FString& F : *AppFields)
+            {
+                const TArray<FString>* EnumVals = Cat.GetFieldEnumValues(ClassName, F);
+                if (!EnumVals || EnumVals->Num() == 0) continue;
+                if (!FieldEnums.IsValid())
+                {
+                    FieldEnums = MakeShared<FJsonObject>();
+                }
+                TArray<TSharedPtr<FJsonValue>> Vs;
+                Vs.Reserve(EnumVals->Num());
+                for (const FString& V : *EnumVals)
+                {
+                    Vs.Add(MakeShared<FJsonValueString>(V));
+                }
+                FieldEnums->SetArrayField(F, Vs);
+            }
+        }
+        if (FieldEnums.IsValid())
+        {
+            Entry->SetObjectField(TEXT("fieldEnums"), FieldEnums);
+        }
+
+        Classes.Add(MakeShared<FJsonValueObject>(Entry));
+    }
+
+    // Build response.
+    TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+    Result->SetArrayField(TEXT("classes"), Classes);
+
+    TArray<TSharedPtr<FJsonValue>> CategoriesArr;
+    CategoriesArr.Reserve(AllCategories.Num());
+    for (const FString& C : AllCategories)
+    {
+        CategoriesArr.Add(MakeShared<FJsonValueString>(C));
+    }
+    Result->SetArrayField(TEXT("categories"), CategoriesArr);
+
+    Result->SetStringField(TEXT("materialRootSentinel"), TEXT("$material"));
+
+    TArray<TSharedPtr<FJsonValue>> Aliases;
+    Aliases.Add(MakeShared<FJsonValueString>(TEXT("$root")));
+    Aliases.Add(MakeShared<FJsonValueString>(TEXT("MaterialOutput")));
+    Aliases.Add(MakeShared<FJsonValueString>(TEXT("Material")));
+    Aliases.Add(MakeShared<FJsonValueString>(TEXT("Root")));
+    Result->SetArrayField(TEXT("materialRootSentinelAliases"), Aliases);
+
+    Result->SetArrayField(TEXT("materialRootPins"), McpBuildMaterialRootPinsJson());
+
+    Sub->SendAutomationResponse(Socket, RequestId, true,
+        TEXT("Material expression classes listed"), Result, FString());
+    return true;
+#else
+    Sub->SendAutomationResponse(Socket, RequestId, false,
+        TEXT("list_material_expression_classes requires editor build"),
+        nullptr, TEXT("NOT_IMPLEMENTED"));
+    return true;
+#endif
+}
+
+// Test forwarders (catalog-derived helpers visible to tests).
+#if WITH_EDITOR
+namespace McpListMaterialExpressionClassesForTests
+{
+    TArray<FString> CollectAllCategories()
+    {
+        return McpCollectAllCategories(FMcpMaterialExpressionCatalog::Get());
+    }
+
+    int32 MaterialRootPinCount()
+    {
+        return UE_ARRAY_COUNT(GMcpRootPinSpecs);
+    }
+}
+#endif
