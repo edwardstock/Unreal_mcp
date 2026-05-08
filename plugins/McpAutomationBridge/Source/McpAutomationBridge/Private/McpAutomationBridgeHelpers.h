@@ -3737,14 +3737,34 @@ static inline EMaterialSamplerType McpInferSamplerTypeFromTexture(const UTexture
     }
 }
 
-static inline EMaterialSamplerType McpParseSamplerTypeString(const FString& SamplerTypeStr)
+// Returns the EMaterialSamplerType for the given string (canonical names without SAMPLERTYPE_ prefix).
+// If OutRecognized is non-null, sets it to true on a known value, false on unknown/empty.
+// On unknown, returns SAMPLERTYPE_Color as a benign default; callers that care should check
+// the OutRecognized flag and handle the unknown case explicitly (e.g., raise UNKNOWN_SAMPLER_TYPE)
+static inline EMaterialSamplerType McpParseSamplerTypeString(
+    const FString& SamplerTypeStr, bool* OutRecognized = nullptr)
 {
-    if (SamplerTypeStr == TEXT("LinearColor")) return SAMPLERTYPE_LinearColor;
-    if (SamplerTypeStr == TEXT("Normal")) return SAMPLERTYPE_Normal;
-    if (SamplerTypeStr == TEXT("Masks")) return SAMPLERTYPE_Masks;
-    if (SamplerTypeStr == TEXT("Alpha")) return SAMPLERTYPE_Alpha;
-    if (SamplerTypeStr == TEXT("Grayscale")) return SAMPLERTYPE_Grayscale;
-    if (SamplerTypeStr == TEXT("LinearGrayscale")) return SAMPLERTYPE_LinearGrayscale;
+    auto Mark = [OutRecognized](bool b) { if (OutRecognized) *OutRecognized = b; };
+
+    if (SamplerTypeStr == TEXT("Color"))                  { Mark(true); return SAMPLERTYPE_Color; }
+    if (SamplerTypeStr == TEXT("LinearColor"))            { Mark(true); return SAMPLERTYPE_LinearColor; }
+    if (SamplerTypeStr == TEXT("Normal"))                 { Mark(true); return SAMPLERTYPE_Normal; }
+    if (SamplerTypeStr == TEXT("Masks"))                  { Mark(true); return SAMPLERTYPE_Masks; }
+    if (SamplerTypeStr == TEXT("Alpha"))                  { Mark(true); return SAMPLERTYPE_Alpha; }
+    if (SamplerTypeStr == TEXT("Grayscale"))              { Mark(true); return SAMPLERTYPE_Grayscale; }
+    if (SamplerTypeStr == TEXT("LinearGrayscale"))        { Mark(true); return SAMPLERTYPE_LinearGrayscale; }
+    if (SamplerTypeStr == TEXT("DistanceFieldFont"))      { Mark(true); return SAMPLERTYPE_DistanceFieldFont; }
+    if (SamplerTypeStr == TEXT("External"))               { Mark(true); return SAMPLERTYPE_External; }
+    if (SamplerTypeStr == TEXT("Data"))                   { Mark(true); return SAMPLERTYPE_Data; }
+    if (SamplerTypeStr == TEXT("VirtualColor"))           { Mark(true); return SAMPLERTYPE_VirtualColor; }
+    if (SamplerTypeStr == TEXT("VirtualLinearColor"))     { Mark(true); return SAMPLERTYPE_VirtualLinearColor; }
+    if (SamplerTypeStr == TEXT("VirtualGrayscale"))       { Mark(true); return SAMPLERTYPE_VirtualGrayscale; }
+    if (SamplerTypeStr == TEXT("VirtualLinearGrayscale")) { Mark(true); return SAMPLERTYPE_VirtualLinearGrayscale; }
+    if (SamplerTypeStr == TEXT("VirtualNormal"))          { Mark(true); return SAMPLERTYPE_VirtualNormal; }
+    if (SamplerTypeStr == TEXT("VirtualMasks"))           { Mark(true); return SAMPLERTYPE_VirtualMasks; }
+    if (SamplerTypeStr == TEXT("VirtualAlpha"))           { Mark(true); return SAMPLERTYPE_VirtualAlpha; }
+
+    Mark(false);
     return SAMPLERTYPE_Color;
 }
 
