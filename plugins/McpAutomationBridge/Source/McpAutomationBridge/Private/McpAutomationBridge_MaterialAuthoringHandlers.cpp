@@ -521,6 +521,35 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     }
   }
 
+  // D.1: position + align migrations.
+  // HandleSetMaterialNodePositions and HandleAlignMaterialNodes live in
+  // McpAutomationBridge_Material_NodePositioning.cpp as member functions.
+  if (SubAction == TEXT("set_material_node_positions")) {
+    return HandleSetMaterialNodePositions(RequestId, SubAction, Payload, Socket);
+  }
+  if (SubAction == TEXT("align_material_nodes")) {
+    return HandleAlignMaterialNodes(RequestId, SubAction, Payload, Socket);
+  }
+
+  // D.2: comments + named-reroute migrations.
+  // HandleCreateMaterialComment etc. live in McpAutomationBridge_Material_Comments.cpp
+  // and McpAutomationBridge_Material_NamedReroutes.cpp as member functions.
+  if (SubAction == TEXT("create_material_comments")) {
+    return HandleCreateMaterialComment(RequestId, SubAction, Payload, Socket);
+  }
+  if (SubAction == TEXT("wrap_material_nodes_in_comments")) {
+    return HandleWrapMaterialNodesInComment(RequestId, SubAction, Payload, Socket);
+  }
+  if (SubAction == TEXT("create_named_reroutes")) {
+    return HandleCreateNamedReroute(RequestId, SubAction, Payload, Socket);
+  }
+  if (SubAction == TEXT("use_named_reroutes")) {
+    return HandleUseNamedReroute(RequestId, SubAction, Payload, Socket);
+  }
+  if (SubAction == TEXT("replace_long_connections_with_named_reroutes")) {
+    return HandleReplaceLongConnectionWithNamedReroute(RequestId, SubAction, Payload, Socket);
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {
