@@ -547,31 +547,14 @@ private:
                                  const TSharedPtr<FJsonObject> &Payload,
                                  TSharedPtr<FMcpBridgeWebSocket>
                                      RequestingSocket);
-  bool
-  HandleGetMaterialNodeDetails(const FString &RequestId, const FString &Action,
-                               const TSharedPtr<FJsonObject> &Payload,
-                               TSharedPtr<FMcpBridgeWebSocket>
-                                   RequestingSocket);
+  // G.2: HandleGetMaterialNodeDetails, HandleFindMaterialExpressions,
+  // HandleGetMaterialExpressionDetails, HandleGetMaterialExpressionConnections,
+  // HandleGetLandscapeMaterialContext bodies removed - actions moved to
+  // manage_material (handlers in Material_*.cpp).
   bool
   HandleGetMaterialInstanceInfo(const FString &RequestId, const FString &Action,
                                 const TSharedPtr<FJsonObject> &Payload,
                                 TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool
-  HandleFindMaterialExpressions(const FString &RequestId, const FString &Action,
-                                const TSharedPtr<FJsonObject> &Payload,
-                                TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool
-  HandleGetMaterialExpressionDetails(const FString &RequestId, const FString &Action,
-                                     const TSharedPtr<FJsonObject> &Payload,
-                                     TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool
-  HandleGetMaterialExpressionConnections(const FString &RequestId, const FString &Action,
-                                         const TSharedPtr<FJsonObject> &Payload,
-                                         TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool
-  HandleGetLandscapeMaterialContext(const FString &RequestId, const FString &Action,
-                                    const TSharedPtr<FJsonObject> &Payload,
-                                    TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
   bool
   HandleCreateMaterialComment(const FString &RequestId, const FString &Action,
                               const TSharedPtr<FJsonObject> &Payload,
@@ -596,14 +579,8 @@ private:
   HandleAlignMaterialNodes(const FString &RequestId, const FString &Action,
                            const TSharedPtr<FJsonObject> &Payload,
                            TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool
-  HandleRebuildMaterial(const FString &RequestId, const FString &Action,
-                        const TSharedPtr<FJsonObject> &Payload,
-                        TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool
-  HandleCompileMaterialDiagnostics(const FString &RequestId, const FString &Action,
-                                   const TSharedPtr<FJsonObject> &Payload,
-                                   TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
+  // G.2: HandleRebuildMaterial, HandleCompileMaterialDiagnostics removed -
+  // actions moved to manage_material (handlers in Material_*.cpp).
   bool
   HandleManageMaterialDiagnosticsAction(const FString &RequestId, const FString &Action,
                                         const TSharedPtr<FJsonObject> &Payload,
@@ -1351,16 +1328,14 @@ private:
                                     const TSharedPtr<FJsonObject> &Payload,
                                     TSharedPtr<FMcpBridgeWebSocket> Socket);
 
-  // Asset handlers
+  // Asset handlers (manage_asset; bodies live in Asset_*.cpp).
+  // G.2: HandleCreateMaterial, HandleCreateMaterialInstance,
+  // HandleAddMaterialParameter, HandleListMaterialInstances,
+  // HandleResetInstanceParameters, HandleGetMaterialStats,
+  // HandleRebuildMaterial, HandleGetAsset, HandleCreateThumbnail removed.
   bool HandleImportAsset(const FString &RequestId,
                          const TSharedPtr<FJsonObject> &Payload,
                          TSharedPtr<FMcpBridgeWebSocket> Socket);
-  bool HandleCreateMaterial(const FString &RequestId,
-                            const TSharedPtr<FJsonObject> &Payload,
-                            TSharedPtr<FMcpBridgeWebSocket> Socket);
-  bool HandleCreateMaterialInstance(const FString &RequestId,
-                                    const TSharedPtr<FJsonObject> &Payload,
-                                    TSharedPtr<FMcpBridgeWebSocket> Socket);
   bool HandleCreateNiagaraSystemAsset(const FString &RequestId,
                                       const TSharedPtr<FJsonObject> &Payload,
                                       TSharedPtr<FMcpBridgeWebSocket> Socket);
@@ -1379,16 +1354,10 @@ private:
   bool HandleListAssets(const FString &RequestId,
                         const TSharedPtr<FJsonObject> &Payload,
                         TSharedPtr<FMcpBridgeWebSocket> Socket);
-  bool HandleGetAsset(const FString &RequestId,
-                      const TSharedPtr<FJsonObject> &Payload,
-                      TSharedPtr<FMcpBridgeWebSocket> Socket);
   bool HandleCreateFolder(const FString &RequestId,
                           const TSharedPtr<FJsonObject> &Payload,
                           TSharedPtr<FMcpBridgeWebSocket> Socket);
   bool HandleGetDependencies(const FString &RequestId,
-                             const TSharedPtr<FJsonObject> &Payload,
-                             TSharedPtr<FMcpBridgeWebSocket> Socket);
-  bool HandleCreateThumbnail(const FString &RequestId,
                              const TSharedPtr<FJsonObject> &Payload,
                              TSharedPtr<FMcpBridgeWebSocket> Socket);
   bool HandleSetTags(const FString &RequestId,
@@ -1406,24 +1375,13 @@ private:
   bool HandleValidateAsset(const FString &RequestId,
                            const TSharedPtr<FJsonObject> &Payload,
                            TSharedPtr<FMcpBridgeWebSocket> Socket);
-  bool HandleAddMaterialParameter(const FString &RequestId,
-                                  const TSharedPtr<FJsonObject> &Payload,
-                                  TSharedPtr<FMcpBridgeWebSocket> Socket);
-  bool HandleListMaterialInstances(const FString &RequestId,
-                                   const TSharedPtr<FJsonObject> &Payload,
-                                   TSharedPtr<FMcpBridgeWebSocket> Socket);
-  bool HandleResetInstanceParameters(const FString &RequestId,
-                                     const TSharedPtr<FJsonObject> &Payload,
-                                     TSharedPtr<FMcpBridgeWebSocket> Socket);
   bool HandleDoesAssetExist(const FString &RequestId,
                             const TSharedPtr<FJsonObject> &Payload,
                             TSharedPtr<FMcpBridgeWebSocket> Socket);
-  bool HandleGetMaterialStats(const FString &RequestId,
-                              const TSharedPtr<FJsonObject> &Payload,
-                              TSharedPtr<FMcpBridgeWebSocket> Socket);
-  bool HandleRebuildMaterial(const FString &RequestId,
-                             const TSharedPtr<FJsonObject> &Payload,
-                             TSharedPtr<FMcpBridgeWebSocket> Socket);
+  // G.2: create_render_targets (action) -> HandleCreateRenderTarget (handler).
+  bool HandleCreateRenderTarget(const FString &RequestId, const FString &Action,
+                                const TSharedPtr<FJsonObject> &Payload,
+                                TSharedPtr<FMcpBridgeWebSocket> Socket);
 
   // Lightweight snapshot cache for automation requests (e.g., create_snapshot)
   TMap<FString, FTransform> CachedActorSnapshots;
