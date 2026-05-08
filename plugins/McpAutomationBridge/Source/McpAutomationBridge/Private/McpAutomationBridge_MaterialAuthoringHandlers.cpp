@@ -304,6 +304,100 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     return McpHandle_ListMaterialExpressionClasses(this, RequestId, Payload, Socket);
   }
 
+  // F.1: typed setters + unified getters/resetters/clearers for material instance
+  // parameters. Lives in McpAutomationBridge_Material_InstanceParameters.cpp.
+  {
+    extern bool McpHandle_SetMaterialInstanceScalarParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_SetMaterialInstanceVectorParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_SetMaterialInstanceTextureParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_SetMaterialInstanceStaticSwitchParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_GetMaterialInstanceParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_ResetMaterialInstanceParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_ClearMaterialInstanceParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    if (SubAction == TEXT("set_material_instance_scalar_parameters")) {
+      return McpHandle_SetMaterialInstanceScalarParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("set_material_instance_vector_parameters")) {
+      return McpHandle_SetMaterialInstanceVectorParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("set_material_instance_texture_parameters")) {
+      return McpHandle_SetMaterialInstanceTextureParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("set_material_instance_static_switch_parameters")) {
+      return McpHandle_SetMaterialInstanceStaticSwitchParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("get_material_instance_parameters")) {
+      return McpHandle_GetMaterialInstanceParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("reset_material_instance_parameters")) {
+      return McpHandle_ResetMaterialInstanceParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("clear_material_instance_parameters")) {
+      return McpHandle_ClearMaterialInstanceParameters(this, RequestId, Payload, Socket);
+    }
+  }
+
+  // F.2: typed setters + unified getters/resetters/clearers for material function
+  // instance parameters. Lives in McpAutomationBridge_Material_FunctionInstanceParameters.cpp.
+  {
+    extern bool McpHandle_SetMaterialFunctionInstanceScalarParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_SetMaterialFunctionInstanceVectorParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_SetMaterialFunctionInstanceTextureParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_SetMaterialFunctionInstanceStaticSwitchParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_GetMaterialFunctionInstanceParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_ResetMaterialFunctionInstanceParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    extern bool McpHandle_ClearMaterialFunctionInstanceParameters(
+        UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+        const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+    if (SubAction == TEXT("set_material_function_instance_scalar_parameters")) {
+      return McpHandle_SetMaterialFunctionInstanceScalarParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("set_material_function_instance_vector_parameters")) {
+      return McpHandle_SetMaterialFunctionInstanceVectorParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("set_material_function_instance_texture_parameters")) {
+      return McpHandle_SetMaterialFunctionInstanceTextureParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("set_material_function_instance_static_switch_parameters")) {
+      return McpHandle_SetMaterialFunctionInstanceStaticSwitchParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("get_material_function_instance_parameters")) {
+      return McpHandle_GetMaterialFunctionInstanceParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("reset_material_function_instance_parameters")) {
+      return McpHandle_ResetMaterialFunctionInstanceParameters(this, RequestId, Payload, Socket);
+    }
+    if (SubAction == TEXT("clear_material_function_instance_parameters")) {
+      return McpHandle_ClearMaterialFunctionInstanceParameters(this, RequestId, Payload, Socket);
+    }
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {
