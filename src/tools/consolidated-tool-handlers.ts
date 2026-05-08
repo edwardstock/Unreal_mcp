@@ -116,8 +116,15 @@ function normalizeToolCall(
 ): NormalizedToolCall {
   let normalizedName = name;
   let action: string;
+  let normalizedArgs = args;
 
-  if (args && typeof args.action === 'string') {
+  // Primary: read subAction (the new canonical key per the redesign).
+  // Secondary: read args.action for callers and tools not yet migrated to subAction.
+  // The handler-level getAction() (further down this file) is strict on subAction;
+  // callers eventually need to migrate. This level just routes the call.
+  if (args && typeof args.subAction === 'string' && args.subAction.length > 0) {
+    action = args.subAction;
+  } else if (args && typeof args.action === 'string' && args.action.length > 0) {
     action = args.action;
   } else if (normalizedName === 'console_command') {
     normalizedName = 'system_control';
@@ -130,18 +137,20 @@ function normalizeToolCall(
   if (normalizedName === 'console_command') {
     normalizedName = 'system_control';
     action = 'console_command';
+    normalizedArgs = { ...normalizedArgs, action, subAction: action };
   }
   // manage_pipeline has its own handler registered - don't normalize to system_control
   // handlePipelineTools handles: run_ubt (local), list_categories/get_status (via system_control)
   if (normalizedName === 'manage_tests') {
     normalizedName = 'system_control';
     action = 'run_tests';
+    normalizedArgs = { ...normalizedArgs, action, subAction: action };
   }
 
   return {
     name: normalizedName,
     action,
-    args
+    args: normalizedArgs
   };
 }
 
