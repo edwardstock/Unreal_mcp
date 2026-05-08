@@ -387,7 +387,7 @@ bool McpHandle_AddFunctionInputs(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpAddFunctionInputs", "MCP add_function_inputs"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     UObject* MaterialOuter = Owner.GraphSource ? Owner.GraphSource : Owner.Asset;
     TArray<TSharedPtr<FJsonObject>> Mappings;
@@ -682,7 +682,7 @@ bool McpHandle_AddFunctionOutputs(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpAddFunctionOutputs", "MCP add_function_outputs"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     UObject* MaterialOuter = Owner.GraphSource ? Owner.GraphSource : Owner.Asset;
     TArray<TSharedPtr<FJsonObject>> Mappings;
@@ -965,7 +965,7 @@ bool McpHandle_UpdateFunctionInputs(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpUpdateFunctionInputs", "MCP update_function_inputs"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     TArray<TSharedPtr<FJsonObject>> ResultsJson;
 
@@ -1210,7 +1210,7 @@ bool McpHandle_UpdateFunctionOutputs(
 
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpUpdateFunctionOutputs", "MCP update_function_outputs"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     TArray<TSharedPtr<FJsonObject>> ResultsJson;
 
@@ -1441,7 +1441,7 @@ bool McpHandle_AddMaterialFunctionCalls(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpAddMaterialFunctionCalls", "MCP add_material_function_calls"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     UObject* MaterialOuter = Owner.GraphSource ? Owner.GraphSource : Owner.Asset;
     TArray<TSharedPtr<FJsonObject>> Mappings;
@@ -1961,7 +1961,7 @@ bool McpHandle_UpdateMaterialFunctionCalls(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpUpdateMaterialFunctionCalls", "MCP update_material_function_calls"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     TArray<TSharedPtr<FJsonObject>> ResultsJson;
     TArray<TSharedPtr<FJsonObject>> BrokenJson;

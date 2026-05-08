@@ -89,9 +89,115 @@ interface AssetOperationResponse {
   [key: string]: unknown;
 }
 
+const CANONICAL_MANAGE_ASSET_ACTIONS = new Set([
+  'list_assets',
+  'search_assets',
+  'assets_exist',
+  'import_assets',
+  'duplicate_assets',
+  'rename_assets',
+  'move_assets',
+  'delete_assets',
+  'create_folders',
+  'get_assets_dependencies',
+  'get_assets_graph',
+  'analyze_assets_graph',
+  'get_assets_metadata',
+  'set_assets_metadata',
+  'set_assets_tags',
+  'find_assets_by_tag',
+  'create_thumbnails',
+  'generate_lods',
+  'nanite_rebuild_meshes',
+  'validate_assets',
+  'fixup_redirectors',
+  'generate_assets_report',
+  'source_control_checkout_assets',
+  'source_control_submit_assets',
+  'get_assets_source_control_state',
+  'create_render_targets'
+]);
+
 export async function handleAssetTools(action: string, args: HandlerArgs, tools: ITools): Promise<Record<string, unknown>> {
   try {
-    switch (action) {
+    if (action === 'list_assets') {
+      const params = normalizeArgs(args, [
+        { key: 'path', aliases: ['directory', 'directoryPath', 'assetPath'], default: '/Game' },
+        { key: 'limit', default: 50 },
+        { key: 'offset', default: 0 },
+        { key: 'recursive', aliases: ['recursivePaths'], default: false },
+        { key: 'depth', default: undefined }
+      ]);
+
+      let path = extractOptionalString(params, 'path') ?? '/Game';
+      path = sanitizePath(path);
+
+      const limit = extractOptionalNumber(params, 'limit') ?? 50;
+      const offset = extractOptionalNumber(params, 'offset') ?? 0;
+      const recursive = extractOptionalBoolean(params, 'recursive') ?? false;
+      const depth = extractOptionalNumber(params, 'depth');
+
+      const effectiveRecursive = recursive === true || (depth !== undefined && depth > 0);
+
+      const res = await executeAutomationRequest(tools, 'manage_asset', {
+        path,
+        recursive: effectiveRecursive,
+        depth,
+        pagination: { limit, offset },
+        subAction: 'list_assets'
+      }) as AssetListResponse;
+
+      const assets: AssetListItem[] = (Array.isArray(res.assets) ? res.assets :
+        (Array.isArray(res.result) ? res.result : (res.result?.assets || [])));
+
+      const folders: string[] = Array.isArray(res.folders) ? res.folders : (res.result?.folders || []);
+
+      const totalCount = res.totalCount ?? res.result?.totalCount ?? assets.length;
+      const limitedAssets = assets.slice(0, limit);
+      const remaining = Math.max(0, totalCount - limit);
+
+      let message = `Found ${totalCount} assets`;
+      if (folders.length > 0) {
+        message += ` and ${folders.length} folders`;
+      }
+      message += `: ${limitedAssets.map((a) => a.path || a.package || a.name || 'unknown').join(', ')}`;
+
+      if (folders.length > 0 && limitedAssets.length < limit) {
+        const remainingLimit = limit - limitedAssets.length;
+        if (remainingLimit > 0) {
+          const limitedFolders = folders.slice(0, remainingLimit);
+          if (limitedAssets.length > 0) message += ', ';
+          message += `Folders: [${limitedFolders.join(', ')}]`;
+          if (folders.length > remainingLimit) message += '...';
+        }
+      }
+
+      if (remaining > 0) {
+        message += `... and ${remaining} others`;
+      }
+
+      return ResponseFactory.success({
+        assets: limitedAssets,
+        folders: folders,
+        totalCount: totalCount,
+        count: limitedAssets.length
+      }, message);
+    }
+
+    if (CANONICAL_MANAGE_ASSET_ACTIONS.has(action)) {
+      return await executeAutomationRequest(
+        tools,
+        'manage_asset',
+        { ...args, subAction: action }
+      ) as Record<string, unknown>;
+    }
+
+    let dispatchAction = action;
+    if (!CANONICAL_MANAGE_ASSET_ACTIONS.has(action)) {
+      dispatchAction = '__unknown_manage_asset_sub_action__';
+    }
+
+    switch (dispatchAction) {
       case 'list': {
         // Route through C++ HandleListAssets for proper asset enumeration
         const params = normalizeArgs(args, [
@@ -1081,12 +1187,12 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const argsTyped = args as AssetArgs;
 
         // Check for unknown/invalid action errors from C++ (UNKNOWN_ACTION or INVALID_SUBACTION)
-        if (errorCode === 'UNKNOWN_ACTION' || errorCode === 'INVALID_SUBACTION' ||
+        if (errorCode === 'UNKNOWN_ACTION' || errorCode === 'INVALID_SUBACTION' || errorCode === 'UNKNOWN_SUB_ACTION' ||
             message.toLowerCase().includes('unknown action') || message.toLowerCase().includes('unknown subaction')) {
           return cleanObject({
             success: false,
-            error: 'UNKNOWN_ACTION',
-            message: `Unknown asset action: ${action}`,
+            error: 'UNKNOWN_SUB_ACTION',
+            message: `Unknown manage_asset subAction: ${action}`,
             action: action || 'manage_asset',
             assetPath: argsTyped.assetPath ?? argsTyped.path
           });

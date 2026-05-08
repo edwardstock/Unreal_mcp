@@ -550,44 +550,11 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     return HandleReplaceLongConnectionWithNamedReroute(RequestId, SubAction, Payload, Socket);
   }
 
-  // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
-  // Each returns true if it consumed the request; false to fall through.
-  if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {
-    return true;
-  }
-  if (HandleAuthoring_NodeOps(SubAction, RequestId, Payload, Socket)) {
-    return true;
-  }
-  if (HandleAuthoring_MaterialCreation(SubAction, RequestId, Payload, Socket)) {
-    return true;
-  }
-  if (HandleAuthoring_MaterialProperties(SubAction, RequestId, Payload, Socket)) {
-    return true;
-  }
-  if (HandleAuthoring_TextureNodes(SubAction, RequestId, Payload, Socket)) {
-    return true;
-  }
-  if (HandleAuthoring_AdvancedNodes(SubAction, RequestId, Payload, Socket)) {
-    return true;
-  }
-  if (HandleAuthoring_FunctionAuthoring(SubAction, RequestId, Payload, Socket)) {
-    return true;
-  }
-  if (HandleAuthoring_SpecializedMaterials(SubAction, RequestId, Payload, Socket)) {
-    return true;
-  }
-  if (HandleAuthoring_MaterialInstances(SubAction, RequestId, Payload, Socket)) {
-    return true;
-  }
-  if (HandleAuthoring_FunctionInstances(SubAction, RequestId, Payload, Socket)) {
-    return true;
-  }
-
   // Unknown subAction
   SendAutomationError(
       Socket, RequestId,
       FString::Printf(TEXT("Unknown subAction: %s"), *SubAction),
-      TEXT("INVALID_SUBACTION"));
+      TEXT("UNKNOWN_SUB_ACTION"));
   return true;
 #else
   SendAutomationError(Socket, RequestId, TEXT("Editor only."),

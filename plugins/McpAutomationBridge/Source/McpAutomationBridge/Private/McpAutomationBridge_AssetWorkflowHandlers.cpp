@@ -951,9 +951,8 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
   FString Lower = Action.ToLower();
 
   // When the wrapping action is the generic "manage_asset" tool, the payload
-  // carries the canonical `subAction` field. For backward compatibility we
-  // also accept `action` (matching manage_material's symmetric handling), since
-  // some MCP clients still send the schema's legacy alias key.
+  // carries the canonical `subAction` field. The legacy `action` alias is a
+  // hard-break path for the material-tools redesign.
   if (Lower == TEXT("manage_asset")) {
     if (!Payload.IsValid()) {
       SendAutomationError(RequestingSocket, RequestId,
@@ -962,10 +961,8 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
       return true;
     }
     FString SubAction;
-    if ((!Payload->TryGetStringField(TEXT("subAction"), SubAction) ||
-         SubAction.IsEmpty()) &&
-        (!Payload->TryGetStringField(TEXT("action"), SubAction) ||
-         SubAction.IsEmpty())) {
+    if (!Payload->TryGetStringField(TEXT("subAction"), SubAction) ||
+        SubAction.IsEmpty()) {
       SendAutomationError(RequestingSocket, RequestId,
                           TEXT("Missing 'subAction' for manage_asset"),
                           TEXT("MISSING_SUB_ACTION"));
@@ -1061,7 +1058,7 @@ bool UMcpAutomationBridgeSubsystem::HandleAssetAction(
   {
     SendAutomationError(RequestingSocket, RequestId,
         FString::Printf(TEXT("Unknown subAction '%s' for manage_asset"), *Lower),
-        TEXT("INVALID_SUBACTION"));
+        TEXT("UNKNOWN_SUB_ACTION"));
     return true;
   }
 

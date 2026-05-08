@@ -46,6 +46,64 @@ function parseMaterialPath(fullPath: string | undefined): { name: string; path: 
   return { name, path };
 }
 
+const CANONICAL_MANAGE_MATERIAL_ACTIONS = new Set([
+  'create_materials',
+  'create_material_instances',
+  'create_material_functions',
+  'create_material_function_instances',
+  'create_landscape_materials',
+  'create_decal_materials',
+  'create_post_process_materials',
+  'set_blend_modes',
+  'set_shading_models',
+  'set_material_domains',
+  'set_material_attributes_modes',
+  'set_two_sided_flags',
+  'find_material_expressions',
+  'get_materials_info',
+  'get_material_stats',
+  'list_material_expression_classes',
+  'add_material_nodes',
+  'update_material_nodes',
+  'remove_material_nodes',
+  'connect_material_pins',
+  'break_material_connections',
+  'set_material_node_positions',
+  'align_material_nodes',
+  'create_material_comments',
+  'wrap_material_nodes_in_comments',
+  'create_named_reroutes',
+  'use_named_reroutes',
+  'replace_long_connections_with_named_reroutes',
+  'get_material_instance_parameters',
+  'reset_material_instance_parameters',
+  'clear_material_instance_parameters',
+  'set_material_instance_scalar_parameters',
+  'set_material_instance_vector_parameters',
+  'set_material_instance_texture_parameters',
+  'set_material_instance_static_switch_parameters',
+  'get_material_function_instance_parameters',
+  'reset_material_function_instance_parameters',
+  'clear_material_function_instance_parameters',
+  'set_material_function_instance_scalar_parameters',
+  'set_material_function_instance_vector_parameters',
+  'set_material_function_instance_texture_parameters',
+  'set_material_function_instance_static_switch_parameters',
+  'add_function_inputs',
+  'add_function_outputs',
+  'update_function_inputs',
+  'update_function_outputs',
+  'add_material_function_calls',
+  'update_material_function_calls',
+  'add_custom_expressions',
+  'update_custom_expressions',
+  'add_landscape_layers',
+  'configure_landscape_layer_blends',
+  'get_landscape_material_context',
+  'compile_materials',
+  'compile_materials_diagnostics'
+]);
+
 /**
  * Handle material actions
  */
@@ -55,7 +113,20 @@ export async function handleMaterialTools(
   tools: ITools
 ): Promise<Record<string, unknown>> {
   try {
-    switch (action) {
+    if (CANONICAL_MANAGE_MATERIAL_ACTIONS.has(action)) {
+      return await executeAutomationRequest(
+        tools,
+        TOOL_ACTIONS.MANAGE_MATERIAL,
+        { ...args, subAction: action }
+      ) as Record<string, unknown>;
+    }
+
+    let dispatchAction = action;
+    if (!CANONICAL_MANAGE_MATERIAL_ACTIONS.has(action)) {
+      dispatchAction = '__unknown_manage_material_sub_action__';
+    }
+
+    switch (dispatchAction) {
       // ===== Shim: create_material — parse materialPath into name+path =====
       case 'create_material': {
         const rawArgs = args as Record<string, unknown>;

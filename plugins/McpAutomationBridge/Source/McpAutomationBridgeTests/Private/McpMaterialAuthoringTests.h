@@ -250,6 +250,7 @@ bool FMcpMaterialTransactionUndoTest::RunTest(const FString& Parameters)
     {
         FScopedTransaction Transaction(NSLOCTEXT("McpTests", "AddExpressionTest", "Test: add expression"));
         MF->Modify();
+        MF->GetEditorOnlyData()->Modify();
         UMaterialExpressionCustom* Expr = NewObject<UMaterialExpressionCustom>(
             MF, UMaterialExpressionCustom::StaticClass(), NAME_None, RF_Transactional);
         Expr->Code = TEXT("return 1.0f;");

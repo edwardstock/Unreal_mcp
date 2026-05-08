@@ -116,8 +116,6 @@ public:
 		return FMcpSchemaBuilder()
 			.StringEnum(TEXT("subAction"), ManageMaterialActions,
 				TEXT("Canonical manage_material sub-action to perform."))
-			.StringEnum(TEXT("action"), ManageMaterialActions,
-				TEXT("Compatibility alias for subAction. New callers should use subAction."))
 
 			// Standard meta
 			.String(TEXT("assetPath"), TEXT("Asset path (e.g., /Game/Path/Asset)."))

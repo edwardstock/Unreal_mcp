@@ -69,8 +69,6 @@ public:
 		return FMcpSchemaBuilder()
 			.StringEnum(TEXT("subAction"), ActionEnum,
 				TEXT("Canonical manage_asset sub-action to perform."))
-			.StringEnum(TEXT("action"), ActionEnum,
-				TEXT("Compatibility alias for subAction. New callers should use subAction."))
 
 			// Single + batch asset path inputs
 			.String(TEXT("assetPath"), TEXT("Asset path (e.g., /Game/Path/Asset)."))

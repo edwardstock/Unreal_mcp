@@ -1182,9 +1182,10 @@ void FMcpNativeTransport::HandleToolsCall(
 		}
 	}
 
-	// Normalize: some handlers read "subAction" instead of "action".
-	// Ensure both fields exist so handlers find the value regardless of field name.
-	if (!Arguments->HasField(TEXT("subAction")) && Arguments->HasField(TEXT("action")))
+	// Normalize: some non-redesigned handlers read "subAction" instead of "action".
+	// manage_asset and manage_material intentionally hard-break the legacy action key.
+	if (ToolName != TEXT("manage_asset") && ToolName != TEXT("manage_material") &&
+		!Arguments->HasField(TEXT("subAction")) && Arguments->HasField(TEXT("action")))
 	{
 		FString ActionVal;
 		Arguments->TryGetStringField(TEXT("action"), ActionVal);

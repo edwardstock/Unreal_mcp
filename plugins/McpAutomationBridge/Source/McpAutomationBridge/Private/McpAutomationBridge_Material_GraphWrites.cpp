@@ -1169,7 +1169,7 @@ bool McpHandle_AddMaterialNodes(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpAddMaterialNodes", "MCP add_material_nodes"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     UObject* MaterialOuter = Owner.GraphSource ? Owner.GraphSource : Owner.Asset;
     TMap<FString, UMaterialExpression*> LocalIdToExpr;
@@ -1780,7 +1780,7 @@ bool McpHandle_UpdateMaterialNodes(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpUpdateMaterialNodes", "MCP update_material_nodes"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     TArray<TSharedPtr<FJsonObject>> ResultsJson;
     TArray<FMcpSamplerWarning>      SamplerWarnings;
@@ -2096,7 +2096,7 @@ bool McpHandle_RemoveMaterialNodes(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpRemoveMaterialNodes", "MCP remove_material_nodes"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     TArray<TSharedPtr<FJsonObject>> ResultsJson;
 
@@ -2271,7 +2271,7 @@ bool McpHandle_ConnectMaterialPins(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpConnectMaterialPins", "MCP connect_material_pins"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     int32 ConnectionsApplied = 0;
     for (const FMcpResolvedConnection& C : ResolvedConnections)
@@ -2876,7 +2876,7 @@ bool McpHandle_BreakMaterialConnections(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpBreakMaterialConnections", "MCP break_material_connections"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     TArray<TSharedPtr<FJsonObject>> ResultsJson;
     int32 ConnectionsBroken = 0;

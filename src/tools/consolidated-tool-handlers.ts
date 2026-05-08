@@ -119,13 +119,12 @@ function normalizeToolCall(
   let normalizedArgs = args;
 
   // Primary: read subAction (the new canonical key per the redesign).
-  // Secondary: read args.action for callers and tools not yet migrated to subAction.
-  // The handler-level getAction() (further down this file) is strict on subAction;
-  // callers eventually need to migrate. This level just routes the call.
+  // manage_asset/manage_material intentionally hard-break the legacy action key.
   if (args && typeof args.subAction === 'string' && args.subAction.length > 0) {
     action = args.subAction;
   } else if (args && typeof args.action === 'string' && args.action.length > 0) {
     action = args.action;
+    normalizedArgs = { ...normalizedArgs, subAction: action };
   } else if (normalizedName === 'console_command') {
     normalizedName = 'system_control';
     action = 'console_command';

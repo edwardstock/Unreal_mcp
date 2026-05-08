@@ -420,7 +420,7 @@ bool McpHandle_AddCustomExpressions(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpAddCustomExpressions", "MCP add_custom_expressions"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     UObject* MaterialOuter = Owner.GraphSource ? Owner.GraphSource : Owner.Asset;
     TArray<TSharedPtr<FJsonObject>> Mappings;
@@ -1223,7 +1223,7 @@ bool McpHandle_UpdateCustomExpressions(
     // Phase B: apply
     FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
         "McpUpdateCustomExpressions", "MCP update_custom_expressions"));
-    if (Owner.Asset) Owner.Asset->Modify();
+    McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     TArray<TSharedPtr<FJsonObject>> ResultsJson;
     TArray<TSharedPtr<FJsonObject>> BrokenJson;

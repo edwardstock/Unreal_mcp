@@ -37,7 +37,7 @@ describe('Asset Handlers Security', () => {
         };
 
         // handleAssetTools catches error and returns failure response
-        const result = await handleAssetTools('list', args, mockTools);
+        const result = await handleAssetTools('list_assets', args, mockTools);
 
         expect(result.success).toBe(false);
         expect(result.message).toMatch(/Path traversal/);
@@ -48,11 +48,12 @@ describe('Asset Handlers Security', () => {
     it('should default path to /Game if not provided or empty', async () => {
         const args = {};
 
-        await handleAssetTools('list', args, mockTools);
+        await handleAssetTools('list_assets', args, mockTools);
 
         const lastCall = mockTools.automationBridge.sendAutomationRequest.mock.lastCall;
-        expect(lastCall[0]).toBe('list');
+        expect(lastCall[0]).toBe('manage_asset');
         expect(lastCall[1].path).toBe('/Game');
+        expect(lastCall[1].subAction).toBe('list_assets');
     });
 
     it('should sanitize path by ensuring root prefix', async () => {
@@ -60,7 +61,7 @@ describe('Asset Handlers Security', () => {
             path: 'MyFolder'
         };
 
-        await handleAssetTools('list', args, mockTools);
+        await handleAssetTools('list_assets', args, mockTools);
 
         const lastCall = mockTools.automationBridge.sendAutomationRequest.mock.lastCall;
         expect(lastCall[1].path).toBe('/Game/MyFolder');

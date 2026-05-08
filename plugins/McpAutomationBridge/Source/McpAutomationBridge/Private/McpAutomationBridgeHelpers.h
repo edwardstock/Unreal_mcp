@@ -3718,6 +3718,44 @@ static inline TArray<TObjectPtr<UMaterialExpression>>* McpGetGraphExpressionsMut
         McpGetGraphExpressions(Owner));
 }
 
+static inline void McpModifyMaterialGraphOwnerForTransaction(const FMcpMaterialGraphOwner& Owner)
+{
+#if WITH_EDITOR && ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+    if (Owner.Asset)
+    {
+        Owner.Asset->Modify();
+    }
+    if (Owner.GraphSource && Owner.GraphSource != Owner.Asset)
+    {
+        Owner.GraphSource->Modify();
+    }
+
+    if (UMaterial* Mat = Cast<UMaterial>(Owner.GraphSource))
+    {
+        if (Mat->GetEditorOnlyData())
+        {
+            Mat->GetEditorOnlyData()->Modify();
+        }
+    }
+    else if (UMaterialFunction* Func = Cast<UMaterialFunction>(Owner.GraphSource))
+    {
+        if (Func->GetEditorOnlyData())
+        {
+            Func->GetEditorOnlyData()->Modify();
+        }
+    }
+#else
+    if (Owner.Asset)
+    {
+        Owner.Asset->Modify();
+    }
+    if (Owner.GraphSource && Owner.GraphSource != Owner.Asset)
+    {
+        Owner.GraphSource->Modify();
+    }
+#endif
+}
+
 // N6: infer sampler type from texture compression settings when samplerType not provided
 static inline EMaterialSamplerType McpInferSamplerTypeFromTexture(const UTexture* Texture)
 {
