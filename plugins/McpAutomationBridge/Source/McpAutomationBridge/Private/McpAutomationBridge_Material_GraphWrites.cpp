@@ -153,6 +153,98 @@ static bool McpIsValidMaterialRootPinName(const FString& Name)
 }
 
 // =============================================================================
+// McpValidateApplicableFields
+//
+// Shared core: walks Item's keys, checks each against the catalog's applicable
+// list for the resolved class, and validates enum-typed values. Skips keys
+// listed in IgnoredKeys (e.g. "nodeType" for add, "identifier" for update).
+// =============================================================================
+static bool McpValidateApplicableFields(
+    const TSharedPtr<FJsonObject>& Item,
+    UClass* ResolvedClass,
+    const TArray<FString>& IgnoredKeys,
+    FMcpNodeValidationError& OutError)
+{
+    if (!Item.IsValid() || !ResolvedClass) return true;
+
+    const FMcpMaterialExpressionCatalog& Cat = FMcpMaterialExpressionCatalog::Get();
+    const FString CanonicalName = ResolvedClass->GetName();
+    const TArray<FString>* Applicable = Cat.GetApplicableFields(CanonicalName);
+    if (!Applicable)
+    {
+        OutError.Code = TEXT("INVALID_NODE_TYPE");
+        OutError.Field = TEXT("nodeType");
+        OutError.Message = FString::Printf(TEXT("No applicable-field metadata for '%s'"), *CanonicalName);
+        return false;
+    }
+
+    for (const auto& Pair : Item->Values)
+    {
+        const FString& Key = Pair.Key;
+        bool bIgnore = false;
+        for (const FString& I : IgnoredKeys)
+        {
+            if (Key.Equals(I, ESearchCase::CaseSensitive)) { bIgnore = true; break; }
+        }
+        if (bIgnore) continue;
+
+        // applicable list contains: localId, x, y, desc + per-class semantic + reflected fields
+        const bool bApplicable = Applicable->ContainsByPredicate(
+            [&Key](const FString& F) { return F.Equals(Key, ESearchCase::CaseSensitive); });
+
+        if (!bApplicable)
+        {
+            OutError.Code = TEXT("FIELD_NOT_APPLICABLE");
+            OutError.Field = Key;
+            FString Joined;
+            const int32 N = FMath::Min(Applicable->Num(), 24);
+            for (int32 i = 0; i < N; ++i)
+            {
+                if (i > 0) Joined += TEXT(", ");
+                Joined += (*Applicable)[i];
+            }
+            if (Applicable->Num() > N) Joined += TEXT(", ...");
+            OutError.Message = FString::Printf(
+                TEXT("Field '%s' is not applicable for '%s'. Applicable: %s"),
+                *Key, *CanonicalName, *Joined);
+            return false;
+        }
+
+        // Enum-typed fields: validate the JSON value is a string and matches.
+        const TArray<FString>* AllowedValues = Cat.GetFieldEnumValues(CanonicalName, Key);
+        if (AllowedValues && AllowedValues->Num() > 0)
+        {
+            FString StrValue;
+            if (!Pair.Value.IsValid() || !Pair.Value->TryGetString(StrValue))
+            {
+                OutError.Code = TEXT("INVALID_ENUM_VALUE");
+                OutError.Field = Key;
+                OutError.Message = FString::Printf(
+                    TEXT("Field '%s' is enum-typed; expected string value"), *Key);
+                return false;
+            }
+            if (!McpEnumValueMatches(StrValue, *AllowedValues))
+            {
+                FString Joined;
+                for (int32 i = 0; i < AllowedValues->Num(); ++i)
+                {
+                    if (i > 0) Joined += TEXT(", ");
+                    Joined += (*AllowedValues)[i];
+                }
+                OutError.Code = TEXT("INVALID_ENUM_VALUE");
+                OutError.Field = Key;
+                OutError.Message = FString::Printf(
+                    TEXT("Invalid value '%s' for enum field '%s'. Valid: %s"),
+                    *StrValue, *Key, *Joined);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+// =============================================================================
 // McpValidateNodeSpec
 // =============================================================================
 static bool McpValidateNodeSpec(
@@ -219,77 +311,12 @@ static bool McpValidateNodeSpec(
         InOutSeenLocalIds.Add(LocalId);
     }
 
-    // Field applicability
-    const FString CanonicalName = Resolved->GetName();
-    const TArray<FString>* Applicable = Cat.GetApplicableFields(CanonicalName);
-    if (!Applicable)
+    // applicability + enum value check
+    TArray<FString> Ignored;
+    Ignored.Add(TEXT("nodeType"));
+    if (!McpValidateApplicableFields(Item, Resolved, Ignored, OutError))
     {
-        // Should not happen if the catalog is consistent with the resolver
-        OutError.Code = TEXT("INVALID_NODE_TYPE");
-        OutError.Field = TEXT("nodeType");
-        OutError.Message = FString::Printf(TEXT("No applicable-field metadata for '%s'"), *CanonicalName);
         return false;
-    }
-
-    for (const auto& Pair : Item->Values)
-    {
-        const FString& Key = Pair.Key;
-        if (Key.Equals(TEXT("nodeType"), ESearchCase::CaseSensitive))
-        {
-            continue;
-        }
-
-        // applicable list contains: localId, x, y, desc + per-class semantic + reflected fields
-        const bool bApplicable = Applicable->ContainsByPredicate(
-            [&Key](const FString& F) { return F.Equals(Key, ESearchCase::CaseSensitive); });
-
-        if (!bApplicable)
-        {
-            OutError.Code = TEXT("FIELD_NOT_APPLICABLE");
-            OutError.Field = Key;
-            FString Joined;
-            const int32 N = FMath::Min(Applicable->Num(), 24);
-            for (int32 i = 0; i < N; ++i)
-            {
-                if (i > 0) Joined += TEXT(", ");
-                Joined += (*Applicable)[i];
-            }
-            if (Applicable->Num() > N) Joined += TEXT(", ...");
-            OutError.Message = FString::Printf(
-                TEXT("Field '%s' is not applicable for '%s'. Applicable: %s"),
-                *Key, *CanonicalName, *Joined);
-            return false;
-        }
-
-        // Enum-typed fields: validate the JSON value is a string and matches.
-        const TArray<FString>* AllowedValues = Cat.GetFieldEnumValues(CanonicalName, Key);
-        if (AllowedValues && AllowedValues->Num() > 0)
-        {
-            FString StrValue;
-            if (!Pair.Value.IsValid() || !Pair.Value->TryGetString(StrValue))
-            {
-                OutError.Code = TEXT("INVALID_ENUM_VALUE");
-                OutError.Field = Key;
-                OutError.Message = FString::Printf(
-                    TEXT("Field '%s' is enum-typed; expected string value"), *Key);
-                return false;
-            }
-            if (!McpEnumValueMatches(StrValue, *AllowedValues))
-            {
-                FString Joined;
-                for (int32 i = 0; i < AllowedValues->Num(); ++i)
-                {
-                    if (i > 0) Joined += TEXT(", ");
-                    Joined += (*AllowedValues)[i];
-                }
-                OutError.Code = TEXT("INVALID_ENUM_VALUE");
-                OutError.Field = Key;
-                OutError.Message = FString::Printf(
-                    TEXT("Invalid value '%s' for enum field '%s'. Valid: %s"),
-                    *StrValue, *Key, *Joined);
-                return false;
-            }
-        }
     }
 
     OutResolvedClass = Resolved;
@@ -1304,6 +1331,524 @@ bool McpHandle_AddMaterialNodes(
 }
 
 // =============================================================================
+// update_material_nodes (Task C.2)
+//
+// Per-item shape: { identifier, ...applicableFields } - no nodeType, no
+// localId, no connections[]. Field applicability is checked against the
+// resolved class of the existing expression, not a class declared in the
+// payload.
+// =============================================================================
+namespace
+{
+#if WITH_EDITOR
+
+// Levenshtein distance for name suggestions; small ASCII-friendly impl
+static int32 McpLevenshtein(const FString& A, const FString& B)
+{
+    const int32 LA = A.Len();
+    const int32 LB = B.Len();
+    if (LA == 0) return LB;
+    if (LB == 0) return LA;
+
+    TArray<int32> Prev; Prev.SetNum(LB + 1);
+    TArray<int32> Curr; Curr.SetNum(LB + 1);
+    for (int32 j = 0; j <= LB; ++j) Prev[j] = j;
+
+    for (int32 i = 1; i <= LA; ++i)
+    {
+        Curr[0] = i;
+        const TCHAR Ai = A[i - 1];
+        for (int32 j = 1; j <= LB; ++j)
+        {
+            const TCHAR Bj = B[j - 1];
+            const int32 Cost = (FChar::ToLower(Ai) == FChar::ToLower(Bj)) ? 0 : 1;
+            const int32 Del = Prev[j] + 1;
+            const int32 Ins = Curr[j - 1] + 1;
+            const int32 Sub = Prev[j - 1] + Cost;
+            Curr[j] = FMath::Min3(Del, Ins, Sub);
+        }
+        Prev = Curr;
+    }
+    return Prev[LB];
+}
+
+// Top-N nearest expression names by Levenshtein distance.
+static TArray<FString> McpSuggestExpressionNames(
+    const FMcpMaterialGraphOwner& Owner, const FString& Query, int32 MaxCount)
+{
+    TArray<FString> Out;
+    const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+    if (!Exprs || Exprs->Num() == 0 || Query.IsEmpty() || MaxCount <= 0) return Out;
+
+    struct FCand { FString Name; int32 Dist = 0; };
+    TArray<FCand> Cands;
+    Cands.Reserve(Exprs->Num());
+    for (UMaterialExpression* Expr : *Exprs)
+    {
+        if (!Expr) continue;
+        FCand C;
+        C.Name = Expr->GetName();
+        C.Dist = McpLevenshtein(C.Name, Query);
+        Cands.Add(C);
+    }
+    Cands.Sort([](const FCand& A, const FCand& B) { return A.Dist < B.Dist; });
+
+    const int32 N = FMath::Min(MaxCount, Cands.Num());
+    for (int32 i = 0; i < N; ++i) Out.Add(Cands[i].Name);
+    return Out;
+}
+
+// Walk expressions for a Desc match (case-sensitive equality is fine).
+static UMaterialExpression* McpFindExpressionByDesc(
+    const FMcpMaterialGraphOwner& Owner, const FString& Desc)
+{
+    if (Desc.IsEmpty()) return nullptr;
+    const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+    if (!Exprs) return nullptr;
+    for (UMaterialExpression* Expr : *Exprs)
+    {
+        if (Expr && Expr->Desc.Equals(Desc, ESearchCase::CaseSensitive))
+        {
+            return Expr;
+        }
+    }
+    return nullptr;
+}
+
+// Captures original identifier value as a printable string (used in responses).
+static FString McpFormatIdentifierForDisplay(const TSharedPtr<FJsonValue>& V)
+{
+    if (!V.IsValid()) return TEXT("<null>");
+    switch (V->Type)
+    {
+        case EJson::Number:
+        {
+            double N = V->AsNumber();
+            return FString::Printf(TEXT("%g"), N);
+        }
+        case EJson::String:
+            return V->AsString();
+        case EJson::Boolean:
+            return V->AsBool() ? TEXT("true") : TEXT("false");
+        case EJson::Null:
+            return TEXT("null");
+        case EJson::Object:
+            return TEXT("<object>");
+        case EJson::Array:
+            return TEXT("<array>");
+        default:
+            return TEXT("<unknown>");
+    }
+}
+
+// Resolves a single per-item identifier (mixed-type JSON value) to an
+// existing graph expression. Fills OutError on miss.
+//
+// Priority for a non-numeric, non-numeric-string, non-GUID string:
+//   GUID > expressionName > expressionPath > parameterName > desc
+// (note: McpFindGraphExpression handles GUID/name/path/parameterName in that
+// order; we add a desc fallback here.)
+static bool McpResolveUpdateIdentifier(
+    const FMcpMaterialGraphOwner& Owner,
+    const TSharedPtr<FJsonValue>& IdentifierJson,
+    UMaterialExpression*& OutExpression,
+    FMcpNodeValidationError& OutError)
+{
+    OutExpression = nullptr;
+
+    if (!IdentifierJson.IsValid() || IdentifierJson->Type == EJson::Null)
+    {
+        OutError.Code = TEXT("INVALID_IDENTIFIER_TYPE");
+        OutError.Field = TEXT("identifier");
+        OutError.Message = TEXT("identifier is required (number or non-numeric string)");
+        return false;
+    }
+
+    if (IdentifierJson->Type == EJson::Number)
+    {
+        const int32 Idx = (int32)IdentifierJson->AsNumber();
+        const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+        const int32 Total = Exprs ? Exprs->Num() : 0;
+        UMaterialExpression* Expr = McpFindGraphExpression(Owner, FString(), Idx);
+        if (!Expr)
+        {
+            OutError.Code = TEXT("NODE_NOT_FOUND");
+            OutError.Field = TEXT("identifier");
+            OutError.Message = FString::Printf(
+                TEXT("Index %d is out of range; graph has %d expressions"), Idx, Total);
+            return false;
+        }
+        OutExpression = Expr;
+        return true;
+    }
+
+    if (IdentifierJson->Type == EJson::String)
+    {
+        const FString S = IdentifierJson->AsString();
+        if (S.IsEmpty())
+        {
+            OutError.Code = TEXT("INVALID_IDENTIFIER_TYPE");
+            OutError.Field = TEXT("identifier");
+            OutError.Message = TEXT("identifier string is empty");
+            return false;
+        }
+
+        // numeric-string is ambiguous; reject explicitly
+        if (S.IsNumeric())
+        {
+            OutError.Code = TEXT("INVALID_IDENTIFIER_TYPE");
+            OutError.Field = TEXT("identifier");
+            OutError.Message = FString::Printf(
+                TEXT("numeric-string identifier '%s' is ambiguous - pass a JSON number for index lookup, or a non-numeric string for name lookup"),
+                *S);
+            return false;
+        }
+
+        // GUID
+        FGuid ParsedGuid;
+        if (FGuid::Parse(S, ParsedGuid))
+        {
+            const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+            if (Exprs)
+            {
+                for (UMaterialExpression* Expr : *Exprs)
+                {
+                    if (Expr && Expr->MaterialExpressionGuid == ParsedGuid)
+                    {
+                        OutExpression = Expr;
+                        return true;
+                    }
+                }
+            }
+            OutError.Code = TEXT("NODE_NOT_FOUND");
+            OutError.Field = TEXT("identifier");
+            OutError.Message = FString::Printf(TEXT("No expression with GUID '%s'"), *S);
+            return false;
+        }
+
+        // name / path / parameterName
+        if (UMaterialExpression* Found = McpFindGraphExpression(Owner, S, -1))
+        {
+            OutExpression = Found;
+            return true;
+        }
+
+        // desc fallback
+        if (UMaterialExpression* Found = McpFindExpressionByDesc(Owner, S))
+        {
+            OutExpression = Found;
+            return true;
+        }
+
+        OutError.Code = TEXT("NODE_NOT_FOUND");
+        OutError.Field = TEXT("identifier");
+        OutError.DidYouMean = McpSuggestExpressionNames(Owner, S, 3);
+        const FString Top = OutError.DidYouMean.Num() > 0 ? OutError.DidYouMean[0] : FString();
+        OutError.Message = Top.IsEmpty()
+            ? FString::Printf(TEXT("No expression matches identifier '%s'"), *S)
+            : FString::Printf(TEXT("No expression matches identifier '%s'; did you mean '%s'?"), *S, *Top);
+        return false;
+    }
+
+    // bool / object / array
+    OutError.Code = TEXT("INVALID_IDENTIFIER_TYPE");
+    OutError.Field = TEXT("identifier");
+    OutError.Message = FString::Printf(
+        TEXT("identifier must be a number or non-numeric string; got %s"),
+        *McpFormatIdentifierForDisplay(IdentifierJson));
+    return false;
+}
+
+// Validates fields of a per-item update spec against the resolved class.
+// Wraps the shared applicability+enum loop, ignoring "identifier".
+static bool McpValidateUpdateNodeSpec(
+    int32 ItemIndex,
+    const TSharedPtr<FJsonObject>& Item,
+    UClass* ResolvedClass,
+    FMcpNodeValidationError& OutError)
+{
+    OutError = FMcpNodeValidationError();
+    OutError.Index = ItemIndex;
+
+    if (!Item.IsValid())
+    {
+        OutError.Code = TEXT("INVALID_NODE_SPEC");
+        OutError.Field = TEXT("nodes[]");
+        OutError.Message = TEXT("Update spec is not an object");
+        return false;
+    }
+    if (!ResolvedClass)
+    {
+        OutError.Code = TEXT("INVALID_NODE_SPEC");
+        OutError.Field = TEXT("identifier");
+        OutError.Message = TEXT("ResolvedClass is null");
+        return false;
+    }
+
+    TArray<FString> Ignored;
+    Ignored.Add(TEXT("identifier"));
+    // localId and nodeType are add-only meta keys; on update they are silently
+    // skipped (no-op from the caller's perspective). See McpIsUpdateMetaKey.
+    Ignored.Add(TEXT("localId"));
+    Ignored.Add(TEXT("nodeType"));
+    return McpValidateApplicableFields(Item, ResolvedClass, Ignored, OutError);
+}
+
+// Top-level keys consumed directly by the apply pipeline (not user fields).
+// localId and nodeType are add-only concepts; on update they are silently
+// skipped so they do not appear in fieldsUpdated[] or trigger any apply work.
+static bool McpIsUpdateMetaKey(const FString& Key)
+{
+    return Key.Equals(TEXT("identifier"), ESearchCase::CaseSensitive)
+        || Key.Equals(TEXT("localId"),    ESearchCase::CaseSensitive)
+        || Key.Equals(TEXT("nodeType"),   ESearchCase::CaseSensitive);
+}
+
+// Top-level node fields handled by C.1's apply loop directly (not via
+// reflected/semantic apply). We keep the same set for parity.
+static bool McpIsTopLevelNodeField(const FString& Key)
+{
+    return Key.Equals(TEXT("x"), ESearchCase::CaseSensitive)
+        || Key.Equals(TEXT("y"), ESearchCase::CaseSensitive)
+        || Key.Equals(TEXT("desc"), ESearchCase::CaseSensitive);
+}
+
+#endif // WITH_EDITOR
+} // namespace
+
+extern bool McpHandle_UpdateMaterialNodes(
+    UMcpAutomationBridgeSubsystem* Sub,
+    const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket);
+
+bool McpHandle_UpdateMaterialNodes(
+    UMcpAutomationBridgeSubsystem* Sub,
+    const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket)
+{
+#if WITH_EDITOR
+    if (!Sub || !Payload.IsValid())
+    {
+        if (Sub) Sub->SendAutomationError(Socket, RequestId,
+            TEXT("Invalid payload"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    FString AssetPath;
+    if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("assetPath required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    if (AssetPath.StartsWith(TEXT("/Engine/")) || AssetPath.StartsWith(TEXT("/EnginePlugins/")))
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            FString::Printf(TEXT("Asset path '%s' is under engine content. Copy to /Game first."), *AssetPath),
+            TEXT("ENGINE_ASSET_BLOCKED"));
+        return true;
+    }
+
+    FMcpMaterialGraphOwner Owner;
+    FString OwnerErr;
+    if (!McpResolveMaterialGraphOwner(AssetPath, Owner, OwnerErr) || Owner.bReadOnly)
+    {
+        const FString Code = OwnerErr.Contains(TEXT("not found"))
+            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE");
+        Sub->SendAutomationError(Socket, RequestId,
+            OwnerErr.IsEmpty() ? TEXT("Cannot mutate this asset") : OwnerErr, Code);
+        return true;
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* NodesArr = nullptr;
+    if (!Payload->TryGetArrayField(TEXT("nodes"), NodesArr) || !NodesArr || NodesArr->Num() == 0)
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("nodes[] is required, minimum length 1"),
+            TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    // Phase A: resolve identifier per item, validate fields against resolved class.
+    // All-or-nothing - same posture as add_material_nodes (Task C.1).
+    struct FResolvedUpdate
+    {
+        UMaterialExpression* Expr = nullptr;
+        UClass*              Cls  = nullptr;
+        TSharedPtr<FJsonObject> Item;
+        FString              IdentifierDisplay;
+        TArray<FString>      RequestedFields;  // user-facing field keys (excluding "identifier")
+    };
+    TArray<FResolvedUpdate>          Resolved;
+    TArray<FMcpNodeValidationError>  NodeErrors;
+    Resolved.Reserve(NodesArr->Num());
+
+    for (int32 i = 0; i < NodesArr->Num(); ++i)
+    {
+        FResolvedUpdate R;
+        const TSharedPtr<FJsonObject>* ObjPtr = nullptr;
+        if (!(*NodesArr)[i].IsValid() || !(*NodesArr)[i]->TryGetObject(ObjPtr) || !ObjPtr || !ObjPtr->IsValid())
+        {
+            FMcpNodeValidationError E;
+            E.Index = i;
+            E.Code = TEXT("INVALID_NODE_SPEC");
+            E.Field = TEXT("nodes[]");
+            E.Message = TEXT("Update spec is not an object");
+            NodeErrors.Add(E);
+            Resolved.Add(R);
+            continue;
+        }
+        R.Item = *ObjPtr;
+
+        const TSharedPtr<FJsonValue> IdentifierJson = R.Item->TryGetField(TEXT("identifier"));
+        R.IdentifierDisplay = McpFormatIdentifierForDisplay(IdentifierJson);
+
+        FMcpNodeValidationError E;
+        E.Index = i;
+        UMaterialExpression* Expr = nullptr;
+        if (!McpResolveUpdateIdentifier(Owner, IdentifierJson, Expr, E))
+        {
+            NodeErrors.Add(E);
+            Resolved.Add(R);
+            continue;
+        }
+        R.Expr = Expr;
+        R.Cls  = Expr->GetClass();
+
+        FMcpNodeValidationError VE;
+        if (!McpValidateUpdateNodeSpec(i, R.Item, R.Cls, VE))
+        {
+            NodeErrors.Add(VE);
+            Resolved.Add(R);
+            continue;
+        }
+
+        // Capture which fields the caller asked to update (anything except "identifier").
+        // We include x, y, desc since C.1's apply loop also handles these as "updated".
+        for (const auto& Pair : R.Item->Values)
+        {
+            const FString& Key = Pair.Key;
+            if (McpIsUpdateMetaKey(Key)) continue;
+            R.RequestedFields.Add(Key);
+        }
+
+        Resolved.Add(R);
+    }
+
+    if (NodeErrors.Num() > 0)
+    {
+        TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+        Resp->SetBoolField  (TEXT("success"), false);
+        Resp->SetStringField(TEXT("errorCode"), TEXT("VALIDATION_FAILED"));
+        Resp->SetStringField(TEXT("message"),
+            FString::Printf(TEXT("Batch rejected; 0 mutations applied. %d node errors."),
+                NodeErrors.Num()));
+        TArray<TSharedPtr<FJsonValue>> ErrorsJson;
+        for (const auto& E : NodeErrors) ErrorsJson.Add(McpFormatNodeError(E));
+        Resp->SetArrayField(TEXT("errors"), ErrorsJson);
+        Sub->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("validation failed"), Resp, TEXT("VALIDATION_FAILED"));
+        return true;
+    }
+
+    // Phase B: apply
+    FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
+        "McpUpdateMaterialNodes", "MCP update_material_nodes"));
+    if (Owner.Asset) Owner.Asset->Modify();
+
+    TArray<TSharedPtr<FJsonObject>> ResultsJson;
+    TArray<FMcpSamplerWarning>      SamplerWarnings;
+
+    for (const FResolvedUpdate& R : Resolved)
+    {
+        if (!R.Expr || !R.Cls || !R.Item.IsValid()) continue;
+
+        R.Expr->Modify();
+
+        // Top-level base fields (parity with add_material_nodes apply loop)
+        double X = R.Expr->MaterialExpressionEditorX;
+        if (R.Item->TryGetNumberField(TEXT("x"), X)) R.Expr->MaterialExpressionEditorX = (int32)X;
+        double Y = R.Expr->MaterialExpressionEditorY;
+        if (R.Item->TryGetNumberField(TEXT("y"), Y)) R.Expr->MaterialExpressionEditorY = (int32)Y;
+        FString Desc;
+        if (R.Item->TryGetStringField(TEXT("desc"), Desc)) R.Expr->Desc = Desc;
+
+        McpApplySemanticFields(R.Expr, R.Cls, R.Item, SamplerWarnings);
+        McpApplyReflectedFields(R.Expr, R.Cls, R.Item);
+
+        TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+        Item->SetStringField(TEXT("identifier"),     R.IdentifierDisplay);
+        Item->SetStringField(TEXT("expressionName"), R.Expr->GetName());
+        Item->SetStringField(TEXT("expressionGuid"), R.Expr->MaterialExpressionGuid.ToString());
+        TArray<TSharedPtr<FJsonValue>> Fields;
+        for (const FString& F : R.RequestedFields)
+        {
+            Fields.Add(MakeShared<FJsonValueString>(F));
+        }
+        Item->SetArrayField(TEXT("fieldsUpdated"), Fields);
+        ResultsJson.Add(Item);
+    }
+
+    // Rebuild + optional save
+    FString RebuildErr;
+    McpRebuildMaterialGraphOwner(Owner, RebuildErr);
+
+    bool bSave = false;
+    Payload->TryGetBoolField(TEXT("save"), bSave);
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = McpSafeAssetSave(Owner.Asset);
+        if (!bSaved)
+        {
+            Tx.Cancel();
+            Sub->SendAutomationError(Socket, RequestId,
+                TEXT("Save failed; transaction rolled back"), TEXT("APPLY_FAILED"));
+            return true;
+        }
+    }
+
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+    Resp->SetBoolField  (TEXT("success"), true);
+    Resp->SetStringField(TEXT("assetPath"), AssetPath);
+    Resp->SetNumberField(TEXT("nodesUpdated"), Resolved.Num());
+    Resp->SetBoolField  (TEXT("saved"), bSaved);
+
+    TArray<TSharedPtr<FJsonValue>> ResultsArr;
+    for (const auto& R : ResultsJson) ResultsArr.Add(MakeShared<FJsonValueObject>(R));
+    Resp->SetArrayField(TEXT("results"), ResultsArr);
+
+    TArray<TSharedPtr<FJsonValue>> WarnJson;
+    for (const FMcpSamplerWarning& W : SamplerWarnings)
+    {
+        TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+        O->SetStringField(TEXT("code"),     W.Code);
+        O->SetStringField(TEXT("message"),  W.Message);
+        O->SetStringField(TEXT("expected"), W.Expected);
+        O->SetStringField(TEXT("got"),      W.Got);
+        TSharedPtr<FJsonObject> TF = MakeShared<FJsonObject>();
+        TF->SetStringField(TEXT("compressionSettings"), W.CompressionSettingsName);
+        TF->SetBoolField  (TEXT("sRGB"),                W.bSRGB);
+        TF->SetBoolField  (TEXT("isVirtualTexture"),    W.bVirtualTexture);
+        O->SetObjectField (TEXT("textureFlags"),        TF);
+        WarnJson.Add(MakeShared<FJsonValueObject>(O));
+    }
+    if (WarnJson.Num() > 0) Resp->SetArrayField(TEXT("warnings"), WarnJson);
+
+    Sub->SendAutomationResponse(Socket, RequestId, true,
+        TEXT("update_material_nodes succeeded"), Resp, FString());
+    return true;
+#else
+    if (Sub) Sub->SendAutomationError(Socket, RequestId,
+        TEXT("update_material_nodes requires editor build"), TEXT("NOT_IMPLEMENTED"));
+    return true;
+#endif
+}
+
+// =============================================================================
 // Test-only forwarders — exposed so unit tests can exercise the validators
 // without needing an asset/socket fixture. Defined in "Tests" namespace via
 // thin shims; callers in the Tests/ folder reference these by name.
@@ -1337,4 +1882,59 @@ namespace McpAddMaterialNodesValidationForTests
         return false;
 #endif
     }
+}
+
+namespace McpUpdateMaterialNodesValidationForTests
+{
+#if WITH_EDITOR
+    bool ResolveIdentifier(
+        const FMcpMaterialGraphOwner& Owner,
+        const TSharedPtr<FJsonValue>& IdentifierJson,
+        UMaterialExpression*& OutExpression,
+        FString& OutCode,
+        FString& OutField,
+        FString& OutMessage,
+        TArray<FString>& OutDidYouMean)
+    {
+        FMcpNodeValidationError E;
+        const bool b = McpResolveUpdateIdentifier(Owner, IdentifierJson, OutExpression, E);
+        OutCode = E.Code;
+        OutField = E.Field;
+        OutMessage = E.Message;
+        OutDidYouMean = E.DidYouMean;
+        return b;
+    }
+
+    bool ValidateUpdateFields(
+        const TSharedPtr<FJsonObject>& Item,
+        UClass* ResolvedClass,
+        FString& OutCode,
+        FString& OutField,
+        FString& OutMessage)
+    {
+        FMcpNodeValidationError E;
+        const bool b = McpValidateUpdateNodeSpec(0, Item, ResolvedClass, E);
+        OutCode = E.Code;
+        OutField = E.Field;
+        OutMessage = E.Message;
+        return b;
+    }
+
+    // Mirrors the RequestedFields collection in McpHandle_UpdateMaterialNodes
+    // (Phase A loop, around line 1721). Skips meta keys that the apply pipeline
+    // does not act on, so fieldsUpdated[] never reports them.
+    void BuildRequestedFields(
+        const TSharedPtr<FJsonObject>& Item,
+        TArray<FString>& OutRequestedFields)
+    {
+        OutRequestedFields.Reset();
+        if (!Item.IsValid()) return;
+        for (const auto& Pair : Item->Values)
+        {
+            const FString& Key = Pair.Key;
+            if (McpIsUpdateMetaKey(Key)) continue;
+            OutRequestedFields.Add(Key);
+        }
+    }
+#endif
 }
