@@ -261,6 +261,25 @@ UMaterialExpression* McpFindGraphExpressionFromPayload(
     return nullptr;
   }
 
+  // Canonical spec field: "identifier" — mixed-type number (index) or string (GUID/name/path)
+  const TSharedPtr<FJsonValue> IdentifierField = Payload->TryGetField(TEXT("identifier"));
+  if (IdentifierField.IsValid())
+  {
+    if (IdentifierField->Type == EJson::Number)
+    {
+      return McpFindGraphExpression(Owner, FString(), (int32)IdentifierField->AsNumber());
+    }
+    if (IdentifierField->Type == EJson::String)
+    {
+      const FString Str = IdentifierField->AsString();
+      // numeric string is ambiguous; reject by returning nullptr (caller produces NODE_NOT_FOUND)
+      if (!Str.IsEmpty() && !Str.IsNumeric())
+      {
+        return McpFindGraphExpression(Owner, Str);
+      }
+    }
+  }
+
   int32 ExpressionIndex = INDEX_NONE;
   if (Payload->TryGetNumberField(IndexField, ExpressionIndex))
   {
