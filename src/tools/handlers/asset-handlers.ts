@@ -167,7 +167,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         }
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           path: folderPath,
-          subAction: 'create_folder'
+          subAction: 'create_folders'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Folder created successfully');
       }
@@ -189,7 +189,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
           destinationPath,
           overwrite,
           save,
-          subAction: 'import'
+          subAction: 'import_assets'
         }) as AssetOperationResponse;
 
         // CRITICAL FIX: Pass through C++ failures instead of wrapping them
@@ -240,7 +240,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           sourcePath,
           destinationPath,
-          subAction: 'duplicate'
+          subAction: 'duplicate_assets'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Asset duplicated successfully');
       }
@@ -267,7 +267,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           sourcePath,
           destinationPath,
-          subAction: 'rename'
+          subAction: 'rename_assets'
         }) as AssetOperationResponse;
 
         if (res && res.success === false) {
@@ -301,7 +301,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           sourcePath,
           destinationPath: destinationPath ?? '',
-          subAction: 'move'
+          subAction: 'move_assets'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Asset moved successfully');
       }
@@ -348,7 +348,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
 
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           paths: normalizedPaths,
-          subAction: 'delete'
+          subAction: 'delete_assets'
         }) as AssetOperationResponse;
         
         // CRITICAL FIX: Check if C++ returned success=false and pass it through
@@ -395,7 +395,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
           assetPath,
           width,
           height,
-          subAction: 'generate_thumbnail'
+          subAction: 'create_thumbnails'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Thumbnail created successfully');
       }
@@ -427,7 +427,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const assetPath = extractString(params, 'assetPath');
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           assetPath,
-          subAction: 'get_metadata'
+          subAction: 'get_assets_metadata'
         }) as AssetOperationResponse;
         const tags = res.tags || {};
         const metadata = res.metadata || {};
@@ -461,7 +461,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const assetPath = extractString(params, 'assetPath');
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           assetPath,
-          subAction: 'validate'
+          subAction: 'validate_assets'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Asset validation complete');
       }
@@ -478,7 +478,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
           directory,
           reportType,
           outputPath,
-          subAction: 'generate_report'
+          subAction: 'generate_assets_report'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Report generated successfully');
       }
@@ -585,7 +585,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           assetPath,
           recursive,
-          subAction: 'get_dependencies'
+          subAction: 'get_assets_dependencies'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Dependencies retrieved');
       }
@@ -1040,60 +1040,10 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         });
         return ResponseFactory.success(res, 'Material rebuilt successfully');
       }
-      case 'bulk_rename': {
-        // Accept either folderPath or assetPaths
-        // Map pattern->searchText and replacement->replaceText for C++ compatibility
-        const argsTyped = args as AssetArgs;
-        const folderPath = argsTyped.folderPath ?? argsTyped.path;
-        const assetPaths = argsTyped.assetPaths ?? argsTyped.paths;
-
-        // SECURITY: Validate folderPath for traversal attempts
-        const folderPathSecurity = validatePathSecurity(
-          typeof folderPath === 'string' ? folderPath : undefined, 'folderPath'
-        );
-        if (folderPathSecurity) return folderPathSecurity;
-
-        // SECURITY: Validate path parameter for traversal attempts (test may pass 'path')
-        const pathParamSecurity = validatePathSecurity(
-          typeof argsTyped.path === 'string' ? argsTyped.path : undefined, 'path'
-        );
-        if (pathParamSecurity) return pathParamSecurity;
-
-        // SECURITY: Validate assetPaths array for traversal attempts
-        const assetPathsSecurity = validatePathsSecurity(assetPaths, 'assetPaths');
-        if (assetPathsSecurity) return assetPathsSecurity;
-        
-        if (!folderPath && (!assetPaths || (Array.isArray(assetPaths) && assetPaths.length === 0))) {
-          return ResponseFactory.error('INVALID_ARGUMENT', 'Either folderPath or assetPaths is required for bulk_rename');
-        }
-        
-        const res = await executeAutomationRequest(tools, 'bulk_rename', {
-          folderPath,
-          assetPaths,
-          searchText: argsTyped.pattern,
-          replaceText: argsTyped.replacement,
-          prefix: argsTyped.prefix,
-          suffix: argsTyped.suffix
-        });
-        return ResponseFactory.success(res, 'Bulk rename completed');
-      }
-      case 'bulk_delete': {
-        // Accept either folderPath or assetPaths
-        const argsTyped = args as AssetArgs;
-        const folderPath = argsTyped.folderPath ?? argsTyped.path;
-        const assetPaths = argsTyped.assetPaths ?? argsTyped.paths;
-        
-        if (!folderPath && (!assetPaths || (Array.isArray(assetPaths) && assetPaths.length === 0))) {
-          return ResponseFactory.error('INVALID_ARGUMENT', 'Either folderPath or assetPaths is required for bulk_delete');
-        }
-        
-        const res = await executeAutomationRequest(tools, 'bulk_delete', {
-          ...args,
-          folderPath,
-          assetPaths
-        });
-        return ResponseFactory.success(res, 'Bulk delete completed');
-      }
+      // bulk_rename / bulk_delete dropped after G.2: rename_assets and
+      // delete_assets are the canonical batch forms. Callers who need the
+      // legacy bulk behavior with folderPath / pattern / replacement can still
+      // hit native bulk_rename_assets / bulk_delete_assets directly.
       // ===== N3: get_set_material_attributes_overrides — passthrough to bridge =====
       case 'get_set_material_attributes_overrides': {
         const res = await executeAutomationRequest(tools, 'manage_asset', {

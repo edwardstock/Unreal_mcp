@@ -38,7 +38,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     const res = await this.sendRequest<AssetResponse>('manage_asset', {
       ...params,
       destinationPath,
-      subAction: 'import'
+      subAction: 'import_assets'
     }, 'manage_asset', { timeoutMs: EXTENDED_ASSET_OP_TIMEOUT_MS });
     if (res && res.success) {
       return { ...res, asset: destinationPath, source: params.sourcePath };
@@ -54,7 +54,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
       sourcePath,
       destinationPath,
       overwrite: params.overwrite ?? false,
-      subAction: 'duplicate'
+      subAction: 'duplicate_assets'
     }, 'manage_asset', { timeoutMs: DEFAULT_ASSET_OP_TIMEOUT_MS });
     if (res && res.success) {
       return { ...res, asset: destinationPath, source: sourcePath };
@@ -69,7 +69,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     const res = await this.sendRequest<AssetResponse>('manage_asset', {
       sourcePath,
       destinationPath,
-      subAction: 'rename'
+      subAction: 'rename_assets'
     }, 'manage_asset', { timeoutMs: DEFAULT_ASSET_OP_TIMEOUT_MS });
     if (res && res.success) {
       return { ...res, asset: destinationPath, oldName: sourcePath };
@@ -84,7 +84,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     const res = await this.sendRequest<AssetResponse>('manage_asset', {
       sourcePath,
       destinationPath,
-      subAction: 'move'
+      subAction: 'move_assets'
     }, 'manage_asset', { timeoutMs: DEFAULT_ASSET_OP_TIMEOUT_MS });
     if (res && res.success) {
       return { ...res, asset: destinationPath, from: sourcePath };
@@ -110,7 +110,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     return this.sendRequest<AssetResponse>('manage_asset', {
       paths: normalizedPaths,
       assetPaths: normalizedPaths,  // Keep for backward compatibility
-      subAction: 'delete'
+      subAction: 'delete_assets'
     }, 'manage_asset', { timeoutMs: params.timeoutMs || EXTENDED_ASSET_OP_TIMEOUT_MS });
   }
 
@@ -200,7 +200,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     const path = this.normalizeAssetPath(folderPath);
     return this.sendRequest<AssetResponse>('manage_asset', {
       path,
-      subAction: 'create_folder'
+      subAction: 'create_folders'
     }, 'manage_asset', { timeoutMs: DEFAULT_ASSET_OP_TIMEOUT_MS });
   }
 
@@ -210,7 +210,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     return this.sendRequest<AssetResponse>('manage_asset', {
       ...params,
       assetPath: this.normalizeAssetPath(params.assetPath),
-      subAction: 'get_dependencies'
+      subAction: 'get_assets_dependencies'
     }, 'manage_asset');
   }
 
@@ -230,7 +230,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     const response = await this.sendRequest<AssetResponse>('manage_asset', {
       ...params,
       assetPath: this.normalizeAssetPath(params.assetPath),
-      subAction: 'get_metadata'
+      subAction: 'get_assets_metadata'
     }, 'manage_asset');
 
     // BaseTool unwraps the result, so 'response' is likely the payload itself.
@@ -253,7 +253,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
       const response = await this.sendRequest<AssetResponse>('manage_asset', {
         assetPath,
         maxDepth,
-        subAction: 'get_asset_graph'
+        subAction: 'get_assets_graph'
       }, 'manage_asset', { timeoutMs: DEFAULT_ASSET_OP_TIMEOUT_MS }) as Record<string, unknown>;
 
       if (!response.success || !response.graph) {
@@ -305,7 +305,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     return this.sendRequest<AssetResponse>('manage_asset', {
       ...params,
       assetPath: this.normalizeAssetPath(params.assetPath),
-      subAction: 'generate_thumbnail'  // C++ handler expects 'generate_thumbnail', not 'create_thumbnail'
+      subAction: 'create_thumbnails'
     }, 'manage_asset', { timeoutMs: DEFAULT_ASSET_OP_TIMEOUT_MS });
   }
 
@@ -313,7 +313,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     return this.sendRequest<AssetResponse>('manage_asset', {
       ...params,
       assetPath: this.normalizeAssetPath(params.assetPath),
-      subAction: 'set_tags'
+      subAction: 'set_assets_tags'
     }, 'manage_asset', { timeoutMs: DEFAULT_ASSET_OP_TIMEOUT_MS });
   }
 
@@ -321,7 +321,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     return this.sendRequest<AssetResponse>('manage_asset', {
       ...params,
       directory: this.normalizeAssetPath(params.directory),
-      subAction: 'generate_report'
+      subAction: 'generate_assets_report'
     }, 'manage_asset', { timeoutMs: LONG_RUNNING_OP_TIMEOUT_MS });
   }
 
@@ -329,7 +329,7 @@ export class AssetTools extends BaseTool implements IAssetTools {
     return this.sendRequest<AssetResponse>('manage_asset', {
       ...params,
       assetPath: this.normalizeAssetPath(params.assetPath),
-      subAction: 'validate'
+      subAction: 'validate_assets'
     }, 'manage_asset', { timeoutMs: LONG_RUNNING_OP_TIMEOUT_MS });
   }
 
