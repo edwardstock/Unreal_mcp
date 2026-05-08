@@ -1,7 +1,1340 @@
 // File: Plugins/Unreal_mcp/plugins/McpAutomationBridge/Source/McpAutomationBridge/Private/McpAutomationBridge_Material_GraphWrites.cpp
-#include "CoreMinimal.h"
-#include "McpAutomationBridgeSubsystem.h"
-
-
-// Handlers in this domain land here as the redesign progresses.
+//
+// Task C.1 - add_material_nodes transactional handler.
 // Plan: docs/superpowers/plans/2026-05-07-mcp-material-tools-redesign.md
+// Spec: docs/superpowers/specs/2026-05-07-mcp-material-tools-redesign-design.md (sec 7)
+
+#include "CoreMinimal.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "UObject/UnrealType.h"
+#include "UObject/EnumProperty.h"
+#include "UObject/Class.h"
+
+#include "McpAutomationBridgeSubsystem.h"
+#include "McpHandlerUtils.h"
+#include "McpAutomationBridgeHelpers.h"
+#include "McpMaterialExpressionCatalog.h"
+
+#if WITH_EDITOR
+
+#include "Materials/Material.h"
+#include "Materials/MaterialFunction.h"
+
+#include "Materials/MaterialExpression.h"
+#include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionVectorParameter.h"
+#include "Materials/MaterialExpressionStaticBoolParameter.h"
+#include "Materials/MaterialExpressionStaticSwitchParameter.h"
+#include "Materials/MaterialExpressionStaticBool.h"
+#include "Materials/MaterialExpressionConstant.h"
+#include "Materials/MaterialExpressionConstant3Vector.h"
+#include "Materials/MaterialExpressionConstant4Vector.h"
+#include "Materials/MaterialExpressionTextureSample.h"
+#include "Materials/MaterialExpressionTextureSampleParameter.h"
+#include "Materials/MaterialExpressionTextureSampleParameter2D.h"
+#include "Materials/MaterialExpressionTextureObject.h"
+#include "Materials/MaterialExpressionTextureObjectParameter.h"
+#include "Materials/MaterialExpressionTextureCoordinate.h"
+#include "Materials/MaterialExpressionPanner.h"
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+#include "Materials/MaterialExpressionRotator.h"
+#endif
+
+#include "MaterialEditingLibrary.h"
+#include "ScopedTransaction.h"
+#include "Engine/Texture.h"
+#include "SceneTypes.h"
+
+#endif // WITH_EDITOR
+
+// =============================================================================
+// Internal data structures (file-private)
+// =============================================================================
+namespace
+{
+
+struct FMcpNodeValidationError
+{
+    int32           Index = INDEX_NONE;
+    FString         LocalId;
+    FString         Field;
+    FString         Code;
+    FString         Message;
+    TArray<FString> DidYouMean;
+};
+
+struct FMcpConnectionValidationError
+{
+    int32   Index = INDEX_NONE;
+    FString Field;
+    FString Code;
+    FString Message;
+};
+
+#if WITH_EDITOR
+
+struct FMcpResolvedConnection
+{
+    int32                 Index = INDEX_NONE;
+    bool                  bToMaterialRoot = false;
+    UMaterialExpression*  FromExpression = nullptr;  // null when from refers to a localId in current batch
+    UMaterialExpression*  ToExpression = nullptr;    // null when to is localId or root
+    FString               FromLocalId;
+    FString               ToLocalId;
+    FString               FromPin;
+    int32                 FromOutputIndex = INDEX_NONE;
+    FString               ToPin;
+};
+
+// =============================================================================
+// Helper: enum value matching (case-insensitive, accept stripped or full form)
+// =============================================================================
+static bool McpEnumValueMatches(const FString& StrValue, const TArray<FString>& Allowed)
+{
+    for (const FString& V : Allowed)
+    {
+        if (V.Equals(StrValue, ESearchCase::IgnoreCase)) return true;
+    }
+    return false;
+}
+
+// =============================================================================
+// Helper: walk the class for FExpressionInput properties whose name matches.
+// =============================================================================
+static bool McpClassHasInputPin(UClass* Cls, const FString& PinName, TArray<FString>& OutPinNames)
+{
+    OutPinNames.Reset();
+    if (!Cls) return false;
+    bool bFound = false;
+    for (TFieldIterator<FProperty> PropIt(Cls); PropIt; ++PropIt)
+    {
+        FProperty* Prop = *PropIt;
+        if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+        {
+            if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput")))
+            {
+                const FString Name = Prop->GetName();
+                OutPinNames.Add(Name);
+                if (Name.Equals(PinName, ESearchCase::IgnoreCase))
+                {
+                    bFound = true;
+                }
+            }
+        }
+    }
+    return bFound;
+}
+
+// =============================================================================
+// Helper: material root pin string -> EMaterialProperty
+// =============================================================================
+static EMaterialProperty McpMaterialPropertyFromName(const FString& Name)
+{
+    if (Name == TEXT("BaseColor"))            return MP_BaseColor;
+    if (Name == TEXT("Metallic"))             return MP_Metallic;
+    if (Name == TEXT("Roughness"))            return MP_Roughness;
+    if (Name == TEXT("Specular"))             return MP_Specular;
+    if (Name == TEXT("Normal"))               return MP_Normal;
+    if (Name == TEXT("EmissiveColor"))        return MP_EmissiveColor;
+    if (Name == TEXT("Opacity"))              return MP_Opacity;
+    if (Name == TEXT("OpacityMask"))          return MP_OpacityMask;
+    if (Name == TEXT("WorldPositionOffset"))  return MP_WorldPositionOffset;
+    if (Name == TEXT("Refraction"))           return MP_Refraction;
+    if (Name == TEXT("AmbientOcclusion"))     return MP_AmbientOcclusion;
+    if (Name == TEXT("PixelDepthOffset"))     return MP_PixelDepthOffset;
+    if (Name == TEXT("MaterialAttributes"))   return MP_MaterialAttributes;
+    return MP_MAX;
+}
+
+static bool McpIsValidMaterialRootPinName(const FString& Name)
+{
+    return McpMaterialPropertyFromName(Name) != MP_MAX;
+}
+
+// =============================================================================
+// McpValidateNodeSpec
+// =============================================================================
+static bool McpValidateNodeSpec(
+    int32 ItemIndex,
+    const TSharedPtr<FJsonObject>& Item,
+    TSet<FString>& InOutSeenLocalIds,
+    UClass*& OutResolvedClass,
+    bool& bOutAutoPrefixed,
+    FMcpNodeValidationError& OutError)
+{
+    OutResolvedClass = nullptr;
+    bOutAutoPrefixed = false;
+    OutError = FMcpNodeValidationError();
+    OutError.Index = ItemIndex;
+
+    if (!Item.IsValid())
+    {
+        OutError.Code = TEXT("INVALID_NODE_SPEC");
+        OutError.Field = TEXT("nodes[]");
+        OutError.Message = TEXT("Node spec is not an object");
+        return false;
+    }
+
+    // localId capture early (used in error reporting)
+    FString LocalId;
+    Item->TryGetStringField(TEXT("localId"), LocalId);
+    OutError.LocalId = LocalId;
+
+    // nodeType (required)
+    FString NodeType;
+    if (!Item->TryGetStringField(TEXT("nodeType"), NodeType) || NodeType.IsEmpty())
+    {
+        OutError.Code = TEXT("MISSING_NODE_TYPE");
+        OutError.Field = TEXT("nodeType");
+        OutError.Message = TEXT("nodeType is required");
+        return false;
+    }
+
+    const FMcpMaterialExpressionCatalog& Cat = FMcpMaterialExpressionCatalog::Get();
+
+    UClass* Resolved = Cat.ResolveClassWithAutoPrefix(NodeType, bOutAutoPrefixed);
+    if (!Resolved)
+    {
+        OutError.Code = TEXT("INVALID_NODE_TYPE");
+        OutError.Field = TEXT("nodeType");
+        OutError.DidYouMean = Cat.SuggestNames(NodeType, 3);
+        const FString Top = OutError.DidYouMean.Num() > 0 ? OutError.DidYouMean[0] : FString();
+        OutError.Message = Top.IsEmpty()
+            ? FString::Printf(TEXT("Unknown nodeType '%s'"), *NodeType)
+            : FString::Printf(TEXT("Unknown nodeType '%s'; did you mean '%s'?"), *NodeType, *Top);
+        return false;
+    }
+
+    // localId duplicate check
+    if (!LocalId.IsEmpty())
+    {
+        if (InOutSeenLocalIds.Contains(LocalId))
+        {
+            OutError.Code = TEXT("LOCAL_ID_DUPLICATE");
+            OutError.Field = TEXT("localId");
+            OutError.Message = FString::Printf(TEXT("Duplicate localId '%s' within nodes[]"), *LocalId);
+            return false;
+        }
+        InOutSeenLocalIds.Add(LocalId);
+    }
+
+    // Field applicability
+    const FString CanonicalName = Resolved->GetName();
+    const TArray<FString>* Applicable = Cat.GetApplicableFields(CanonicalName);
+    if (!Applicable)
+    {
+        // Should not happen if the catalog is consistent with the resolver
+        OutError.Code = TEXT("INVALID_NODE_TYPE");
+        OutError.Field = TEXT("nodeType");
+        OutError.Message = FString::Printf(TEXT("No applicable-field metadata for '%s'"), *CanonicalName);
+        return false;
+    }
+
+    for (const auto& Pair : Item->Values)
+    {
+        const FString& Key = Pair.Key;
+        if (Key.Equals(TEXT("nodeType"), ESearchCase::CaseSensitive))
+        {
+            continue;
+        }
+
+        // applicable list contains: localId, x, y, desc + per-class semantic + reflected fields
+        const bool bApplicable = Applicable->ContainsByPredicate(
+            [&Key](const FString& F) { return F.Equals(Key, ESearchCase::CaseSensitive); });
+
+        if (!bApplicable)
+        {
+            OutError.Code = TEXT("FIELD_NOT_APPLICABLE");
+            OutError.Field = Key;
+            FString Joined;
+            const int32 N = FMath::Min(Applicable->Num(), 24);
+            for (int32 i = 0; i < N; ++i)
+            {
+                if (i > 0) Joined += TEXT(", ");
+                Joined += (*Applicable)[i];
+            }
+            if (Applicable->Num() > N) Joined += TEXT(", ...");
+            OutError.Message = FString::Printf(
+                TEXT("Field '%s' is not applicable for '%s'. Applicable: %s"),
+                *Key, *CanonicalName, *Joined);
+            return false;
+        }
+
+        // Enum-typed fields: validate the JSON value is a string and matches.
+        const TArray<FString>* AllowedValues = Cat.GetFieldEnumValues(CanonicalName, Key);
+        if (AllowedValues && AllowedValues->Num() > 0)
+        {
+            FString StrValue;
+            if (!Pair.Value.IsValid() || !Pair.Value->TryGetString(StrValue))
+            {
+                OutError.Code = TEXT("INVALID_ENUM_VALUE");
+                OutError.Field = Key;
+                OutError.Message = FString::Printf(
+                    TEXT("Field '%s' is enum-typed; expected string value"), *Key);
+                return false;
+            }
+            if (!McpEnumValueMatches(StrValue, *AllowedValues))
+            {
+                FString Joined;
+                for (int32 i = 0; i < AllowedValues->Num(); ++i)
+                {
+                    if (i > 0) Joined += TEXT(", ");
+                    Joined += (*AllowedValues)[i];
+                }
+                OutError.Code = TEXT("INVALID_ENUM_VALUE");
+                OutError.Field = Key;
+                OutError.Message = FString::Printf(
+                    TEXT("Invalid value '%s' for enum field '%s'. Valid: %s"),
+                    *StrValue, *Key, *Joined);
+                return false;
+            }
+        }
+    }
+
+    OutResolvedClass = Resolved;
+    return true;
+}
+
+// =============================================================================
+// Cycle detection: DFS three-coloring
+// =============================================================================
+struct FCycleNodeKey
+{
+    // either an existing-graph expression pointer OR a local-id (synthetic node)
+    UMaterialExpression* Expr = nullptr;
+    FString              LocalId;
+
+    bool IsLocal() const { return Expr == nullptr; }
+
+    friend bool operator==(const FCycleNodeKey& A, const FCycleNodeKey& B)
+    {
+        if (A.Expr != B.Expr) return false;
+        return A.LocalId == B.LocalId;
+    }
+    friend uint32 GetTypeHash(const FCycleNodeKey& K)
+    {
+        return HashCombine(GetTypeHash(K.Expr), GetTypeHash(K.LocalId));
+    }
+};
+
+// =============================================================================
+// McpValidateConnectionsBatch
+// =============================================================================
+static void McpValidateConnectionsBatch(
+    const TArray<TSharedPtr<FJsonValue>>& ConnectionsJson,
+    const TMap<FString, UClass*>& BatchLocalIdToClass,
+    const FMcpMaterialGraphOwner& Owner,
+    TArray<FMcpResolvedConnection>& OutResolved,
+    TArray<FMcpConnectionValidationError>& OutErrors,
+    TArray<FString>& OutSentinelWarnings)
+{
+    OutResolved.Reset();
+    OutErrors.Reset();
+    OutSentinelWarnings.Reset();
+
+    for (int32 i = 0; i < ConnectionsJson.Num(); ++i)
+    {
+        const TSharedPtr<FJsonValue>& V = ConnectionsJson[i];
+        const TSharedPtr<FJsonObject>* ObjPtr = nullptr;
+        if (!V.IsValid() || !V->TryGetObject(ObjPtr) || !ObjPtr || !ObjPtr->IsValid())
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = TEXT("connections[]");
+            E.Code = TEXT("INVALID_CONNECTION");
+            E.Message = TEXT("Connection entry is not an object");
+            OutErrors.Add(E);
+            continue;
+        }
+        const TSharedPtr<FJsonObject>& Obj = *ObjPtr;
+
+        FString FromNode, ToNode, FromPin, ToPin;
+        Obj->TryGetStringField(TEXT("fromNode"), FromNode);
+        Obj->TryGetStringField(TEXT("toNode"), ToNode);
+        Obj->TryGetStringField(TEXT("fromPin"), FromPin);
+        Obj->TryGetStringField(TEXT("toPin"), ToPin);
+
+        int32 FromOutputIndex = INDEX_NONE;
+        int32 FromOutputIndexInt = INDEX_NONE;
+        if (Obj->HasTypedField<EJson::Number>(TEXT("fromOutputIndex")))
+        {
+            FromOutputIndexInt = (int32)Obj->GetNumberField(TEXT("fromOutputIndex"));
+            FromOutputIndex = FromOutputIndexInt;
+        }
+
+        if (FromNode.IsEmpty() || ToNode.IsEmpty())
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = FromNode.IsEmpty() ? TEXT("fromNode") : TEXT("toNode");
+            E.Code = TEXT("INVALID_CONNECTION");
+            E.Message = TEXT("fromNode and toNode are required");
+            OutErrors.Add(E);
+            continue;
+        }
+
+        // pin / index mutual exclusivity
+        if (!FromPin.IsEmpty() && FromOutputIndex != INDEX_NONE)
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = TEXT("fromPin/fromOutputIndex");
+            E.Code = TEXT("CONFLICTING_PIN_REFERENCE");
+            E.Message = TEXT("Provide either fromPin or fromOutputIndex, not both");
+            OutErrors.Add(E);
+            continue;
+        }
+
+        FMcpResolvedConnection R;
+        R.Index = i;
+        R.FromPin = FromPin;
+        R.FromOutputIndex = FromOutputIndex;
+        R.ToPin = ToPin;
+
+        // Resolve toNode (sentinel allowed)
+        const FString ToNodeRaw = ToNode;
+        if (ToNodeRaw == TEXT("$material"))
+        {
+            R.bToMaterialRoot = true;
+        }
+        else if (ToNodeRaw.Equals(TEXT("$root"), ESearchCase::IgnoreCase) ||
+                 ToNodeRaw.Equals(TEXT("MaterialOutput"), ESearchCase::IgnoreCase) ||
+                 ToNodeRaw.Equals(TEXT("Material"), ESearchCase::IgnoreCase) ||
+                 ToNodeRaw.Equals(TEXT("Root"), ESearchCase::IgnoreCase))
+        {
+            R.bToMaterialRoot = true;
+            OutSentinelWarnings.Add(FString::Printf(
+                TEXT("toNode '%s' resolved to canonical '$material'; future calls should use '$material'"),
+                *ToNodeRaw));
+        }
+        else if (UClass* const* BatchCls = BatchLocalIdToClass.Find(ToNodeRaw))
+        {
+            R.ToLocalId = ToNodeRaw;
+            (void)BatchCls; // used for pin-validation below
+        }
+        else if (UMaterialExpression* Existing = McpFindGraphExpression(Owner, ToNodeRaw, -1))
+        {
+            R.ToExpression = Existing;
+        }
+        else
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = TEXT("toNode");
+            E.Code = TEXT("NODE_NOT_FOUND");
+            E.Message = FString::Printf(
+                TEXT("toNode '%s' not found in batch localIds and not in existing graph"),
+                *ToNodeRaw);
+            OutErrors.Add(E);
+            continue;
+        }
+
+        // Resolve fromNode (no sentinel)
+        if (UClass* const* BatchCls = BatchLocalIdToClass.Find(FromNode))
+        {
+            R.FromLocalId = FromNode;
+            (void)BatchCls;
+        }
+        else if (UMaterialExpression* Existing = McpFindGraphExpression(Owner, FromNode, -1))
+        {
+            R.FromExpression = Existing;
+        }
+        else
+        {
+            FMcpConnectionValidationError E;
+            E.Index = i;
+            E.Field = TEXT("fromNode");
+            E.Code = TEXT("NODE_NOT_FOUND");
+            E.Message = FString::Printf(
+                TEXT("fromNode '%s' not found in batch localIds and not in existing graph"),
+                *FromNode);
+            OutErrors.Add(E);
+            continue;
+        }
+
+        // toPin validation
+        if (R.bToMaterialRoot)
+        {
+            if (!McpIsValidMaterialRootPinName(ToPin))
+            {
+                FMcpConnectionValidationError E;
+                E.Index = i;
+                E.Field = TEXT("toPin");
+                E.Code = TEXT("INVALID_MATERIAL_ROOT_PIN");
+                E.Message = FString::Printf(
+                    TEXT("toPin '%s' is not a valid material root pin"), *ToPin);
+                OutErrors.Add(E);
+                continue;
+            }
+        }
+        else if (!ToPin.IsEmpty())
+        {
+            UClass* TargetClass = nullptr;
+            if (!R.ToLocalId.IsEmpty())
+            {
+                if (UClass* const* BatchCls2 = BatchLocalIdToClass.Find(R.ToLocalId))
+                {
+                    TargetClass = *BatchCls2;
+                }
+            }
+            else if (R.ToExpression)
+            {
+                TargetClass = R.ToExpression->GetClass();
+            }
+
+            if (TargetClass)
+            {
+                TArray<FString> PinNames;
+                if (!McpClassHasInputPin(TargetClass, ToPin, PinNames))
+                {
+                    FString Joined;
+                    for (int32 j = 0; j < PinNames.Num(); ++j)
+                    {
+                        if (j > 0) Joined += TEXT(", ");
+                        Joined += PinNames[j];
+                    }
+                    FMcpConnectionValidationError E;
+                    E.Index = i;
+                    E.Field = TEXT("toPin");
+                    E.Code = TEXT("INVALID_INPUT_PIN");
+                    E.Message = FString::Printf(
+                        TEXT("toPin '%s' is not a valid input on %s. Valid pins: %s"),
+                        *ToPin, *TargetClass->GetName(), *Joined);
+                    OutErrors.Add(E);
+                    continue;
+                }
+            }
+        }
+
+        OutResolved.Add(R);
+    }
+
+    if (OutErrors.Num() > 0)
+    {
+        return; // skip cycle detection if there are already errors
+    }
+
+    // Cycle detection
+    // Build edges: from-key -> to-key (key = (Expr, LocalId)).
+    // Existing edges: walk every existing expression for FExpressionInput pins and add edges
+    // FROM the input's source expression TO the holder expression.
+    // Proposed edges: each resolved connection with bToMaterialRoot=false is a real edge.
+
+    auto MakeKey = [](UMaterialExpression* Expr, const FString& LocalId) -> FCycleNodeKey
+    {
+        FCycleNodeKey K;
+        K.Expr = Expr;
+        K.LocalId = LocalId;
+        return K;
+    };
+
+    TMap<FCycleNodeKey, TArray<FCycleNodeKey>> Edges;
+
+    // Existing edges
+    if (const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner))
+    {
+        for (UMaterialExpression* Holder : *Exprs)
+        {
+            if (!Holder) continue;
+            for (TFieldIterator<FProperty> PropIt(Holder->GetClass()); PropIt; ++PropIt)
+            {
+                FProperty* Prop = *PropIt;
+                if (FStructProperty* SP = CastField<FStructProperty>(Prop))
+                {
+                    if (SP->Struct && SP->Struct->GetFName() == FName(TEXT("ExpressionInput")))
+                    {
+                        FExpressionInput* In = SP->ContainerPtrToValuePtr<FExpressionInput>(Holder);
+                        if (In && In->Expression)
+                        {
+                            FCycleNodeKey From = MakeKey(In->Expression, FString());
+                            FCycleNodeKey To   = MakeKey(Holder,         FString());
+                            Edges.FindOrAdd(From).Add(To);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Proposed edges (skip material-root: root is a sink)
+    for (const FMcpResolvedConnection& C : OutResolved)
+    {
+        if (C.bToMaterialRoot) continue;
+        FCycleNodeKey From = MakeKey(C.FromExpression, C.FromLocalId);
+        FCycleNodeKey To   = MakeKey(C.ToExpression,   C.ToLocalId);
+        Edges.FindOrAdd(From).Add(To);
+    }
+
+    enum EColor : uint8 { White = 0, Gray = 1, Black = 2 };
+    TMap<FCycleNodeKey, uint8> Color;
+
+    auto KeyLabel = [](const FCycleNodeKey& K) -> FString
+    {
+        if (K.IsLocal()) return FString::Printf(TEXT("$%s"), *K.LocalId);
+        return K.Expr->GetName();
+    };
+
+    TArray<FCycleNodeKey> Stack;
+    bool bCycleFound = false;
+    FString CyclePath;
+
+    TFunction<void(const FCycleNodeKey&)> Visit = [&](const FCycleNodeKey& K)
+    {
+        if (bCycleFound) return;
+        Color.FindOrAdd(K, White);
+        Color[K] = Gray;
+        Stack.Add(K);
+
+        if (TArray<FCycleNodeKey>* Outgoing = Edges.Find(K))
+        {
+            for (const FCycleNodeKey& N : *Outgoing)
+            {
+                if (bCycleFound) break;
+                uint8 Col = Color.FindOrAdd(N, White);
+                if (Col == Gray)
+                {
+                    // cycle found - build path from N's first occurrence in Stack
+                    int32 StartIdx = Stack.IndexOfByPredicate([&N](const FCycleNodeKey& X) { return X == N; });
+                    if (StartIdx == INDEX_NONE) StartIdx = 0;
+                    FString Path;
+                    for (int32 i = StartIdx; i < Stack.Num(); ++i)
+                    {
+                        if (i > StartIdx) Path += TEXT(" -> ");
+                        Path += KeyLabel(Stack[i]);
+                    }
+                    Path += TEXT(" -> ") + KeyLabel(N);
+                    CyclePath = Path;
+                    bCycleFound = true;
+                    return;
+                }
+                if (Col == White)
+                {
+                    Visit(N);
+                }
+            }
+        }
+
+        Color[K] = Black;
+        Stack.Pop();
+    };
+
+    // start from each potential root
+    TArray<FCycleNodeKey> AllKeys;
+    for (const auto& Pair : Edges) AllKeys.Add(Pair.Key);
+    for (const auto& Pair : Edges) for (const FCycleNodeKey& V2 : Pair.Value) AllKeys.AddUnique(V2);
+
+    for (const FCycleNodeKey& K : AllKeys)
+    {
+        if (bCycleFound) break;
+        uint8 Col = Color.FindOrAdd(K, White);
+        if (Col == White) Visit(K);
+    }
+
+    if (bCycleFound)
+    {
+        FMcpConnectionValidationError E;
+        E.Index = INDEX_NONE;
+        E.Field = TEXT("connections");
+        E.Code = TEXT("CYCLIC_CONNECTION");
+        E.Message = FString::Printf(TEXT("Cycle detected: %s"), *CyclePath);
+        OutErrors.Add(E);
+    }
+}
+
+// =============================================================================
+// Apply helpers (semantic and reflected)
+// =============================================================================
+static EMaterialSamplerType McpReadSamplerType(
+    const TSharedPtr<FJsonObject>& Item, bool& bOutPresent)
+{
+    bOutPresent = false;
+    FString S;
+    if (!Item->TryGetStringField(TEXT("samplerType"), S) || S.IsEmpty()) return SAMPLERTYPE_Color;
+    bool bRecognized = false;
+    EMaterialSamplerType ST = McpParseSamplerTypeString(S, &bRecognized);
+    if (bRecognized) { bOutPresent = true; return ST; }
+    return SAMPLERTYPE_Color;
+}
+
+static bool McpReadMipValueMode(
+    const TSharedPtr<FJsonObject>& Item, ETextureMipValueMode& Out)
+{
+    FString S;
+    if (!Item->TryGetStringField(TEXT("mipValueMode"), S) || S.IsEmpty()) return false;
+    if (S == TEXT("MVM_None") || S.Equals(TEXT("None"), ESearchCase::IgnoreCase))             { Out = TMVM_None; return true; }
+    if (S == TEXT("MVM_MipLevel") || S.Equals(TEXT("MipLevel"), ESearchCase::IgnoreCase))     { Out = TMVM_MipLevel; return true; }
+    if (S == TEXT("MVM_MipBias") || S.Equals(TEXT("MipBias"), ESearchCase::IgnoreCase))       { Out = TMVM_MipBias; return true; }
+    if (S == TEXT("MVM_Derivative") || S.Equals(TEXT("Derivative"), ESearchCase::IgnoreCase)) { Out = TMVM_Derivative; return true; }
+    return false;
+}
+
+static void McpApplyChannelNames(const TSharedPtr<FJsonObject>& Item, FParameterChannelNames& Out)
+{
+    const TSharedPtr<FJsonObject>* ChObjPtr = nullptr;
+    if (!Item->TryGetObjectField(TEXT("channelNames"), ChObjPtr) || !ChObjPtr || !ChObjPtr->IsValid()) return;
+    const TSharedPtr<FJsonObject>& ChObj = *ChObjPtr;
+    FString R, G, B, A;
+    if (ChObj->TryGetStringField(TEXT("r"), R)) Out.R = FText::FromString(R);
+    if (ChObj->TryGetStringField(TEXT("g"), G)) Out.G = FText::FromString(G);
+    if (ChObj->TryGetStringField(TEXT("b"), B)) Out.B = FText::FromString(B);
+    if (ChObj->TryGetStringField(TEXT("a"), A)) Out.A = FText::FromString(A);
+}
+
+static void McpApplyVectorDefaultValue(const TSharedPtr<FJsonObject>& Item, FLinearColor& Out)
+{
+    const TSharedPtr<FJsonObject>* VObjPtr = nullptr;
+    if (!Item->TryGetObjectField(TEXT("defaultValue"), VObjPtr) || !VObjPtr || !VObjPtr->IsValid()) return;
+    const TSharedPtr<FJsonObject>& VObj = *VObjPtr;
+    double R = Out.R, G = Out.G, B = Out.B, A = Out.A;
+    VObj->TryGetNumberField(TEXT("r"), R);
+    VObj->TryGetNumberField(TEXT("g"), G);
+    VObj->TryGetNumberField(TEXT("b"), B);
+    VObj->TryGetNumberField(TEXT("a"), A);
+    Out = FLinearColor((float)R, (float)G, (float)B, (float)A);
+}
+
+template <typename TSamplerStorage>
+static void McpApplySamplerWithValidation(
+    TSamplerStorage& InOutSamplerType, UTexture* Texture,
+    const TSharedPtr<FJsonObject>& Item,
+    TArray<FMcpSamplerWarning>& OutSamplerWarnings)
+{
+    bool bPresent = false;
+    EMaterialSamplerType ST = McpReadSamplerType(Item, bPresent);
+    if (bPresent)
+    {
+        InOutSamplerType = ST;
+        if (Texture)
+        {
+            FMcpSamplerWarning W;
+            if (!McpValidateSamplerTextureCompatibility(ST, Texture, W))
+            {
+                OutSamplerWarnings.Add(W);
+            }
+        }
+    }
+}
+
+static void McpApplySemanticFields(
+    UMaterialExpression* Expr, UClass* /*Cls*/, const TSharedPtr<FJsonObject>& Item,
+    TArray<FMcpSamplerWarning>& OutSamplerWarnings)
+{
+    if (!Expr || !Item.IsValid()) return;
+
+    if (UMaterialExpressionScalarParameter* P = Cast<UMaterialExpressionScalarParameter>(Expr))
+    {
+        FString Name; if (Item->TryGetStringField(TEXT("parameterName"), Name)) P->ParameterName = FName(*Name);
+        double V;     if (Item->TryGetNumberField(TEXT("defaultValue"), V))     P->DefaultValue = (float)V;
+        FString G;    if (Item->TryGetStringField(TEXT("group"), G))            P->Group = FName(*G);
+        int32 SP = 0; if (Item->TryGetNumberField(TEXT("sortPriority"), SP))    P->SortPriority = SP;
+        return;
+    }
+    if (UMaterialExpressionVectorParameter* P = Cast<UMaterialExpressionVectorParameter>(Expr))
+    {
+        FString Name; if (Item->TryGetStringField(TEXT("parameterName"), Name)) P->ParameterName = FName(*Name);
+        McpApplyVectorDefaultValue(Item, P->DefaultValue);
+        FString G;    if (Item->TryGetStringField(TEXT("group"), G))            P->Group = FName(*G);
+        int32 SP = 0; if (Item->TryGetNumberField(TEXT("sortPriority"), SP))    P->SortPriority = SP;
+        McpApplyChannelNames(Item, P->ChannelNames);
+        return;
+    }
+    if (UMaterialExpressionStaticBoolParameter* P = Cast<UMaterialExpressionStaticBoolParameter>(Expr))
+    {
+        FString Name; if (Item->TryGetStringField(TEXT("parameterName"), Name)) P->ParameterName = FName(*Name);
+        bool DV = false; if (Item->TryGetBoolField(TEXT("defaultValue"), DV))   P->DefaultValue = DV;
+        FString G;    if (Item->TryGetStringField(TEXT("group"), G))            P->Group = FName(*G);
+        int32 SP = 0; if (Item->TryGetNumberField(TEXT("sortPriority"), SP))    P->SortPriority = SP;
+        return;
+    }
+    if (UMaterialExpressionStaticSwitchParameter* P = Cast<UMaterialExpressionStaticSwitchParameter>(Expr))
+    {
+        FString Name; if (Item->TryGetStringField(TEXT("parameterName"), Name)) P->ParameterName = FName(*Name);
+        bool DV = false; if (Item->TryGetBoolField(TEXT("defaultValue"), DV))   P->DefaultValue = DV;
+        FString G;    if (Item->TryGetStringField(TEXT("group"), G))            P->Group = FName(*G);
+        int32 SP = 0; if (Item->TryGetNumberField(TEXT("sortPriority"), SP))    P->SortPriority = SP;
+        return;
+    }
+    if (UMaterialExpressionStaticBool* P = Cast<UMaterialExpressionStaticBool>(Expr))
+    {
+        bool DV = false; if (Item->TryGetBoolField(TEXT("defaultValue"), DV))   P->Value = DV;
+        return;
+    }
+    if (UMaterialExpressionConstant* P = Cast<UMaterialExpressionConstant>(Expr))
+    {
+        double DV; if (Item->TryGetNumberField(TEXT("defaultValue"), DV))       P->R = (float)DV;
+        return;
+    }
+    if (UMaterialExpressionConstant3Vector* P = Cast<UMaterialExpressionConstant3Vector>(Expr))
+    {
+        McpApplyVectorDefaultValue(Item, P->Constant);
+        return;
+    }
+    if (UMaterialExpressionConstant4Vector* P = Cast<UMaterialExpressionConstant4Vector>(Expr))
+    {
+        McpApplyVectorDefaultValue(Item, P->Constant);
+        return;
+    }
+    if (UMaterialExpressionTextureSampleParameter2D* P = Cast<UMaterialExpressionTextureSampleParameter2D>(Expr))
+    {
+        FString Name; if (Item->TryGetStringField(TEXT("parameterName"), Name)) P->ParameterName = FName(*Name);
+        FString G;    if (Item->TryGetStringField(TEXT("group"), G))            P->Group = FName(*G);
+        int32 SP = 0; if (Item->TryGetNumberField(TEXT("sortPriority"), SP))    P->SortPriority = SP;
+        McpApplyChannelNames(Item, P->ChannelNames);
+        FString TexPath; if (Item->TryGetStringField(TEXT("texturePath"), TexPath) && !TexPath.IsEmpty())
+        {
+            if (UTexture* T = LoadObject<UTexture>(nullptr, *TexPath)) P->Texture = T;
+        }
+        McpApplySamplerWithValidation(P->SamplerType, P->Texture, Item, OutSamplerWarnings);
+        int32 CI = 0; if (Item->TryGetNumberField(TEXT("coordinateIndex"), CI)) P->ConstCoordinate = (uint32)CI;
+        ETextureMipValueMode MM; if (McpReadMipValueMode(Item, MM)) P->MipValueMode = MM;
+        return;
+    }
+    if (UMaterialExpressionTextureObjectParameter* P = Cast<UMaterialExpressionTextureObjectParameter>(Expr))
+    {
+        FString Name; if (Item->TryGetStringField(TEXT("parameterName"), Name)) P->ParameterName = FName(*Name);
+        FString G;    if (Item->TryGetStringField(TEXT("group"), G))            P->Group = FName(*G);
+        int32 SP = 0; if (Item->TryGetNumberField(TEXT("sortPriority"), SP))    P->SortPriority = SP;
+        FString TexPath; if (Item->TryGetStringField(TEXT("texturePath"), TexPath) && !TexPath.IsEmpty())
+        {
+            if (UTexture* T = LoadObject<UTexture>(nullptr, *TexPath)) P->Texture = T;
+        }
+        McpApplySamplerWithValidation(P->SamplerType, P->Texture, Item, OutSamplerWarnings);
+        return;
+    }
+    if (UMaterialExpressionTextureObject* P = Cast<UMaterialExpressionTextureObject>(Expr))
+    {
+        FString TexPath; if (Item->TryGetStringField(TEXT("texturePath"), TexPath) && !TexPath.IsEmpty())
+        {
+            if (UTexture* T = LoadObject<UTexture>(nullptr, *TexPath)) P->Texture = T;
+        }
+        McpApplySamplerWithValidation(P->SamplerType, P->Texture, Item, OutSamplerWarnings);
+        return;
+    }
+    if (UMaterialExpressionTextureSample* P = Cast<UMaterialExpressionTextureSample>(Expr))
+    {
+        FString TexPath; if (Item->TryGetStringField(TEXT("texturePath"), TexPath) && !TexPath.IsEmpty())
+        {
+            if (UTexture* T = LoadObject<UTexture>(nullptr, *TexPath)) P->Texture = T;
+        }
+        McpApplySamplerWithValidation(P->SamplerType, P->Texture, Item, OutSamplerWarnings);
+        int32 CI = 0; if (Item->TryGetNumberField(TEXT("coordinateIndex"), CI)) P->ConstCoordinate = (uint32)CI;
+        ETextureMipValueMode MM; if (McpReadMipValueMode(Item, MM)) P->MipValueMode = MM;
+        return;
+    }
+    if (UMaterialExpressionTextureCoordinate* P = Cast<UMaterialExpressionTextureCoordinate>(Expr))
+    {
+        int32 CI = 0; if (Item->TryGetNumberField(TEXT("coordinateIndex"), CI)) P->CoordinateIndex = CI;
+        double UT; if (Item->TryGetNumberField(TEXT("uTiling"), UT))            P->UTiling = (float)UT;
+        double VT; if (Item->TryGetNumberField(TEXT("vTiling"), VT))            P->VTiling = (float)VT;
+        return;
+    }
+    if (UMaterialExpressionPanner* P = Cast<UMaterialExpressionPanner>(Expr))
+    {
+        int32 CI = 0; if (Item->TryGetNumberField(TEXT("coordinateIndex"), CI)) P->ConstCoordinate = (uint32)CI;
+        double SP; if (Item->TryGetNumberField(TEXT("speed"), SP))              { P->SpeedX = (float)SP; P->SpeedY = (float)SP; }
+        return;
+    }
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+    if (UMaterialExpressionRotator* P = Cast<UMaterialExpressionRotator>(Expr))
+    {
+        int32 CI = 0; if (Item->TryGetNumberField(TEXT("coordinateIndex"), CI)) P->ConstCoordinate = (uint32)CI;
+        double SP; if (Item->TryGetNumberField(TEXT("speed"), SP))              P->Speed = (float)SP;
+        return;
+    }
+#endif
+}
+
+// =============================================================================
+// Apply reflected (catalog UePropName) fields. Skips MCP-semantic fields.
+// =============================================================================
+static int64 McpResolveEnumValue(UEnum* E, const FString& StrValue)
+{
+    if (!E) return INDEX_NONE;
+    for (int32 i = 0; i < E->NumEnums(); ++i)
+    {
+        const FString FullName = E->GetNameStringByIndex(i);
+        if (FullName.EndsWith(TEXT("_MAX"))) continue;
+        if (FullName.Equals(StrValue, ESearchCase::IgnoreCase))
+        {
+            return E->GetValueByIndex(i);
+        }
+        const int32 UPos = FullName.Find(TEXT("_"));
+        if (UPos > 0 && UPos < FullName.Len() - 1)
+        {
+            const FString Stripped = FullName.RightChop(UPos + 1);
+            if (Stripped.Equals(StrValue, ESearchCase::IgnoreCase))
+            {
+                return E->GetValueByIndex(i);
+            }
+        }
+    }
+    return INDEX_NONE;
+}
+
+static void McpApplyReflectedFields(
+    UMaterialExpression* Expr, UClass* Cls, const TSharedPtr<FJsonObject>& Item)
+{
+    if (!Expr || !Cls || !Item.IsValid()) return;
+    const FMcpMaterialExpressionCatalog& Cat = FMcpMaterialExpressionCatalog::Get();
+    const FString ClassName = Cls->GetName();
+
+    for (const auto& Pair : Item->Values)
+    {
+        const FString& Key = Pair.Key;
+        if (Key.Equals(TEXT("nodeType"), ESearchCase::CaseSensitive)) continue;
+        if (Key.Equals(TEXT("localId"), ESearchCase::CaseSensitive)) continue;
+        if (Key.Equals(TEXT("x"), ESearchCase::CaseSensitive)) continue;
+        if (Key.Equals(TEXT("y"), ESearchCase::CaseSensitive)) continue;
+        if (Key.Equals(TEXT("desc"), ESearchCase::CaseSensitive)) continue;
+
+        const FString UePropName = Cat.GetUePropertyName(ClassName, Key);
+        if (UePropName.IsEmpty()) continue; // MCP-semantic, handled elsewhere
+
+        FProperty* Prop = Cls->FindPropertyByName(FName(*UePropName));
+        if (!Prop) continue;
+
+        if (FEnumProperty* EP = CastField<FEnumProperty>(Prop))
+        {
+            FString StrVal;
+            if (!Pair.Value.IsValid() || !Pair.Value->TryGetString(StrVal)) continue;
+            const int64 EnumVal = McpResolveEnumValue(EP->GetEnum(), StrVal);
+            if (EnumVal == INDEX_NONE) continue;
+            EP->GetUnderlyingProperty()->SetIntPropertyValue(EP->ContainerPtrToValuePtr<void>(Expr), EnumVal);
+            continue;
+        }
+        if (FByteProperty* BP = CastField<FByteProperty>(Prop))
+        {
+            if (BP->Enum)
+            {
+                FString StrVal;
+                if (!Pair.Value.IsValid() || !Pair.Value->TryGetString(StrVal)) continue;
+                const int64 EnumVal = McpResolveEnumValue(BP->Enum, StrVal);
+                if (EnumVal == INDEX_NONE) continue;
+                *BP->ContainerPtrToValuePtr<uint8>(Expr) = (uint8)EnumVal;
+            }
+            else
+            {
+                double Num = 0.0;
+                if (Pair.Value.IsValid() && Pair.Value->TryGetNumber(Num))
+                {
+                    *BP->ContainerPtrToValuePtr<uint8>(Expr) = (uint8)Num;
+                }
+            }
+            continue;
+        }
+        if (FBoolProperty* BoolP = CastField<FBoolProperty>(Prop))
+        {
+            bool V = false;
+            if (Pair.Value.IsValid() && Pair.Value->TryGetBool(V))
+            {
+                BoolP->SetPropertyValue_InContainer(Expr, V);
+            }
+            continue;
+        }
+        if (FNumericProperty* NP = CastField<FNumericProperty>(Prop))
+        {
+            double V = 0.0;
+            if (Pair.Value.IsValid() && Pair.Value->TryGetNumber(V))
+            {
+                if (NP->IsFloatingPoint())
+                {
+                    NP->SetFloatingPointPropertyValue(NP->ContainerPtrToValuePtr<void>(Expr), V);
+                }
+                else
+                {
+                    NP->SetIntPropertyValue(NP->ContainerPtrToValuePtr<void>(Expr), (int64)V);
+                }
+            }
+            continue;
+        }
+        if (FStrProperty* SP = CastField<FStrProperty>(Prop))
+        {
+            FString V;
+            if (Pair.Value.IsValid() && Pair.Value->TryGetString(V))
+            {
+                SP->SetPropertyValue_InContainer(Expr, V);
+            }
+            continue;
+        }
+        if (FNameProperty* NameProp = CastField<FNameProperty>(Prop))
+        {
+            FString V;
+            if (Pair.Value.IsValid() && Pair.Value->TryGetString(V))
+            {
+                NameProp->SetPropertyValue_InContainer(Expr, FName(*V));
+            }
+            continue;
+        }
+    }
+}
+
+// =============================================================================
+// Format helpers
+// =============================================================================
+static TSharedPtr<FJsonValue> McpFormatNodeError(const FMcpNodeValidationError& E)
+{
+    TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+    O->SetStringField(TEXT("scope"),   TEXT("node"));
+    O->SetNumberField(TEXT("index"),   E.Index);
+    if (!E.LocalId.IsEmpty()) O->SetStringField(TEXT("localId"), E.LocalId);
+    O->SetStringField(TEXT("field"),   E.Field);
+    O->SetStringField(TEXT("code"),    E.Code);
+    O->SetStringField(TEXT("message"), E.Message);
+    if (E.DidYouMean.Num() > 0)
+    {
+        TArray<TSharedPtr<FJsonValue>> Arr;
+        for (const FString& S : E.DidYouMean) Arr.Add(MakeShared<FJsonValueString>(S));
+        O->SetArrayField(TEXT("didYouMean"), Arr);
+    }
+    return MakeShared<FJsonValueObject>(O);
+}
+
+static TSharedPtr<FJsonValue> McpFormatConnError(const FMcpConnectionValidationError& E)
+{
+    TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+    O->SetStringField(TEXT("scope"),   TEXT("connection"));
+    O->SetNumberField(TEXT("index"),   E.Index);
+    O->SetStringField(TEXT("field"),   E.Field);
+    O->SetStringField(TEXT("code"),    E.Code);
+    O->SetStringField(TEXT("message"), E.Message);
+    return MakeShared<FJsonValueObject>(O);
+}
+
+#endif // WITH_EDITOR
+
+} // namespace
+
+// =============================================================================
+// External entry: McpHandle_AddMaterialNodes
+// =============================================================================
+extern bool McpHandle_AddMaterialNodes(
+    UMcpAutomationBridgeSubsystem* Sub,
+    const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket);
+
+bool McpHandle_AddMaterialNodes(
+    UMcpAutomationBridgeSubsystem* Sub,
+    const FString& RequestId,
+    const TSharedPtr<FJsonObject>& Payload,
+    TSharedPtr<FMcpBridgeWebSocket> Socket)
+{
+#if WITH_EDITOR
+    if (!Sub || !Payload.IsValid())
+    {
+        if (Sub) Sub->SendAutomationError(Socket, RequestId,
+            TEXT("Invalid payload"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    FString AssetPath;
+    if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("assetPath required"), TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    if (AssetPath.StartsWith(TEXT("/Engine/")) || AssetPath.StartsWith(TEXT("/EnginePlugins/")))
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            FString::Printf(TEXT("Asset path '%s' is under engine content. Copy to /Game first."), *AssetPath),
+            TEXT("ENGINE_ASSET_BLOCKED"));
+        return true;
+    }
+
+    FMcpMaterialGraphOwner Owner;
+    FString OwnerErr;
+    if (!McpResolveMaterialGraphOwner(AssetPath, Owner, OwnerErr) || Owner.bReadOnly)
+    {
+        const FString Code = OwnerErr.Contains(TEXT("not found"))
+            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE");
+        Sub->SendAutomationError(Socket, RequestId,
+            OwnerErr.IsEmpty() ? TEXT("Cannot mutate this asset") : OwnerErr, Code);
+        return true;
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* NodesArr = nullptr;
+    if (!Payload->TryGetArrayField(TEXT("nodes"), NodesArr) || !NodesArr || NodesArr->Num() == 0)
+    {
+        Sub->SendAutomationError(Socket, RequestId,
+            TEXT("nodes[] is required, minimum length 1"),
+            TEXT("INVALID_ARGUMENT"));
+        return true;
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* ConnsArr = nullptr;
+    Payload->TryGetArrayField(TEXT("connections"), ConnsArr);
+
+    // Phase A.1: validate every node spec
+    TSet<FString>                   SeenLocalIds;
+    TArray<UClass*>                 ResolvedClasses;
+    TArray<bool>                    AutoPrefixedFlags;
+    TArray<FMcpNodeValidationError> NodeErrors;
+    TArray<FString>                 AutoPrefixWarnings;
+    TMap<FString, UClass*>          LocalIdToClass;
+
+    ResolvedClasses.Reserve(NodesArr->Num());
+    AutoPrefixedFlags.Reserve(NodesArr->Num());
+
+    for (int32 i = 0; i < NodesArr->Num(); ++i)
+    {
+        TSharedPtr<FJsonObject> Item;
+        const TSharedPtr<FJsonObject>* ObjPtr = nullptr;
+        if ((*NodesArr)[i].IsValid() && (*NodesArr)[i]->TryGetObject(ObjPtr) && ObjPtr && ObjPtr->IsValid())
+        {
+            Item = *ObjPtr;
+        }
+        UClass* Cls = nullptr;
+        bool bAuto = false;
+        FMcpNodeValidationError E;
+        if (!McpValidateNodeSpec(i, Item, SeenLocalIds, Cls, bAuto, E))
+        {
+            NodeErrors.Add(E);
+            ResolvedClasses.Add(nullptr);
+            AutoPrefixedFlags.Add(false);
+            continue;
+        }
+        ResolvedClasses.Add(Cls);
+        AutoPrefixedFlags.Add(bAuto);
+
+        if (bAuto)
+        {
+            FString OriginalNodeType;
+            Item->TryGetStringField(TEXT("nodeType"), OriginalNodeType);
+            AutoPrefixWarnings.Add(FString::Printf(
+                TEXT("nodes[%d]: nodeType '%s' resolved to canonical '%s'"),
+                i, *OriginalNodeType, *Cls->GetName()));
+        }
+        FString LocalId;
+        Item->TryGetStringField(TEXT("localId"), LocalId);
+        if (!LocalId.IsEmpty()) LocalIdToClass.Add(LocalId, Cls);
+    }
+
+    // Phase A.2: validate connections (only when no node errors)
+    TArray<FMcpResolvedConnection>        ResolvedConnections;
+    TArray<FMcpConnectionValidationError> ConnErrors;
+    TArray<FString>                       SentinelWarnings;
+    if (NodeErrors.Num() == 0 && ConnsArr)
+    {
+        McpValidateConnectionsBatch(*ConnsArr, LocalIdToClass, Owner,
+                                    ResolvedConnections, ConnErrors, SentinelWarnings);
+    }
+
+    if (NodeErrors.Num() > 0 || ConnErrors.Num() > 0)
+    {
+        TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+        Resp->SetBoolField  (TEXT("success"), false);
+        Resp->SetStringField(TEXT("errorCode"), TEXT("VALIDATION_FAILED"));
+        Resp->SetStringField(TEXT("message"),
+            FString::Printf(TEXT("Batch rejected; 0 mutations applied. %d node + %d connection errors."),
+                NodeErrors.Num(), ConnErrors.Num()));
+        TArray<TSharedPtr<FJsonValue>> ErrorsJson;
+        for (const auto& E : NodeErrors) ErrorsJson.Add(McpFormatNodeError(E));
+        for (const auto& E : ConnErrors) ErrorsJson.Add(McpFormatConnError(E));
+        Resp->SetArrayField(TEXT("errors"), ErrorsJson);
+        Sub->SendAutomationResponse(Socket, RequestId, false,
+            TEXT("validation failed"), Resp, TEXT("VALIDATION_FAILED"));
+        return true;
+    }
+
+    // Phase B: apply
+    FScopedTransaction Tx(NSLOCTEXT("McpAutomationBridge",
+        "McpAddMaterialNodes", "MCP add_material_nodes"));
+    if (Owner.Asset) Owner.Asset->Modify();
+
+    UObject* MaterialOuter = Owner.GraphSource ? Owner.GraphSource : Owner.Asset;
+    TMap<FString, UMaterialExpression*> LocalIdToExpr;
+    TArray<TSharedPtr<FJsonObject>>     Mappings;
+    TArray<FMcpSamplerWarning>          SamplerWarnings;
+
+    for (int32 i = 0; i < NodesArr->Num(); ++i)
+    {
+        UClass* Cls = ResolvedClasses[i];
+        if (!Cls) continue; // shouldn't happen since we aborted on errors
+
+        TSharedPtr<FJsonObject> Item;
+        const TSharedPtr<FJsonObject>* ObjPtr = nullptr;
+        if ((*NodesArr)[i].IsValid() && (*NodesArr)[i]->TryGetObject(ObjPtr) && ObjPtr && ObjPtr->IsValid())
+        {
+            Item = *ObjPtr;
+        }
+        if (!Item.IsValid()) continue;
+
+        UMaterialExpression* Expr = NewObject<UMaterialExpression>(
+            MaterialOuter, Cls, NAME_None, RF_Transactional);
+        if (!Expr) continue;
+
+        // Base fields
+        double X = 0, Y = 0;
+        Item->TryGetNumberField(TEXT("x"), X);
+        Item->TryGetNumberField(TEXT("y"), Y);
+        Expr->MaterialExpressionEditorX = (int32)X;
+        Expr->MaterialExpressionEditorY = (int32)Y;
+        Expr->MaterialExpressionGuid = FGuid::NewGuid();
+        FString Desc;
+        if (Item->TryGetStringField(TEXT("desc"), Desc)) Expr->Desc = Desc;
+
+        // Type-specific
+        McpApplySemanticFields(Expr, Cls, Item, SamplerWarnings);
+        McpApplyReflectedFields(Expr, Cls, Item);
+
+        TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressionsMutable(Owner);
+        if (Exprs) Exprs->Add(Expr);
+
+        FString LocalId;
+        Item->TryGetStringField(TEXT("localId"), LocalId);
+        if (!LocalId.IsEmpty()) LocalIdToExpr.Add(LocalId, Expr);
+
+        TSharedPtr<FJsonObject> M = MakeShared<FJsonObject>();
+        M->SetStringField(TEXT("localId"), LocalId);
+        M->SetStringField(TEXT("nodeId"), Expr->GetName());
+        M->SetStringField(TEXT("expressionGuid"), Expr->MaterialExpressionGuid.ToString());
+        M->SetNumberField(TEXT("expressionIndex"), Exprs ? (Exprs->Num() - 1) : 0);
+        Mappings.Add(M);
+    }
+
+    // Apply connections
+    int32 ConnectionsApplied = 0;
+    for (const FMcpResolvedConnection& C : ResolvedConnections)
+    {
+        UMaterialExpression* From = C.FromExpression
+            ? C.FromExpression
+            : LocalIdToExpr.FindRef(C.FromLocalId);
+
+        if (!From) continue;
+
+        if (C.bToMaterialRoot)
+        {
+            EMaterialProperty MP = McpMaterialPropertyFromName(C.ToPin);
+            if (MP != MP_MAX)
+            {
+                if (UMaterialEditingLibrary::ConnectMaterialProperty(From, C.FromPin, MP))
+                {
+                    ++ConnectionsApplied;
+                }
+            }
+        }
+        else
+        {
+            UMaterialExpression* To = C.ToExpression
+                ? C.ToExpression
+                : LocalIdToExpr.FindRef(C.ToLocalId);
+            if (To)
+            {
+                if (UMaterialEditingLibrary::ConnectMaterialExpressions(From, C.FromPin, To, C.ToPin))
+                {
+                    ++ConnectionsApplied;
+                }
+            }
+        }
+    }
+
+    // Rebuild + optional save
+    FString RebuildErr;
+    McpRebuildMaterialGraphOwner(Owner, RebuildErr);
+
+    bool bSave = false;
+    Payload->TryGetBoolField(TEXT("save"), bSave);
+    bool bSaved = false;
+    if (bSave)
+    {
+        bSaved = McpSafeAssetSave(Owner.Asset);
+        if (!bSaved)
+        {
+            Tx.Cancel();
+            Sub->SendAutomationError(Socket, RequestId,
+                TEXT("Save failed; transaction rolled back"), TEXT("APPLY_FAILED"));
+            return true;
+        }
+    }
+
+    // Build success response
+    TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
+    Resp->SetBoolField  (TEXT("success"), true);
+    Resp->SetStringField(TEXT("assetPath"), AssetPath);
+    Resp->SetNumberField(TEXT("nodesCreated"), NodesArr->Num());
+    Resp->SetNumberField(TEXT("connectionsApplied"), ConnectionsApplied);
+    Resp->SetBoolField  (TEXT("saved"), bSaved);
+
+    TArray<TSharedPtr<FJsonValue>> MappingsJson;
+    for (const auto& M : Mappings) MappingsJson.Add(MakeShared<FJsonValueObject>(M));
+    Resp->SetArrayField(TEXT("mappings"), MappingsJson);
+
+    TArray<TSharedPtr<FJsonValue>> WarnJson;
+    for (const FString& W : AutoPrefixWarnings)
+    {
+        TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+        O->SetStringField(TEXT("code"),    TEXT("NODE_TYPE_RESOLVED"));
+        O->SetStringField(TEXT("message"), W);
+        WarnJson.Add(MakeShared<FJsonValueObject>(O));
+    }
+    for (const FString& W : SentinelWarnings)
+    {
+        TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+        O->SetStringField(TEXT("code"),    TEXT("SENTINEL_RESOLVED"));
+        O->SetStringField(TEXT("message"), W);
+        WarnJson.Add(MakeShared<FJsonValueObject>(O));
+    }
+    for (const FMcpSamplerWarning& W : SamplerWarnings)
+    {
+        TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+        O->SetStringField(TEXT("code"),     W.Code);
+        O->SetStringField(TEXT("message"),  W.Message);
+        O->SetStringField(TEXT("expected"), W.Expected);
+        O->SetStringField(TEXT("got"),      W.Got);
+        TSharedPtr<FJsonObject> TF = MakeShared<FJsonObject>();
+        TF->SetStringField(TEXT("compressionSettings"), W.CompressionSettingsName);
+        TF->SetBoolField  (TEXT("sRGB"),                W.bSRGB);
+        TF->SetBoolField  (TEXT("isVirtualTexture"),    W.bVirtualTexture);
+        O->SetObjectField (TEXT("textureFlags"),        TF);
+        WarnJson.Add(MakeShared<FJsonValueObject>(O));
+    }
+    if (WarnJson.Num() > 0) Resp->SetArrayField(TEXT("warnings"), WarnJson);
+
+    Sub->SendAutomationResponse(Socket, RequestId, true,
+        TEXT("add_material_nodes succeeded"), Resp, FString());
+    return true;
+#else
+    if (Sub) Sub->SendAutomationError(Socket, RequestId,
+        TEXT("add_material_nodes requires editor build"), TEXT("NOT_IMPLEMENTED"));
+    return true;
+#endif
+}
+
+// =============================================================================
+// Test-only forwarders — exposed so unit tests can exercise the validators
+// without needing an asset/socket fixture. Defined in "Tests" namespace via
+// thin shims; callers in the Tests/ folder reference these by name.
+// =============================================================================
+namespace McpAddMaterialNodesValidationForTests
+{
+    bool ValidateNodeSpec(
+        int32 ItemIndex,
+        const TSharedPtr<FJsonObject>& Item,
+        TSet<FString>& InOutSeenLocalIds,
+        UClass*& OutResolvedClass,
+        bool& bOutAutoPrefixed,
+        FString& OutCode,
+        FString& OutField,
+        FString& OutMessage,
+        TArray<FString>& OutDidYouMean)
+    {
+#if WITH_EDITOR
+        FMcpNodeValidationError E;
+        const bool b = McpValidateNodeSpec(ItemIndex, Item, InOutSeenLocalIds,
+                                           OutResolvedClass, bOutAutoPrefixed, E);
+        OutCode = E.Code;
+        OutField = E.Field;
+        OutMessage = E.Message;
+        OutDidYouMean = E.DidYouMean;
+        return b;
+#else
+        OutResolvedClass = nullptr;
+        bOutAutoPrefixed = false;
+        OutCode = TEXT("EDITOR_ONLY");
+        return false;
+#endif
+    }
+}

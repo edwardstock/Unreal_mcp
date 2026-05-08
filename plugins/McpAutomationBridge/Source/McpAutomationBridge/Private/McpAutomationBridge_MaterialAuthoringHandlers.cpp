@@ -184,6 +184,15 @@ bool UMcpAutomationBridgeSubsystem::HandleManageMaterialAuthoringAction(
     return true;
   }
 
+  // C.1: redesigned add_material_nodes (transactional batch with inline connections).
+  // Lives in McpAutomationBridge_Material_GraphWrites.cpp.
+  extern bool McpHandle_AddMaterialNodes(
+      UMcpAutomationBridgeSubsystem* Sub, const FString& RequestId,
+      const TSharedPtr<FJsonObject>& Payload, TSharedPtr<FMcpBridgeWebSocket> Socket);
+  if (SubAction == TEXT("add_material_nodes")) {
+    return McpHandle_AddMaterialNodes(this, RequestId, Payload, Socket);
+  }
+
   // Per-domain dispatchers (decomposition of Phase 8 authoring sub-actions).
   // Each returns true if it consumed the request; false to fall through.
   if (HandleAuthoring_ParameterNodes(SubAction, RequestId, Payload, Socket)) {
