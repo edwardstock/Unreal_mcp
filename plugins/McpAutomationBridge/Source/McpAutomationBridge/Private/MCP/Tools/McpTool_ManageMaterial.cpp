@@ -176,13 +176,14 @@ public:
 				TEXT("Batch list of material node specs. Each item: "
 					"{ localId, nodeType|expressionClass, x, y, desc, ... }."))
 			.ArrayOfObjects(TEXT("connections"),
-				TEXT("Batch list of pin connections. Each item: "
-					"{ fromNode, fromPin, fromOutputIndex, toNode, toPin }."))
+				TEXT("Batch list of pin connections for add_material_nodes, "
+					"update_material_nodes, and connect_material_pins. Each item: "
+					"{ fromNode, fromPin, fromOutputIndex, toNode, toPin }. "
+					"connect_material_pins is batch-only and requires this array."))
 			.ArrayOfObjects(TEXT("updates"),
-				TEXT("Batch list of node-update specs (per-node property overrides "
-					"for update_material_nodes / update_material_function_calls / "
-					"update_custom_expressions / update_function_inputs / "
-					"update_function_outputs)."))
+				TEXT("Batch list of node-update specs for update_material_nodes and "
+					"related update actions. update_material_nodes may also include "
+					"top-level connections[] to reconnect pins in the same validated batch."))
 			.ArrayOfObjects(TEXT("identifiers"),
 				TEXT("Batch list of mixed-type expression identifiers (number index, "
 					"string nodeId/guid, or {expressionPath, expressionIndex}). "

@@ -80,7 +80,7 @@ export const coreToolDefinitions: ToolDefinition[] = [
   {
     name: 'manage_asset',
     category: 'core',
-    description: 'Create, import, duplicate, rename, delete assets. Edit Material and MaterialFunction graphs and instances. Analyze dependencies.',
+    description: 'Create, import, duplicate, rename, delete assets. Analyze dependencies and asset metadata.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -91,13 +91,6 @@ export const coreToolDefinitions: ToolDefinition[] = [
             'get_dependencies', 'get_source_control_state', 'analyze_graph', 'get_asset_graph', 'create_thumbnail', 'set_tags', 'get_metadata', 'set_metadata', 'validate', 'fixup_redirectors', 'find_by_tag', 'generate_report',
             'create_material', 'create_material_instance', 'create_render_target', 'generate_lods', 'add_material_parameter', 'list_instances', 'reset_instance_parameters', 'exists', 'get_material_stats',
             'nanite_rebuild_mesh', 'bulk_rename', 'bulk_delete', 'source_control_checkout', 'source_control_submit',
-            'get_material_instance_info', 'find_material_expressions', 'get_material_expression_details', 'bulk_get_material_expression_details', 'get_material_expression_connections',
-            'get_landscape_material_context', 'compile_material_diagnostics',
-            'add_material_node', 'connect_material_pins', 'remove_material_node', 'break_material_connections', 'get_material_node_details', 'rebuild_material',
-            'set_material_node_position', 'move_material_node', 'bulk_set_material_node_positions', 'bulk_move_material_nodes',
-            'create_material_comment', 'wrap_material_nodes_in_comment',
-            'create_named_reroute', 'use_named_reroute', 'replace_long_connection_with_named_reroute',
-            'align_material_nodes'
           ],
           description: 'Action to perform'
         },
@@ -186,47 +179,14 @@ export const coreToolDefinitions: ToolDefinition[] = [
         checkoutFiles: commonSchemas.booleanProp,
         // Bulk delete
         showConfirmation: commonSchemas.booleanProp,
-        // Material graph operations
-        pinName: commonSchemas.pinName,
-        desc: commonSchemas.stringProp,
         materialPath: commonSchemas.materialPath,
         texturePath: commonSchemas.texturePath,
-        expressionClass: commonSchemas.stringProp,
-        coordinateIndex: commonSchemas.numberProp,
         parameterType: commonSchemas.stringProp,
-        nodes: commonSchemas.arrayOfObjects,
         tags: commonSchemas.arrayOfStrings,
         // Handler aliases (alternative parameter names accepted by handler)
         folderPath: commonSchemas.directoryPath,
-        sourceNode: commonSchemas.sourceNodeId,
-        targetNode: commonSchemas.targetNodeId,
-        outputPin: commonSchemas.sourcePin,
-        inputPin: commonSchemas.targetPin,
         type: commonSchemas.stringProp,
-        defaultValue: commonSchemas.value,
-        expressionIndex: commonSchemas.numberProp,
-        // NEW3: when true, find_material_expressions returns the full details shape per entry
-        includeDetails: {
-          type: 'boolean',
-          description: 'When true and action is find_material_expressions, every entry includes the same shape as get_material_expression_details (type-specific blocks like code/attributeSetTypes/etc.).'
-        },
-        // R10/REG2: bulk_get_material_expression_details identifiers (provide exactly one)
-        indices: {
-          type: 'array',
-          description: 'Indices of expressions to fetch details for in one round-trip (alternative to guids/nodeIds).',
-          items: { type: 'number' }
-        },
-        guids: {
-          type: 'array',
-          description: 'Expression GUIDs to fetch details for in one round-trip (alternative to indices/nodeIds).',
-          items: { type: 'string' }
-        },
-        nodeIds: {
-          type: 'array',
-          description: 'Node IDs to fetch details for in one round-trip (alternative to indices/guids).',
-          items: { type: 'string' }
-        },
-        includeConsumers: commonSchemas.booleanProp
+        defaultValue: commonSchemas.value
       },
       required: ['action']
     },

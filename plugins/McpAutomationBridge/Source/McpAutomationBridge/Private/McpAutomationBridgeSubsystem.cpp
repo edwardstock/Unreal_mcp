@@ -839,26 +839,6 @@ void UMcpAutomationBridgeSubsystem::InitializeHandlers() {
                     return HandleActivateRagdoll(R, A, P, S);
                   });
 
-  // Material Graph
-  RegisterHandler(TEXT("add_material_texture_sample"),
-                  [this](const FString &R, const FString &A,
-                         const TSharedPtr<FJsonObject> &P,
-                         TSharedPtr<FMcpBridgeWebSocket> S) {
-                    return HandleAddMaterialTextureSample(R, A, P, S);
-                  });
-  RegisterHandler(TEXT("add_material_expression"),
-                  [this](const FString &R, const FString &A,
-                         const TSharedPtr<FJsonObject> &P,
-                         TSharedPtr<FMcpBridgeWebSocket> S) {
-                    return HandleAddMaterialExpression(R, A, P, S);
-                  });
-  RegisterHandler(TEXT("create_material_nodes"),
-                  [this](const FString &R, const FString &A,
-                         const TSharedPtr<FJsonObject> &P,
-                         TSharedPtr<FMcpBridgeWebSocket> S) {
-                    return HandleCreateMaterialNodes(R, A, P, S);
-                  });
-
   // Sequencer
   RegisterHandler(TEXT("add_sequencer_keyframe"),
                   [this](const FString &R, const FString &A,

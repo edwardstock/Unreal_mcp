@@ -40,6 +40,13 @@ namespace McpUpdateMaterialNodesValidationForTests
     void BuildRequestedFields(
         const TSharedPtr<FJsonObject>& Item,
         TArray<FString>& OutRequestedFields);
+
+    bool ValidatePayloadConnections(
+        const FMcpMaterialGraphOwner& Owner,
+        const TArray<TSharedPtr<FJsonValue>>& ConnectionsJson,
+        FString& OutCode,
+        FString& OutField,
+        FString& OutMessage);
 }
 
 namespace
@@ -278,6 +285,33 @@ bool FMcpUpdateMaterialNodes_NodeTypeSilentlySkipped::RunTest(const FString&)
         Requested.Contains(FString(TEXT("nodeType"))));
     TestTrue (TEXT("defaultValue present in RequestedFields"),
         Requested.Contains(FString(TEXT("defaultValue"))));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMcpUpdateMaterialNodes_ConnectionsAccepted,
+    "LHGame.Mcp.Material.UpdateNodes.ConnectionsAccepted",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMcpUpdateMaterialNodes_ConnectionsAccepted::RunTest(const FString&)
+{
+    FUpdateFixture F;
+    F.Build(TEXT("ConnectionsAccepted"));
+
+    TArray<TSharedPtr<FJsonValue>> Connections;
+    TSharedPtr<FJsonObject> Conn = MakeShared<FJsonObject>();
+    Conn->SetStringField(TEXT("fromNode"), F.A->GetName());
+    Conn->SetNumberField(TEXT("fromOutputIndex"), 0);
+    Conn->SetStringField(TEXT("toNode"), F.B->GetName());
+    Conn->SetStringField(TEXT("toPin"), TEXT("A"));
+    Connections.Add(MakeShared<FJsonValueObject>(Conn));
+
+    FString Code, Field, Msg;
+    const bool bOk = McpUpdateMaterialNodesValidationForTests::ValidatePayloadConnections(
+        F.Owner, Connections, Code, Field, Msg);
+
+    TestTrue(TEXT("connections accepted on update_material_nodes"), bOk);
+    TestEqual(TEXT("no error code"), Code, FString());
+    TestEqual(TEXT("no error field"), Field, FString());
     return true;
 }
 

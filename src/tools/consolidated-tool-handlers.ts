@@ -60,14 +60,6 @@ interface DeprecationFlags {
   __animationAuthoringDeprecationLogged?: boolean;
 }
 
-const MATERIAL_GRAPH_ACTION_MAP: Record<string, string> = {
-  add_material_node: 'add_node',
-  connect_material_pins: 'connect_pins',
-  remove_material_node: 'remove_node',
-  break_material_connections: 'break_connections',
-  get_material_node_details: 'get_node_details',
-};
-
 const BEHAVIOR_TREE_ACTION_MAP: Record<string, string> = {
   add_bt_node: 'add_node',
   connect_bt_nodes: 'connect_nodes',
@@ -82,15 +74,6 @@ const NIAGARA_GRAPH_ACTION_MAP: Record<string, string> = {
   remove_niagara_node: 'remove_node',
   set_niagara_parameter: 'set_parameter'
 };
-
-function isMaterialGraphAction(action: string): boolean {
-  return (
-    Object.prototype.hasOwnProperty.call(MATERIAL_GRAPH_ACTION_MAP, action) ||
-    action.includes('material_node') ||
-    action.includes('material_pins') ||
-    action.includes('material_connections')
-  );
-}
 
 function isBehaviorTreeGraphAction(action: string): boolean {
   return (
@@ -172,10 +155,6 @@ function registerDefaultHandlers() {
     if (['create_render_target', 'nanite_rebuild_mesh'].includes(action)) {
       const payload = { ...args, subAction: action };
       return cleanObject(await executeAutomationRequest(tools, 'manage_render', payload, `Automation bridge not available for ${action}`));
-    }
-    if (isMaterialGraphAction(action)) {
-      const subAction = MATERIAL_GRAPH_ACTION_MAP[action] || action;
-      return await handleGraphTools('manage_material_graph', subAction, args, tools);
     }
     if (isBehaviorTreeGraphAction(action)) {
       const subAction = BEHAVIOR_TREE_ACTION_MAP[action] || action;

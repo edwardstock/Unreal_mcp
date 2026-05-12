@@ -68,6 +68,11 @@ extern TSharedPtr<FJsonObject> McpBuildExpressionRef(
     UMaterialExpression* Expression);
 extern FString McpGetOutputName(UMaterialExpression* Expression, int32 OutputIndex, bool& bOutResolved);
 
+// Canonical undecorated input pin name; defined in GraphWrites.cpp. For MFC
+// this strips the editor-only type suffix ("BaseColor (V3)" -> "BaseColor") so
+// the emitted name round-trips with connect_material_pins / break_material_connections.
+extern FString McpGetUndecoratedInputName(UMaterialExpression* Expr, int32 InputIndex);
+
 #endif // WITH_EDITOR
 
 #if WITH_EDITOR
@@ -268,31 +273,29 @@ bool McpIsDecorativeForOrphanLabel(const UMaterialExpression* Expr)
 }
 
 // =============================================================================
-// Walk all FExpressionInput-derived properties on Expr; for each connected one,
-// invoke `Visit` with (PinName, OutputIndex, SourceExpression).
+// Visit every connected input pin of Expr, invoking `Visit` with
+// (PinName, OutputIndex, SourceExpression).
+//
+// Uses FExpressionInputIterator (which calls GetInput(i) under the hood). This
+// is critical for UMaterialExpressionMaterialFunctionCall and similar nodes
+// whose input pins live in a dynamic TArray<FFunctionExpressionInput> rather
+// than as static UPROPERTY FExpressionInput fields on the class - the previous
+// UPROPERTY-only walk could not see those connections at all, which broke both
+// includeConsumers (missed MFC consumers) and orphan-BFS (upstream feeders of
+// MFC mistakenly flagged as orphans).
+//
+// PinName is the canonical undecorated form: matches what the material editor
+// shows AND what connect_material_pins / break_material_connections accept.
 // =============================================================================
 template <typename FnT>
 void McpForEachExpressionInputConnection(UMaterialExpression* Expr, FnT Visit)
 {
     if (!Expr) return;
-    const FName ExprInputName(TEXT("ExpressionInput"));
-    for (FProperty* Property = Expr->GetClass()->PropertyLink; Property; Property = Property->PropertyLinkNext)
+    for (FExpressionInputIterator It{ Expr }; It; ++It)
     {
-        FStructProperty* StructProp = CastField<FStructProperty>(Property);
-        if (!StructProp || !StructProp->Struct) continue;
-
-        // Walk super chain for FExpressionInput ancestry (matches the
-        // detection used in break/connect flows).
-        bool bIsExprInput = false;
-        for (UStruct* S = StructProp->Struct; S; S = S->GetSuperStruct())
-        {
-            if (S->GetFName() == ExprInputName) { bIsExprInput = true; break; }
-        }
-        if (!bIsExprInput) continue;
-
-        FExpressionInput* Input = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expr);
+        FExpressionInput* Input = It.Input;
         if (!Input || !Input->Expression) continue;
-        Visit(Property->GetName(), Input->OutputIndex, Input->Expression);
+        Visit(McpGetUndecoratedInputName(Expr, It.Index), Input->OutputIndex, Input->Expression);
     }
 }
 
@@ -1393,6 +1396,31 @@ bool McpHandle_ListMaterialExpressionClasses(
             }
         }
         Entry->SetArrayField(TEXT("applicableFields"), Fields);
+
+        // inputPins[] / outputPins[] - canonical pin handles for connect_material_pins.
+        // `name` is what GetInputName(i) / Outputs[i].OutputName returns (the user-facing handle
+        // shown in the material editor). `propertyName` is emitted only when it differs from
+        // `name` - e.g. MaterialExpressionStaticSwitchParameter: A -> "True", B -> "False".
+        auto SerializePins = [](const TArray<FMcpPinInfo>* Pins) -> TArray<TSharedPtr<FJsonValue>>
+        {
+            TArray<TSharedPtr<FJsonValue>> Out;
+            if (!Pins) return Out;
+            Out.Reserve(Pins->Num());
+            for (const FMcpPinInfo& P : *Pins)
+            {
+                TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+                Obj->SetNumberField(TEXT("index"), P.Index);
+                Obj->SetStringField(TEXT("name"), P.Name);
+                if (!P.PropertyName.IsEmpty())
+                {
+                    Obj->SetStringField(TEXT("propertyName"), P.PropertyName);
+                }
+                Out.Add(MakeShared<FJsonValueObject>(Obj));
+            }
+            return Out;
+        };
+        Entry->SetArrayField(TEXT("inputPins"),  SerializePins(Cat.GetInputPins(ClassName)));
+        Entry->SetArrayField(TEXT("outputPins"), SerializePins(Cat.GetOutputPins(ClassName)));
 
         // fieldEnums{} - emit only when at least one applicable field has enum values.
         TSharedPtr<FJsonObject> FieldEnums;

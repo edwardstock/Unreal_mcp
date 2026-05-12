@@ -8464,7 +8464,7 @@
 				"connections":
 				{
 					"type": "array",
-					"description": "Batch list of pin connections. Each item: { fromNode, fromPin, fromOutputIndex, toNode, toPin }.",
+					"description": "Batch list of pin connections for add_material_nodes, update_material_nodes, and connect_material_pins. Each item: { fromNode, fromPin, fromOutputIndex, toNode, toPin }. connect_material_pins is batch-only and requires this array.",
 					"items":
 					{
 						"type": "object"
@@ -8473,7 +8473,7 @@
 				"updates":
 				{
 					"type": "array",
-					"description": "Batch list of node-update specs (per-node property overrides for update_material_nodes / update_material_function_calls / update_custom_expressions / update_function_inputs / update_function_outputs).",
+					"description": "Batch list of node-update specs for update_material_nodes and related update actions. update_material_nodes may also include top-level connections[] to reconnect pins in the same validated batch.",
 					"items":
 					{
 						"type": "object"

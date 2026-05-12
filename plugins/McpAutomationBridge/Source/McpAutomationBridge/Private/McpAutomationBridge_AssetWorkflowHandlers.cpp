@@ -9,15 +9,10 @@
 // Asset_Metadata, Asset_Dependencies, Asset_SourceControl, Asset_Thumbnails,
 // Asset_Validation, Asset_Reports, Asset_NaniteOps).
 //
-// The remaining bulk of this file is shared material-graph helpers
-// (McpAddExpressionToGraph, McpFindFreePosition, McpResolvePlacement, etc.)
-// used by multiple Material_*.cpp translation units, plus a small set of
-// material handler bodies that other Material_*.cpp files forward into
-// (HandleAddMaterialNode, HandleConnectMaterialPins, HandleRemoveMaterialNode,
-// HandleBreakMaterialConnections, HandleGetMaterialInstanceInfo,
-// HandleBulkGetMaterialExpressionDetails, HandleGetSetMaterialAttributesOverrides).
-// Material-graph dispatch entries that previously routed through this file
-// have been removed; manage_material owns them now.
+// Some legacy material graph helpers still live here because older
+// Material_*.cpp translation units forward into them. The old native single-pin
+// connect path was removed; connect_material_pins is owned only by
+// McpHandle_ConnectMaterialPins in Material_GraphWrites.cpp.
 //
 // REFACTORING NOTES:
 //   - Uses McpVersionCompatibility.h for UE 5.0-5.7 API abstraction
@@ -319,6 +314,15 @@ UMaterialExpression* McpFindGraphExpressionFromPayload(
   return nullptr;
 }
 
+// External: canonical undecorated pin name (defined in GraphWrites.cpp).
+extern FString McpGetUndecoratedInputName(UMaterialExpression* Expr, int32 InputIndex);
+
+// Instance-based pin lookup. Iterates FExpressionInputIterator so dynamic-input
+// nodes (UMaterialExpressionMaterialFunctionCall::FunctionInputs, etc.) are
+// visible. Accepted handle forms per pin: canonical (undecorated GetInputName),
+// decorated GetInputName, FExpressionInput::InputName, UPROPERTY name, numeric
+// index. On match, InOutInputName is set to the canonical form for echo.
+// On miss (and empty input name), defaults to pin 0 (legacy behavior).
 FExpressionInput* McpFindExpressionInputByName(
     UMaterialExpression* Expression,
     FString& InOutInputName)
@@ -328,31 +332,55 @@ FExpressionInput* McpFindExpressionInputByName(
     return nullptr;
   }
 
-  if (!InOutInputName.IsEmpty())
+  // Empty name -> pin 0 (legacy contract: callers may pass empty meaning "default").
+  if (InOutInputName.IsEmpty())
   {
-    for (FProperty* Property = Expression->GetClass()->PropertyLink; Property; Property = Property->PropertyLinkNext)
+    FExpressionInput* Pin0 = Expression->GetInput(0);
+    if (Pin0)
     {
-      if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
-      {
-        if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput")) &&
-            Property->GetName().Equals(InOutInputName, ESearchCase::IgnoreCase))
-        {
-          InOutInputName = Property->GetName();
-          return StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
-        }
-      }
+      InOutInputName = McpGetUndecoratedInputName(Expression, 0);
     }
+    return Pin0;
   }
 
-  for (FProperty* Property = Expression->GetClass()->PropertyLink; Property; Property = Property->PropertyLinkNext)
+  // Build parallel UPROPERTY-name map for nodes whose pins back static fields.
+  TMap<const FExpressionInput*, FString> PtrToPropName;
+  const FName ExprInputName(TEXT("ExpressionInput"));
+  for (FProperty* Property = Expression->GetClass()->PropertyLink;
+       Property; Property = Property->PropertyLinkNext)
   {
-    if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
+    FStructProperty* StructProp = CastField<FStructProperty>(Property);
+    if (!StructProp || !StructProp->Struct) continue;
+    bool bIsExprInput = false;
+    for (UStruct* S = StructProp->Struct; S; S = S->GetSuperStruct())
     {
-      if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput")))
-      {
-        InOutInputName = Property->GetName();
-        return StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
-      }
+      if (S->GetFName() == ExprInputName) { bIsExprInput = true; break; }
+    }
+    if (!bIsExprInput) continue;
+    const FExpressionInput* P = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expression);
+    PtrToPropName.Add(P, Property->GetName());
+  }
+
+  for (FExpressionInputIterator It{ Expression }; It; ++It)
+  {
+    FExpressionInput* In = It.Input;
+    if (!In) continue;
+
+    const FString Canonical  = McpGetUndecoratedInputName(Expression, It.Index);
+    const FString Decorated  = Expression->GetInputName(It.Index).ToString();
+    const FString InstanceNm = In->InputName.ToString();
+    const FString* PropName  = PtrToPropName.Find(In);
+    const FString IndexStr   = FString::FromInt(It.Index);
+
+    if (Canonical.Equals(InOutInputName, ESearchCase::IgnoreCase) ||
+        Decorated.Equals(InOutInputName, ESearchCase::IgnoreCase) ||
+        (!InstanceNm.IsEmpty() && InstanceNm.Equals(InOutInputName, ESearchCase::IgnoreCase)) ||
+        (PropName && !PropName->IsEmpty()
+            && PropName->Equals(InOutInputName, ESearchCase::IgnoreCase)) ||
+        IndexStr.Equals(InOutInputName))
+    {
+      InOutInputName = Canonical;
+      return In;
     }
   }
 
@@ -1259,286 +1287,6 @@ bool UMcpAutomationBridgeSubsystem::HandleAddMaterialNode(
 }
 
 // HandleSetMaterialNodePositions - moved to McpAutomationBridge_Material_NodePositioning.cpp (D.1)
-
-bool UMcpAutomationBridgeSubsystem::HandleConnectMaterialPins(
-    const FString &RequestId, const FString &Action,
-    const TSharedPtr<FJsonObject> &Payload,
-    TSharedPtr<FMcpBridgeWebSocket> Socket) {
-  const FString Lower = Action.ToLower();
-  if (!Lower.Equals(TEXT("connect_material_pins"), ESearchCase::IgnoreCase)) {
-    return false;
-  }
-
-#if WITH_EDITOR
-  if (!Payload.IsValid()) {
-    SendAutomationError(Socket, RequestId,
-                        TEXT("connect_material_pins payload missing"),
-                        TEXT("INVALID_PAYLOAD"));
-    return true;
-  }
-
-  // Accept both assetPath and materialPath
-  FString MaterialPath;
-  if (!Payload->TryGetStringField(TEXT("assetPath"), MaterialPath) &&
-      !Payload->TryGetStringField(TEXT("materialPath"), MaterialPath)) {
-    SendAutomationError(Socket, RequestId,
-                        TEXT("assetPath or materialPath is required"),
-                        TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  if (MaterialPath.IsEmpty()) {
-    SendAutomationError(Socket, RequestId,
-                        TEXT("assetPath cannot be empty"),
-                        TEXT("INVALID_ARGUMENT"));
-    return true;
-  }
-
-  // Resolve to UMaterial or UMaterialFunction
-  FMcpMaterialGraphOwner GraphOwner;
-  FString GraphOwnerError;
-  if (!McpResolveMaterialGraphOwner(MaterialPath, GraphOwner, GraphOwnerError))
-  {
-    SendAutomationError(Socket, RequestId, GraphOwnerError,
-                        GraphOwnerError.Contains(TEXT("not found"))
-                            ? TEXT("ASSET_NOT_FOUND") : TEXT("UNSUPPORTED_ASSET_TYPE"));
-    return true;
-  }
-  if (GraphOwner.bReadOnly)
-  {
-    SendAutomationError(Socket, RequestId,
-                        TEXT("Cannot connect pins on a MaterialFunctionInstance - edit the parent function instead"),
-                        TEXT("UNSUPPORTED_OPERATION"));
-    return true;
-  }
-
-  static const TArray<TObjectPtr<UMaterialExpression>> EmptyExprs;
-  const TArray<TObjectPtr<UMaterialExpression>>* ExpressionsPtr = McpGetGraphExpressions(GraphOwner);
-  const TArray<TObjectPtr<UMaterialExpression>>& Expressions = ExpressionsPtr ? *ExpressionsPtr : EmptyExprs;
-
-  // Accept sourceNodeId/targetNodeId, sourceExpressionPath/targetExpressionPath, and fromExpression/toExpression indices.
-  // Also accept spec-style sourceExpression object, target object with kind/expression/inputName.
-  FString SourceNodeId, TargetNodeId;
-  int32 FromExpressionIndex = -1, ToExpressionIndex = -1;
-
-  UMaterialExpression *FromExpression = nullptr;
-  UMaterialExpression *ToExpression = nullptr;
-
-  // Spec-style: sourceExpression as object or string
-  const TSharedPtr<FJsonObject>* SrcExprObj = nullptr;
-  if (Payload->TryGetObjectField(TEXT("sourceExpression"), SrcExprObj) && SrcExprObj)
-  {
-    int32 SrcIdx = INDEX_NONE;
-    FString SrcPath, SrcGuidStr, SrcName;
-    if ((*SrcExprObj)->TryGetNumberField(TEXT("expressionIndex"), SrcIdx))
-      FromExpression = McpFindGraphExpression(GraphOwner, FString(), SrcIdx);
-    else if ((*SrcExprObj)->TryGetStringField(TEXT("expressionPath"), SrcPath) && !SrcPath.IsEmpty())
-      FromExpression = McpFindGraphExpression(GraphOwner, SrcPath);
-    else if ((*SrcExprObj)->TryGetStringField(TEXT("expressionName"), SrcName) && !SrcName.IsEmpty())
-      FromExpression = McpFindGraphExpression(GraphOwner, SrcName);
-  }
-  else
-  {
-    FString SrcExprStr;
-    if (Payload->TryGetStringField(TEXT("sourceExpression"), SrcExprStr) && !SrcExprStr.IsEmpty())
-      FromExpression = McpFindGraphExpression(GraphOwner, SrcExprStr);
-  }
-
-  if (!FromExpression)
-    FromExpression = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("sourceExpressionIndex"), TEXT("sourceNodeId"), TEXT("sourceExpressionPath"));
-
-  Payload->TryGetStringField(TEXT("sourceNodeId"), SourceNodeId);
-  Payload->TryGetStringField(TEXT("targetNodeId"), TargetNodeId);
-
-  if (!FromExpression && Payload->TryGetNumberField(TEXT("fromExpression"), FromExpressionIndex))
-    FromExpression = McpFindGraphExpression(GraphOwner, FString(), FromExpressionIndex);
-
-  // Spec-style: target as object with kind, expression, inputName
-  FString TargetKind;
-  FString InputName;
-  const TSharedPtr<FJsonObject>* TargetObj = nullptr;
-  if (Payload->TryGetObjectField(TEXT("target"), TargetObj) && TargetObj)
-  {
-    (*TargetObj)->TryGetStringField(TEXT("kind"), TargetKind);
-    (*TargetObj)->TryGetStringField(TEXT("inputName"), InputName);
-    const TSharedPtr<FJsonObject>* TgtExprObj = nullptr;
-    if ((*TargetObj)->TryGetObjectField(TEXT("expression"), TgtExprObj) && TgtExprObj && !ToExpression)
-    {
-      int32 TgtIdx = INDEX_NONE;
-      FString TgtPath, TgtName;
-      if ((*TgtExprObj)->TryGetNumberField(TEXT("expressionIndex"), TgtIdx))
-        ToExpression = McpFindGraphExpression(GraphOwner, FString(), TgtIdx);
-      else if ((*TgtExprObj)->TryGetStringField(TEXT("expressionPath"), TgtPath) && !TgtPath.IsEmpty())
-        ToExpression = McpFindGraphExpression(GraphOwner, TgtPath);
-      else if ((*TgtExprObj)->TryGetStringField(TEXT("expressionName"), TgtName) && !TgtName.IsEmpty())
-        ToExpression = McpFindGraphExpression(GraphOwner, TgtName);
-    }
-  }
-
-  if (!ToExpression)
-    ToExpression = McpFindGraphExpressionFromPayload(GraphOwner, Payload, TEXT("targetExpressionIndex"), TEXT("targetNodeId"), TEXT("targetExpressionPath"));
-  if (!ToExpression && Payload->TryGetNumberField(TEXT("toExpression"), ToExpressionIndex))
-    ToExpression = McpFindGraphExpression(GraphOwner, FString(), ToExpressionIndex);
-
-  if (InputName.IsEmpty()) Payload->TryGetStringField(TEXT("inputName"), InputName);
-  if (InputName.IsEmpty()) Payload->TryGetStringField(TEXT("targetPin"), InputName);
-  if (InputName.IsEmpty()) Payload->TryGetStringField(TEXT("sourcePin"), InputName);
-
-  // Resolve sourceOutputIndex from explicit field or by name lookup on source outputs
-  int32 SourceOutputIndex = 0;
-  {
-    double SrcOutIdx = 0;
-    if (Payload->TryGetNumberField(TEXT("sourceOutputIndex"), SrcOutIdx))
-      SourceOutputIndex = (int32)SrcOutIdx;
-    else
-    {
-      FString SrcOutName;
-      if (Payload->TryGetStringField(TEXT("sourceOutputName"), SrcOutName) && !SrcOutName.IsEmpty() && FromExpression)
-      {
-        const TArray<FExpressionOutput>& Outputs = FromExpression->GetOutputs();
-        for (int32 OIdx = 0; OIdx < Outputs.Num(); ++OIdx)
-        {
-          if (Outputs[OIdx].OutputName.ToString().Equals(SrcOutName, ESearchCase::IgnoreCase))
-          {
-            SourceOutputIndex = OIdx;
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  // Handle connection to main material node (only for UMaterial)
-  bool bConnectToMainNode = false;
-  if (TargetKind == TEXT("mainMaterialPin"))
-    bConnectToMainNode = true;
-  else if (!ToExpression && (TargetNodeId.IsEmpty() || TargetNodeId == TEXT("Main")) && !InputName.IsEmpty())
-    bConnectToMainNode = true;
-  else if (!ToExpression && !InputName.IsEmpty() && TargetKind.IsEmpty())
-    bConnectToMainNode = true;
-
-  if (bConnectToMainNode && FromExpression)
-  {
-    if (GraphOwner.Kind != EMcpMaterialGraphOwnerKind::Material)
-    {
-      SendAutomationError(Socket, RequestId,
-                          TEXT("Main material node connections only apply to UMaterial, not UMaterialFunction"),
-                          TEXT("UNSUPPORTED_OPERATION"));
-      return true;
-    }
-
-    UMaterial* Material = CastChecked<UMaterial>(GraphOwner.GraphSource);
-    bool bFound = false;
-#if WITH_EDITORONLY_DATA
-    if (InputName == TEXT("BaseColor")) {
-      MCP_GET_MATERIAL_INPUT(Material, BaseColor).Expression = FromExpression; bFound = true;
-    } else if (InputName == TEXT("EmissiveColor")) {
-      MCP_GET_MATERIAL_INPUT(Material, EmissiveColor).Expression = FromExpression; bFound = true;
-    } else if (InputName == TEXT("Roughness")) {
-      MCP_GET_MATERIAL_INPUT(Material, Roughness).Expression = FromExpression; bFound = true;
-    } else if (InputName == TEXT("Metallic")) {
-      MCP_GET_MATERIAL_INPUT(Material, Metallic).Expression = FromExpression; bFound = true;
-    } else if (InputName == TEXT("Specular")) {
-      MCP_GET_MATERIAL_INPUT(Material, Specular).Expression = FromExpression; bFound = true;
-    } else if (InputName == TEXT("Normal")) {
-      MCP_GET_MATERIAL_INPUT(Material, Normal).Expression = FromExpression; bFound = true;
-    } else if (InputName == TEXT("Opacity")) {
-      MCP_GET_MATERIAL_INPUT(Material, Opacity).Expression = FromExpression; bFound = true;
-    } else if (InputName == TEXT("OpacityMask")) {
-      MCP_GET_MATERIAL_INPUT(Material, OpacityMask).Expression = FromExpression; bFound = true;
-    } else if (InputName == TEXT("AmbientOcclusion") || InputName == TEXT("AO")) {
-      MCP_GET_MATERIAL_INPUT(Material, AmbientOcclusion).Expression = FromExpression; bFound = true;
-    } else if (InputName == TEXT("SubsurfaceColor")) {
-      MCP_GET_MATERIAL_INPUT(Material, SubsurfaceColor).Expression = FromExpression; bFound = true;
-    } else if (InputName == TEXT("WorldPositionOffset")) {
-      MCP_GET_MATERIAL_INPUT(Material, WorldPositionOffset).Expression = FromExpression; bFound = true;
-    }
-#endif
-
-    if (bFound) {
-      FString RebuildErr;
-      McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
-      TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-      McpHandlerUtils::AddVerification(Resp, Material);
-      Resp->SetStringField(TEXT("inputName"), InputName);
-      Resp->SetStringField(TEXT("sourceNodeId"), FromExpression->MaterialExpressionGuid.ToString());
-      SendAutomationResponse(Socket, RequestId, true, TEXT("Connected to main material pin"), Resp, FString());
-    } else {
-      SendAutomationError(Socket, RequestId,
-                          FString::Printf(TEXT("Unknown main material input: %s"), *InputName),
-                          TEXT("INVALID_PIN"));
-    }
-    return true;
-  }
-
-  // Normal expression-to-expression connection
-  if (!FromExpression) {
-    SendAutomationError(Socket, RequestId, TEXT("Source node not found"), TEXT("SOURCE_NODE_NOT_FOUND"));
-    return true;
-  }
-  if (!ToExpression) {
-    SendAutomationError(Socket, RequestId, TEXT("Target node not found"), TEXT("TARGET_NODE_NOT_FOUND"));
-    return true;
-  }
-
-  if (InputName.IsEmpty()) InputName = TEXT("Input");
-
-  FExpressionInput *TargetInput = nullptr;
-  for (FProperty *Property = ToExpression->GetClass()->PropertyLink; Property;
-       Property = Property->PropertyLinkNext) {
-    if (FStructProperty *StructProp = CastField<FStructProperty>(Property)) {
-      if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput"))) {
-        if (Property->GetName().Equals(InputName, ESearchCase::IgnoreCase)) {
-          TargetInput = StructProp->ContainerPtrToValuePtr<FExpressionInput>(ToExpression);
-          break;
-        }
-      }
-    }
-  }
-
-  if (!TargetInput) {
-    for (FProperty *Property = ToExpression->GetClass()->PropertyLink; Property;
-         Property = Property->PropertyLinkNext) {
-      if (FStructProperty *StructProp = CastField<FStructProperty>(Property)) {
-        if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput"))) {
-          TargetInput = StructProp->ContainerPtrToValuePtr<FExpressionInput>(ToExpression);
-          InputName = Property->GetName();
-          break;
-        }
-      }
-    }
-  }
-
-  if (!TargetInput) {
-    SendAutomationError(Socket, RequestId,
-                        FString::Printf(TEXT("No input found on target expression. Tried: %s"), *InputName),
-                        TEXT("INPUT_NOT_FOUND"));
-    return true;
-  }
-
-  TargetInput->Expression = FromExpression;
-  TargetInput->OutputIndex = SourceOutputIndex;
-  FString RebuildErr;
-  McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr);
-
-  TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
-  McpHandlerUtils::AddVerification(Resp, GraphOwner.Asset);
-  Resp->SetStringField(TEXT("assetClass"), GraphOwner.Asset->GetClass()->GetName());
-  Resp->SetNumberField(TEXT("sourceOutputIndex"), SourceOutputIndex);
-  Resp->SetStringField(TEXT("sourceNodeId"), FromExpression->MaterialExpressionGuid.ToString());
-  Resp->SetStringField(TEXT("targetNodeId"), ToExpression->MaterialExpressionGuid.ToString());
-  Resp->SetStringField(TEXT("inputName"), InputName);
-
-  SendAutomationResponse(Socket, RequestId, true,
-                         TEXT("Material pins connected successfully"), Resp, FString());
-  return true;
-#else
-  SendAutomationResponse(Socket, RequestId, false,
-                         TEXT("connect_material_pins requires editor build"),
-                         nullptr, TEXT("NOT_IMPLEMENTED"));
-  return true;
-#endif
-}
 
 bool UMcpAutomationBridgeSubsystem::HandleRemoveMaterialNode(
     const FString &RequestId, const FString &Action,

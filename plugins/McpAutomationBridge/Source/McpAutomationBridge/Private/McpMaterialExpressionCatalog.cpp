@@ -24,6 +24,9 @@
 #include "Materials/MaterialExpressionPanner.h"
 #include "Materials/MaterialExpressionRotator.h"
 
+// External: canonical undecorated pin name (defined in McpAutomationBridge_Material_GraphWrites.cpp).
+extern FString McpGetUndecoratedInputName(UMaterialExpression* Expr, int32 InputIndex);
+
 namespace
 {
     // Convert PascalCase to camelCase by lowercasing first character.
@@ -152,27 +155,55 @@ void FMcpMaterialExpressionCatalog::Build()
         NameToClass.Add(ClassName, Cls);
         AllClassNames.Add(ClassName);
 
-        // Categories from MenuCategories metadata (comma-separated).
+        // MenuCategories - UPROPERTY(config) on UMaterialExpression, populated onto the CDO from
+        // BaseMaterialExpressions.ini. NOT UCLASS metadata - reading via Cls->GetMetaData yields
+        // nothing. Description - GetCreationDescription() virtual is UE's canonical short blurb
+        // (used by the material editor palette). ToolTip UCLASS metadata is empty on stock UE.
         TArray<FString>& Categories = NameToCategories.Add(ClassName);
-#if WITH_EDITORONLY_DATA
-        if (Cls->HasMetaData(TEXT("MenuCategories")))
+        const UMaterialExpression* CDO = Cast<UMaterialExpression>(
+            Cls->GetDefaultObject(/*bCreateIfNeeded*/ true));
+        if (CDO)
         {
-            const FString MenuCats = Cls->GetMetaData(TEXT("MenuCategories"));
-            MenuCats.ParseIntoArray(Categories, TEXT(","), true);
-            for (FString& Cat : Categories)
+            for (const FText& Cat : CDO->MenuCategories)
             {
-                Cat.TrimStartAndEndInline();
+                FString S = Cat.ToString();
+                if (!S.IsEmpty()) Categories.Add(MoveTemp(S));
             }
         }
-        // Description from ToolTip metadata.
-        if (Cls->HasMetaData(TEXT("ToolTip")))
+
+#if WITH_EDITOR
+        // Description fallback chain (CDO-safe — Desc is empty on the CDO so base virtuals
+        // write nothing; overrides typically write static type-level strings):
+        //   1. GetCreationDescription() - canonical short blurb, overridden by ~3 classes
+        //   2. GetExpressionToolTip()   - overridden by ~49 classes with hardcoded help text
+        //   3. GetCaption()[0]          - overridden by nearly all classes; first caption line
+        //                                 is the node-type display name (subsequent lines are
+        //                                 instance-specific, e.g. parameter name)
+        FString Description;
+        if (CDO)
         {
-            NameToDescription.Add(ClassName, Cls->GetMetaData(TEXT("ToolTip")));
+            Description = CDO->GetCreationDescription().ToString();
+            if (Description.IsEmpty())
+            {
+                UMaterialExpression* MutableCDO = CastChecked<UMaterialExpression>(
+                    Cls->GetDefaultObject(true));
+                TArray<FString> ToolTipLines;
+                MutableCDO->GetExpressionToolTip(ToolTipLines);
+                Description = FString::Join(ToolTipLines, TEXT(" "));
+                Description.TrimStartAndEndInline();
+            }
+            if (Description.IsEmpty())
+            {
+                TArray<FString> Captions;
+                CDO->GetCaption(Captions);
+                if (Captions.Num() > 0)
+                {
+                    Description = Captions[0];
+                    Description.TrimStartAndEndInline();
+                }
+            }
         }
-        else
-        {
-            NameToDescription.Add(ClassName, FString());
-        }
+        NameToDescription.Add(ClassName, Description);
 #else
         NameToDescription.Add(ClassName, FString());
 #endif
@@ -322,6 +353,54 @@ void FMcpMaterialExpressionCatalog::Build()
                 }
             }
         }
+
+        // Pin enumeration from CDO.
+        // Inputs: walk FExpressionInputIterator (declaration order via UMaterialExpression::GetInput).
+        // PropertyName comes from a parallel reflection pass; set only when it differs from Name.
+        // Outputs: iterate the CDO's Outputs UPROPERTY (FExpressionOutput::OutputName is the handle).
+        TArray<FMcpPinInfo>& InputPins = NameToInputPins.Add(ClassName);
+        TArray<FMcpPinInfo>& OutputPins = NameToOutputPins.Add(ClassName);
+        if (UMaterialExpression* MutableCDO = Cast<UMaterialExpression>(Cls->GetDefaultObject(true)))
+        {
+            TMap<const FExpressionInput*, FString> PtrToPropName;
+            for (TFieldIterator<FProperty> PinPropIt(Cls); PinPropIt; ++PinPropIt)
+            {
+                if (FStructProperty* StructProp = CastField<FStructProperty>(*PinPropIt))
+                {
+                    if (StructProp->Struct
+                        && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput")))
+                    {
+                        const FExpressionInput* P = StructProp->ContainerPtrToValuePtr<FExpressionInput>(MutableCDO);
+                        PtrToPropName.Add(P, StructProp->GetName());
+                    }
+                }
+            }
+
+            for (FExpressionInputIterator PinIt{ MutableCDO }; PinIt; ++PinIt)
+            {
+                FMcpPinInfo Pin;
+                Pin.Index = PinIt.Index;
+                // Use the canonical undecorated form for invariant naming across
+                // catalog, consumers JSON, and connect/break resolver.
+                Pin.Name  = McpGetUndecoratedInputName(MutableCDO, PinIt.Index);
+                if (const FString* PName = PtrToPropName.Find(PinIt.Input))
+                {
+                    if (!PName->Equals(Pin.Name))
+                    {
+                        Pin.PropertyName = *PName;
+                    }
+                }
+                InputPins.Add(MoveTemp(Pin));
+            }
+
+            for (int32 i = 0; i < MutableCDO->Outputs.Num(); ++i)
+            {
+                FMcpPinInfo Pin;
+                Pin.Index = i;
+                Pin.Name  = MutableCDO->Outputs[i].OutputName.ToString();
+                OutputPins.Add(MoveTemp(Pin));
+            }
+        }
     }
 
     AllClassNames.Sort();
@@ -425,4 +504,14 @@ FString FMcpMaterialExpressionCatalog::GetDescription(const FString& ClassName) 
 {
     const FString* Found = NameToDescription.Find(ClassName);
     return Found ? *Found : FString();
+}
+
+const TArray<FMcpPinInfo>* FMcpMaterialExpressionCatalog::GetInputPins(const FString& ClassName) const
+{
+    return NameToInputPins.Find(ClassName);
+}
+
+const TArray<FMcpPinInfo>* FMcpMaterialExpressionCatalog::GetOutputPins(const FString& ClassName) const
+{
+    return NameToOutputPins.Find(ClassName);
 }

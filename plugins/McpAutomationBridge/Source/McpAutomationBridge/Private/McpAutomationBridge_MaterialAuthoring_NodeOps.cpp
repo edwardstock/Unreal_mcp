@@ -236,10 +236,6 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_NodeOps(
     return HandleRemoveMaterialNode(RequestId, TEXT("remove_material_node"), Payload, Socket);
   }
 
-  if (SubAction == TEXT("connect_nodes")) {
-    return HandleConnectMaterialPins(RequestId, TEXT("connect_material_pins"), Payload, Socket);
-  }
-
   if (SubAction == TEXT("disconnect_input_pin")) {
     const TSharedPtr<FJsonObject>* TargetExpression = nullptr;
     if (Payload->TryGetObjectField(TEXT("targetExpression"), TargetExpression) &&
@@ -260,127 +256,6 @@ bool UMcpAutomationBridgeSubsystem::HandleAuthoring_NodeOps(
       Payload->SetStringField(TEXT("inputName"), TargetInputName);
     }
     return HandleBreakMaterialConnections(RequestId, TEXT("break_material_connections"), Payload, Socket);
-  }
-
-
-  // ==========================================================================
-  // 8.2 Node Connections
-  // ==========================================================================
-
-  // --------------------------------------------------------------------------
-  // connect_nodes
-  // --------------------------------------------------------------------------
-  if (SubAction == TEXT("connect_nodes")) {
-    LOAD_GRAPH_OWNER_OR_RETURN();
-
-    FString SourceNodeId, TargetNodeId, InputName, SourcePin;
-    Payload->TryGetStringField(TEXT("sourceNodeId"), SourceNodeId);
-    Payload->TryGetStringField(TEXT("targetNodeId"), TargetNodeId);
-    Payload->TryGetStringField(TEXT("inputName"), InputName);
-    Payload->TryGetStringField(TEXT("sourcePin"), SourcePin);
-
-    UMaterialExpression *SourceExpr =
-        FindExpressionByIdOrName_NodeOps(GraphOwner, SourceNodeId);
-    if (!SourceExpr) {
-      SendAutomationError(Socket, RequestId, TEXT("Source node not found."),
-                          TEXT("NODE_NOT_FOUND"));
-      return true;
-    }
-
-    // Target is main material node?
-    if (TargetNodeId.IsEmpty() || TargetNodeId == TEXT("Main")) {
-      // N5: safe cast — UMaterialFunction has no main shader pins
-      UMaterial* MatPtr = Cast<UMaterial>(Material);
-      if (!MatPtr) {
-        SendAutomationError(Socket, RequestId,
-            TEXT("Connecting to main material pins requires a UMaterial. "
-                 "UMaterialFunction has no main shader pins. "
-                 "Pass an explicit targetNodeId instead."),
-            TEXT("UNSUPPORTED_OPERATION"));
-        return true;
-      }
-      bool bFound = false;
-#if WITH_EDITORONLY_DATA
-      if (InputName == TEXT("BaseColor")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, BaseColor).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("EmissiveColor")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, EmissiveColor).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("Roughness")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, Roughness).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("Metallic")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, Metallic).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("Specular")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, Specular).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("Normal")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, Normal).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("Opacity")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, Opacity).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("OpacityMask")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, OpacityMask).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("AmbientOcclusion")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, AmbientOcclusion).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("SubsurfaceColor")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, SubsurfaceColor).Expression = SourceExpr;
-        bFound = true;
-      } else if (InputName == TEXT("WorldPositionOffset")) {
-        MCP_GET_MATERIAL_INPUT(MatPtr, WorldPositionOffset).Expression = SourceExpr;
-        bFound = true;
-      }
-#endif
-
-      if (bFound) {
-        { FString RebuildErr; McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr); }
-        SendAutomationResponse(Socket, RequestId, true,
-                               TEXT("Connected to main material node."));
-      } else {
-        SendAutomationError(
-            Socket, RequestId,
-            FString::Printf(TEXT("Unknown input on main node: %s"), *InputName),
-            TEXT("INVALID_PIN"));
-      }
-      return true;
-    }
-
-    // Connect to another expression
-    UMaterialExpression *TargetExpr =
-        FindExpressionByIdOrName_NodeOps(GraphOwner, TargetNodeId);
-    if (!TargetExpr) {
-      SendAutomationError(Socket, RequestId, TEXT("Target node not found."),
-                          TEXT("NODE_NOT_FOUND"));
-      return true;
-    }
-
-    // Find the input property
-    FProperty *Prop =
-        TargetExpr->GetClass()->FindPropertyByName(FName(*InputName));
-    if (Prop) {
-      if (FStructProperty *StructProp = CastField<FStructProperty>(Prop)) {
-        FExpressionInput *InputPtr =
-            StructProp->ContainerPtrToValuePtr<FExpressionInput>(TargetExpr);
-        if (InputPtr) {
-          InputPtr->Expression = SourceExpr;
-          { FString RebuildErr; McpRebuildMaterialGraphOwner(GraphOwner, RebuildErr); }
-          SendAutomationResponse(Socket, RequestId, true,
-                                 TEXT("Nodes connected."));
-          return true;
-        }
-      }
-    }
-
-    SendAutomationError(
-        Socket, RequestId,
-        FString::Printf(TEXT("Input pin '%s' not found."), *InputName),
-        TEXT("PIN_NOT_FOUND"));
-    return true;
   }
 
 

@@ -534,10 +534,6 @@ private:
                                  const TSharedPtr<FJsonObject> &Payload,
                                  TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
   bool
-  HandleConnectMaterialPins(const FString &RequestId, const FString &Action,
-                            const TSharedPtr<FJsonObject> &Payload,
-                            TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool
   HandleRemoveMaterialNode(const FString &RequestId, const FString &Action,
                            const TSharedPtr<FJsonObject> &Payload,
                            TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
@@ -628,10 +624,6 @@ private:
   HandleCreateAnimBlueprint(const FString &RequestId, const FString &Action,
                             const TSharedPtr<FJsonObject> &Payload,
                             TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool
-  HandleCreateMaterialNodes(const FString &RequestId, const FString &Action,
-                            const TSharedPtr<FJsonObject> &Payload,
-                            TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
   // Niagara system handlers
   bool
   HandleCreateNiagaraSystem(const FString &RequestId, const FString &Action,
@@ -663,15 +655,6 @@ private:
   bool HandleActivateRagdoll(const FString &RequestId, const FString &Action,
                              const TSharedPtr<FJsonObject> &Payload,
                              TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  // Material graph handlers
-  bool HandleAddMaterialTextureSample(
-      const FString &RequestId, const FString &Action,
-      const TSharedPtr<FJsonObject> &Payload,
-      TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool
-  HandleAddMaterialExpression(const FString &RequestId, const FString &Action,
-                              const TSharedPtr<FJsonObject> &Payload,
-                              TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
   // Sequencer track handlers
   bool HandleAddCameraTrack(const FString &RequestId, const FString &Action,
                             const TSharedPtr<FJsonObject> &Payload,
@@ -719,10 +702,6 @@ private:
   HandleNiagaraGraphAction(const FString &RequestId, const FString &Action,
                            const TSharedPtr<FJsonObject> &Payload,
                            TSharedPtr<FMcpBridgeWebSocket> RequestingSocket);
-  bool HandleMaterialGraphAction(const FString &RequestId,
-                                 const FString &Action,
-                                 const TSharedPtr<FJsonObject> &Payload,
-                                 TSharedPtr<FMcpBridgeWebSocket> Socket);
   bool
   HandleBehaviorTreeAction(const FString &RequestId, const FString &Action,
                            const TSharedPtr<FJsonObject> &Payload,

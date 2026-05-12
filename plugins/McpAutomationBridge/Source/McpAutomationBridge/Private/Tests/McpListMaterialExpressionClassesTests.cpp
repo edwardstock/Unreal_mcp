@@ -15,11 +15,9 @@ namespace McpListMaterialExpressionClassesForTests
 }
 
 // ---- catalog reuse: aggregate categories accessor works -------------------
-// Note: UE's UMaterialExpression subclasses populate `MenuCategories` at runtime
-// via a virtual `GetMenuCategories` method, not through `meta=(MenuCategories=...)`
-// UCLASS metadata. The catalog's metadata-driven extraction therefore yields an
-// empty set on stock UE. Test asserts the aggregator returns a deterministic
-// (sorted, no duplicates) array - the count itself is environment-dependent.
+// Categories are read from the CDO's UPROPERTY(config) TArray<FText> MenuCategories,
+// populated from Engine/Config/BaseMaterialExpressions.ini. Stock UE ships a non-empty
+// set including at least Parameters / Math / Texture / Utility.
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMcpListClassesCategoriesSortedUnique,
     "LHGame.Mcp.Material.ListClasses.CategoriesSortedUnique",
@@ -38,6 +36,10 @@ bool FMcpListClassesCategoriesSortedUnique::RunTest(const FString&)
     {
         TestFalse(TEXT("no empty category"), C.IsEmpty());
     }
+    // Stock UE always registers these via BaseMaterialExpressions.ini.
+    TestTrue(TEXT("contains Parameters"), Cats.Contains(TEXT("Parameters")));
+    TestTrue(TEXT("contains Math"), Cats.Contains(TEXT("Math")));
+    TestTrue(TEXT("contains Texture"), Cats.Contains(TEXT("Texture")));
     return true;
 }
 
@@ -103,12 +105,10 @@ bool FMcpListClassesCategoryReducesSet::RunTest(const FString&)
     const TArray<FString>& All = Cat.GetAllClasses();
 
     const TArray<FString> AllCats = McpListMaterialExpressionClassesForTests::CollectAllCategories();
+    TestTrue(TEXT("catalog has at least one category"), AllCats.Num() > 0);
     if (AllCats.Num() == 0)
     {
-        // Categories aren't populated on stock UE (see CategoriesSortedUnique
-        // note). Skip rather than fail.
-        AddInfo(TEXT("catalog reports no categories on this engine build; skipping"));
-        return true;
+        return false;
     }
 
     const FString& Pick = AllCats[0];
@@ -124,6 +124,52 @@ bool FMcpListClassesCategoryReducesSet::RunTest(const FString&)
     }
     TestTrue(TEXT("at least one class in picked category"), InCategory > 0);
     TestTrue(TEXT("category reduces set"), InCategory < All.Num());
+    return true;
+}
+
+// ---- StaticSwitchParameter: categories + applicable fields populated -----
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMcpListClassesStaticSwitchParameterEntry,
+    "LHGame.Mcp.Material.ListClasses.StaticSwitchParameterEntry",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMcpListClassesStaticSwitchParameterEntry::RunTest(const FString&)
+{
+    const FMcpMaterialExpressionCatalog& Cat = FMcpMaterialExpressionCatalog::Get();
+    const FString ClassName = TEXT("MaterialExpressionStaticSwitchParameter");
+
+    const TArray<FString>* Cats = Cat.GetCategories(ClassName);
+    TestNotNull(TEXT("class registered in catalog"), Cats);
+    if (Cats)
+    {
+        TestTrue(TEXT("StaticSwitchParameter category is 'Parameters'"),
+            Cats->Contains(TEXT("Parameters")));
+    }
+
+    const TArray<FString>* Fields = Cat.GetApplicableFields(ClassName);
+    TestNotNull(TEXT("applicableFields registered"), Fields);
+    if (Fields)
+    {
+        TestTrue(TEXT("has parameterName"), Fields->Contains(TEXT("parameterName")));
+        TestTrue(TEXT("has defaultValue"), Fields->Contains(TEXT("defaultValue")));
+    }
+
+    // The whole point of pin discovery: StaticSwitchParameter's UE-level pins are A/B,
+    // but GetInputName overrides them to True/False. Both must be exposed so an agent
+    // can pick the canonical name.
+    const TArray<FMcpPinInfo>* InPins = Cat.GetInputPins(ClassName);
+    TestNotNull(TEXT("inputPins registered"), InPins);
+    if (InPins)
+    {
+        TestEqual(TEXT("two inputs"), InPins->Num(), 2);
+        if (InPins->Num() >= 2)
+        {
+            TestEqual(TEXT("pin 0 name"), (*InPins)[0].Name, FString(TEXT("True")));
+            TestEqual(TEXT("pin 1 name"), (*InPins)[1].Name, FString(TEXT("False")));
+            TestEqual(TEXT("pin 0 propertyName"), (*InPins)[0].PropertyName, FString(TEXT("A")));
+            TestEqual(TEXT("pin 1 propertyName"), (*InPins)[1].PropertyName, FString(TEXT("B")));
+        }
+    }
     return true;
 }
 

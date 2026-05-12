@@ -26,6 +26,7 @@
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialExpressionStaticBoolParameter.h"
+#include "Materials/MaterialExpressionStaticSwitch.h"
 #include "Materials/MaterialExpressionStaticSwitchParameter.h"
 #include "Materials/MaterialExpressionStaticBool.h"
 #include "Materials/MaterialExpressionConstant.h"
@@ -37,15 +38,33 @@
 #include "Materials/MaterialExpressionTextureObject.h"
 #include "Materials/MaterialExpressionTextureObjectParameter.h"
 #include "Materials/MaterialExpressionTextureCoordinate.h"
+#include "Materials/MaterialExpressionVirtualTextureFeatureSwitch.h"
+#include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialExpressionPanner.h"
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
 #include "Materials/MaterialExpressionRotator.h"
 #endif
 
-#include "MaterialEditingLibrary.h"
 #include "ScopedTransaction.h"
 #include "Engine/Texture.h"
 #include "SceneTypes.h"
+
+// =============================================================================
+// Canonical, undecorated input pin name. For UMaterialExpressionMaterialFunctionCall
+// this strips UE's editor-only type suffix ("BaseColor (V3)" -> "BaseColor"). For
+// everything else falls through to standard GetInputName(). External linkage so
+// GraphReads.cpp and McpMaterialExpressionCatalog.cpp share the same source-of-truth.
+// Editor-only (matches the wider WITH_EDITOR block above).
+// =============================================================================
+FString McpGetUndecoratedInputName(UMaterialExpression* Expr, int32 InputIndex)
+{
+    if (!Expr) return FString();
+    if (auto* MFC = Cast<UMaterialExpressionMaterialFunctionCall>(Expr))
+    {
+        return MFC->GetInputNameWithType(InputIndex, /*bWithType=*/false).ToString();
+    }
+    return Expr->GetInputName(InputIndex).ToString();
+}
 
 #endif // WITH_EDITOR
 
@@ -90,30 +109,342 @@ static bool McpEnumValueMatches(const FString& StrValue, const TArray<FString>& 
 }
 
 // =============================================================================
-// Helper: walk the class for FExpressionInput properties whose name matches.
+// Pin-handle helpers - instance-based, work for both static UPROPERTY inputs
+// (Multiply, StaticSwitchParameter, ...) and dynamic-array inputs
+// (UMaterialExpressionMaterialFunctionCall::FunctionInputs and similar).
+//
+// Canonical handle = GetInputName(i) with type-decoration stripped for MFC.
+// All forms (canonical, decorated, FExpressionInput::InputName, UPROPERTY name,
+// numeric index) are accepted as pin-name matches. JSON output and error
+// diagnostics surface the canonical form.
 // =============================================================================
+
+// Builds the parallel pointer -> UPROPERTY-name map for FExpressionInput-typed
+// static fields. Used by handle resolution to recognize the UE-level UPROPERTY
+// name ("A", "B") as a valid pin handle for nodes whose pins map to UPROPERTYs.
+static void McpCollectExpressionInputPropertyMap(
+    UMaterialExpression* Expr,
+    TMap<const FExpressionInput*, FString>& OutPtrToPropName)
+{
+    if (!Expr) return;
+    const FName ExprInputName(TEXT("ExpressionInput"));
+    for (TFieldIterator<FProperty> PropIt(Expr->GetClass()); PropIt; ++PropIt)
+    {
+        FStructProperty* StructProp = CastField<FStructProperty>(*PropIt);
+        if (!StructProp || !StructProp->Struct) continue;
+        bool bIsExprInput = false;
+        for (UStruct* S = StructProp->Struct; S; S = S->GetSuperStruct())
+        {
+            if (S->GetFName() == ExprInputName) { bIsExprInput = true; break; }
+        }
+        if (!bIsExprInput) continue;
+        const FExpressionInput* P = StructProp->ContainerPtrToValuePtr<FExpressionInput>(Expr);
+        OutPtrToPropName.Add(P, StructProp->GetName());
+    }
+}
+
+// Resolves an FExpressionInput* on the given live expression by trying every
+// accepted handle form against PinName. nullptr on miss. Optionally fills:
+//   - OutCanonicalHandles: canonical (undecorated) name per pin, for diagnostics
+//   - OutInputIndex: matched input's index
+//
+// Empty PinName resolves to pin 0 (legacy McpFindExpressionInputByName behavior).
+static FExpressionInput* McpResolveExpressionInputByPinName(
+    UMaterialExpression* Expr,
+    const FString& PinName,
+    TArray<FString>* OutCanonicalHandles = nullptr,
+    int32* OutInputIndex = nullptr)
+{
+    if (OutCanonicalHandles) OutCanonicalHandles->Reset();
+    if (OutInputIndex) *OutInputIndex = INDEX_NONE;
+    if (!Expr) return nullptr;
+
+    if (PinName.IsEmpty())
+    {
+        FExpressionInput* Pin0 = Expr->GetInput(0);
+        if (Pin0 && OutInputIndex) *OutInputIndex = 0;
+        return Pin0;
+    }
+
+    TMap<const FExpressionInput*, FString> PtrToPropName;
+    McpCollectExpressionInputPropertyMap(Expr, PtrToPropName);
+
+    FExpressionInput* Match = nullptr;
+    int32 MatchIndex = INDEX_NONE;
+
+    for (FExpressionInputIterator It{ Expr }; It; ++It)
+    {
+        FExpressionInput* In = It.Input;
+        if (!In) continue;
+
+        const FString Canonical = McpGetUndecoratedInputName(Expr, It.Index);
+        if (OutCanonicalHandles)
+        {
+            OutCanonicalHandles->Add(Canonical);
+        }
+
+        // Already matched - keep iterating only to finish populating diagnostics.
+        if (Match) continue;
+
+        const FString Decorated   = Expr->GetInputName(It.Index).ToString();
+        const FString InstanceNm  = In->InputName.ToString();
+        const FString* PropNamePtr = PtrToPropName.Find(In);
+        const FString IndexStr    = FString::FromInt(It.Index);
+
+        if (Canonical.Equals(PinName, ESearchCase::IgnoreCase) ||
+            Decorated.Equals(PinName, ESearchCase::IgnoreCase) ||
+            (!InstanceNm.IsEmpty() && InstanceNm.Equals(PinName, ESearchCase::IgnoreCase)) ||
+            (PropNamePtr && !PropNamePtr->IsEmpty()
+                && PropNamePtr->Equals(PinName, ESearchCase::IgnoreCase)) ||
+            IndexStr.Equals(PinName))
+        {
+            Match = In;
+            MatchIndex = It.Index;
+        }
+    }
+
+    if (Match && OutInputIndex) *OutInputIndex = MatchIndex;
+    return Match;
+}
+
+// Predicate form for validation. Out-list contains canonical handles for error message.
+static bool McpExprHasInputPin(
+    UMaterialExpression* Expr, const FString& PinName, TArray<FString>& OutCanonicalHandles)
+{
+    return McpResolveExpressionInputByPinName(Expr, PinName, &OutCanonicalHandles) != nullptr;
+}
+
+// Class-only fallback for the rare case where we don't yet have a live target
+// (e.g. validating a connection to a not-yet-created batch-local node). Falls
+// back to UPROPERTY introspection. CANNOT see MFC FunctionInputs - but new MFC
+// nodes added in the same batch don't have FunctionInputs populated anyway
+// until apply phase, so this is best-effort.
 static bool McpClassHasInputPin(UClass* Cls, const FString& PinName, TArray<FString>& OutPinNames)
 {
     OutPinNames.Reset();
     if (!Cls) return false;
     bool bFound = false;
+    const FName ExprInputName(TEXT("ExpressionInput"));
     for (TFieldIterator<FProperty> PropIt(Cls); PropIt; ++PropIt)
     {
-        FProperty* Prop = *PropIt;
-        if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+        FStructProperty* StructProp = CastField<FStructProperty>(*PropIt);
+        if (!StructProp || !StructProp->Struct) continue;
+        bool bIsExprInput = false;
+        for (UStruct* S = StructProp->Struct; S; S = S->GetSuperStruct())
         {
-            if (StructProp->Struct && StructProp->Struct->GetFName() == FName(TEXT("ExpressionInput")))
-            {
-                const FString Name = Prop->GetName();
-                OutPinNames.Add(Name);
-                if (Name.Equals(PinName, ESearchCase::IgnoreCase))
-                {
-                    bFound = true;
-                }
-            }
+            if (S->GetFName() == ExprInputName) { bIsExprInput = true; break; }
+        }
+        if (!bIsExprInput) continue;
+        const FString Name = StructProp->GetName();
+        OutPinNames.Add(Name);
+        if (Name.Equals(PinName, ESearchCase::IgnoreCase))
+        {
+            bFound = true;
         }
     }
     return bFound;
+}
+
+static bool McpClassRequiresZeroSourceOutputIndex(UClass* Cls)
+{
+    return Cls &&
+        (Cls->IsChildOf(UMaterialExpressionStaticSwitch::StaticClass()) ||
+         Cls->IsChildOf(UMaterialExpressionStaticSwitchParameter::StaticClass()) ||
+         Cls->IsChildOf(UMaterialExpressionVirtualTextureFeatureSwitch::StaticClass()));
+}
+
+static bool McpOutputNameMatches(const FExpressionOutput& Output, int32 OutputIndex, const FString& PinName)
+{
+    if (Output.OutputName != NAME_None && Output.OutputName.ToString().Equals(PinName, ESearchCase::IgnoreCase))
+    {
+        return true;
+    }
+
+    if (PinName.Equals(FString::Printf(TEXT("Output%d"), OutputIndex), ESearchCase::IgnoreCase))
+    {
+        return true;
+    }
+
+    if (Output.OutputName == NAME_None)
+    {
+        if (Output.MaskR && !Output.MaskG && !Output.MaskB && !Output.MaskA && PinName.Equals(TEXT("R"), ESearchCase::IgnoreCase))
+        {
+            return true;
+        }
+        if (!Output.MaskR && Output.MaskG && !Output.MaskB && !Output.MaskA && PinName.Equals(TEXT("G"), ESearchCase::IgnoreCase))
+        {
+            return true;
+        }
+        if (!Output.MaskR && !Output.MaskG && Output.MaskB && !Output.MaskA && PinName.Equals(TEXT("B"), ESearchCase::IgnoreCase))
+        {
+            return true;
+        }
+        if (!Output.MaskR && !Output.MaskG && !Output.MaskB && Output.MaskA && PinName.Equals(TEXT("A"), ESearchCase::IgnoreCase))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static int32 McpResolveSourceOutputIndex(UMaterialExpression* Expression, const FString& FromPin, int32 ExplicitOutputIndex)
+{
+    if (!Expression)
+    {
+        return INDEX_NONE;
+    }
+
+    TArray<FExpressionOutput>& Outputs = Expression->GetOutputs();
+    if (ExplicitOutputIndex != INDEX_NONE)
+    {
+        return Outputs.IsValidIndex(ExplicitOutputIndex) ? ExplicitOutputIndex : INDEX_NONE;
+    }
+
+    if (FromPin.IsEmpty())
+    {
+        return Outputs.IsValidIndex(0) ? 0 : INDEX_NONE;
+    }
+
+    for (int32 OutputIndex = 0; OutputIndex < Outputs.Num(); ++OutputIndex)
+    {
+        if (McpOutputNameMatches(Outputs[OutputIndex], OutputIndex, FromPin))
+        {
+            return OutputIndex;
+        }
+    }
+
+    return INDEX_NONE;
+}
+
+static bool McpValidateSourceOutputIndex(
+    int32 ConnectionIndex,
+    UClass* SourceClass,
+    UMaterialExpression* SourceExpression,
+    const FString& FromPin,
+    int32 ExplicitOutputIndex,
+    int32& OutResolvedOutputIndex,
+    FMcpConnectionValidationError& OutError)
+{
+    OutResolvedOutputIndex = ExplicitOutputIndex;
+
+    if (SourceExpression)
+    {
+        OutResolvedOutputIndex = McpResolveSourceOutputIndex(SourceExpression, FromPin, ExplicitOutputIndex);
+        if (OutResolvedOutputIndex == INDEX_NONE)
+        {
+            OutError.Index = ConnectionIndex;
+            OutError.Field = ExplicitOutputIndex != INDEX_NONE ? TEXT("fromOutputIndex") : TEXT("fromPin");
+            OutError.Code = TEXT("INVALID_SOURCE_OUTPUT_INDEX");
+            OutError.Message = FString::Printf(
+                TEXT("Source output '%s' is not valid on %s"),
+                ExplicitOutputIndex != INDEX_NONE ? *FString::FromInt(ExplicitOutputIndex) : *FromPin,
+                *SourceExpression->GetClass()->GetName());
+            return false;
+        }
+
+        if (ExplicitOutputIndex != INDEX_NONE && !FromPin.IsEmpty())
+        {
+            const int32 PinResolvedIndex = McpResolveSourceOutputIndex(SourceExpression, FromPin, INDEX_NONE);
+            if (PinResolvedIndex != INDEX_NONE && PinResolvedIndex != ExplicitOutputIndex)
+            {
+                OutError.Index = ConnectionIndex;
+                OutError.Field = TEXT("fromPin/fromOutputIndex");
+                OutError.Code = TEXT("CONFLICTING_PIN_REFERENCE");
+                OutError.Message = FString::Printf(
+                    TEXT("fromPin '%s' resolves to output index %d, but fromOutputIndex is %d"),
+                    *FromPin, PinResolvedIndex, ExplicitOutputIndex);
+                return false;
+            }
+        }
+    }
+    else if (ExplicitOutputIndex == INDEX_NONE && FromPin.IsEmpty())
+    {
+        OutResolvedOutputIndex = 0;
+    }
+
+    if (OutResolvedOutputIndex != INDEX_NONE && McpClassRequiresZeroSourceOutputIndex(SourceClass) && OutResolvedOutputIndex != 0)
+    {
+        OutError.Index = ConnectionIndex;
+        OutError.Field = TEXT("fromOutputIndex");
+        OutError.Code = TEXT("INVALID_SOURCE_OUTPUT_INDEX");
+        OutError.Message = FString::Printf(
+            TEXT("%s exposes only output index 0; do not reuse an upstream component output index when connecting this node downstream"),
+            SourceClass ? *SourceClass->GetName() : TEXT("Source expression"));
+        return false;
+    }
+
+    return true;
+}
+
+// Thin adapter around McpResolveExpressionInputByPinName for call sites that
+// only need the FExpressionInput* without diagnostics.
+static FExpressionInput* McpFindExpressionInputByName(UMaterialExpression* Expression, const FString& PinName)
+{
+    return McpResolveExpressionInputByPinName(Expression, PinName);
+}
+
+static EMaterialProperty McpMaterialPropertyFromName(const FString& Name);
+
+static bool McpApplyResolvedConnection(
+    const FMcpMaterialGraphOwner& Owner,
+    const FMcpResolvedConnection& C,
+    const TMap<FString, UMaterialExpression*>& LocalIdToExpr)
+{
+    UMaterialExpression* From = C.FromExpression
+        ? C.FromExpression
+        : LocalIdToExpr.FindRef(C.FromLocalId);
+
+    if (!From)
+    {
+        return false;
+    }
+
+    int32 SourceOutputIndex = C.FromOutputIndex;
+    FMcpConnectionValidationError IgnoredError;
+    if (!McpValidateSourceOutputIndex(
+            C.Index, From->GetClass(), From, C.FromPin,
+            SourceOutputIndex == INDEX_NONE ? INDEX_NONE : SourceOutputIndex,
+            SourceOutputIndex, IgnoredError))
+    {
+        return false;
+    }
+
+    FExpressionInput* TargetInput = nullptr;
+    UObject* GraphSource = Owner.GraphSource ? Owner.GraphSource : Owner.Asset;
+    if (C.bToMaterialRoot)
+    {
+        UMaterial* Material = Cast<UMaterial>(GraphSource);
+        const EMaterialProperty MP = McpMaterialPropertyFromName(C.ToPin);
+        if (!Material || MP == MP_MAX)
+        {
+            return false;
+        }
+        TargetInput = Material->GetExpressionInputForProperty(MP);
+    }
+    else
+    {
+        UMaterialExpression* To = C.ToExpression
+            ? C.ToExpression
+            : LocalIdToExpr.FindRef(C.ToLocalId);
+
+        if (!To)
+        {
+            return false;
+        }
+
+        TargetInput = McpFindExpressionInputByName(To, C.ToPin);
+        To->Modify();
+    }
+
+    if (!TargetInput)
+    {
+        return false;
+    }
+
+    From->Modify();
+    TargetInput->Connect(SourceOutputIndex, From);
+    return true;
 }
 
 // =============================================================================
@@ -391,18 +722,6 @@ static void McpValidateConnectionsBatch(
             continue;
         }
 
-        // pin / index mutual exclusivity
-        if (!FromPin.IsEmpty() && FromOutputIndex != INDEX_NONE)
-        {
-            FMcpConnectionValidationError E;
-            E.Index = i;
-            E.Field = TEXT("fromPin/fromOutputIndex");
-            E.Code = TEXT("CONFLICTING_PIN_REFERENCE");
-            E.Message = TEXT("Provide either fromPin or fromOutputIndex, not both");
-            OutErrors.Add(E);
-            continue;
-        }
-
         FMcpResolvedConnection R;
         R.Index = i;
         R.FromPin = FromPin;
@@ -448,14 +767,16 @@ static void McpValidateConnectionsBatch(
         }
 
         // Resolve fromNode (no sentinel)
+        UClass* SourceClass = nullptr;
         if (UClass* const* BatchCls = BatchLocalIdToClass.Find(FromNode))
         {
             R.FromLocalId = FromNode;
-            (void)BatchCls;
+            SourceClass = *BatchCls;
         }
         else if (UMaterialExpression* Existing = McpFindGraphExpression(Owner, FromNode, -1))
         {
             R.FromExpression = Existing;
+            SourceClass = Existing->GetClass();
         }
         else
         {
@@ -469,6 +790,17 @@ static void McpValidateConnectionsBatch(
             OutErrors.Add(E);
             continue;
         }
+
+        int32 ResolvedOutputIndex = INDEX_NONE;
+        FMcpConnectionValidationError SourceOutputError;
+        if (!McpValidateSourceOutputIndex(
+                i, SourceClass, R.FromExpression, FromPin, FromOutputIndex,
+                ResolvedOutputIndex, SourceOutputError))
+        {
+            OutErrors.Add(SourceOutputError);
+            continue;
+        }
+        R.FromOutputIndex = ResolvedOutputIndex;
 
         // toPin validation
         if (R.bToMaterialRoot)
@@ -487,40 +819,44 @@ static void McpValidateConnectionsBatch(
         }
         else if (!ToPin.IsEmpty())
         {
-            UClass* TargetClass = nullptr;
-            if (!R.ToLocalId.IsEmpty())
+            // Prefer instance-based validation when we have a live target: this is
+            // the only path that sees dynamic inputs (e.g. MFC FunctionInputs).
+            // Class-only fallback applies when the target is a future-batch local
+            // (no live instance yet) - that node can't be MFC-with-populated-pins
+            // until apply phase, so UPROPERTY introspection is acceptable.
+            UClass* TargetClass = R.ToExpression ? R.ToExpression->GetClass() : nullptr;
+            if (!TargetClass && !R.ToLocalId.IsEmpty())
             {
                 if (UClass* const* BatchCls2 = BatchLocalIdToClass.Find(R.ToLocalId))
                 {
                     TargetClass = *BatchCls2;
                 }
             }
-            else if (R.ToExpression)
-            {
-                TargetClass = R.ToExpression->GetClass();
-            }
 
-            if (TargetClass)
+            TArray<FString> PinNames;
+            const bool bPinFound = R.ToExpression
+                ? McpExprHasInputPin(R.ToExpression, ToPin, PinNames)
+                : (TargetClass ? McpClassHasInputPin(TargetClass, ToPin, PinNames) : true);
+
+            if (!bPinFound)
             {
-                TArray<FString> PinNames;
-                if (!McpClassHasInputPin(TargetClass, ToPin, PinNames))
+                FString Joined;
+                for (int32 j = 0; j < PinNames.Num(); ++j)
                 {
-                    FString Joined;
-                    for (int32 j = 0; j < PinNames.Num(); ++j)
-                    {
-                        if (j > 0) Joined += TEXT(", ");
-                        Joined += PinNames[j];
-                    }
-                    FMcpConnectionValidationError E;
-                    E.Index = i;
-                    E.Field = TEXT("toPin");
-                    E.Code = TEXT("INVALID_INPUT_PIN");
-                    E.Message = FString::Printf(
-                        TEXT("toPin '%s' is not a valid input on %s. Valid pins: %s"),
-                        *ToPin, *TargetClass->GetName(), *Joined);
-                    OutErrors.Add(E);
-                    continue;
+                    if (j > 0) Joined += TEXT(", ");
+                    Joined += PinNames[j];
                 }
+                FMcpConnectionValidationError E;
+                E.Index = i;
+                E.Field = TEXT("toPin");
+                E.Code = TEXT("INVALID_INPUT_PIN");
+                E.Message = FString::Printf(
+                    TEXT("toPin '%s' is not a valid input on %s. Valid pins: %s"),
+                    *ToPin,
+                    TargetClass ? *TargetClass->GetName() : TEXT("<unknown>"),
+                    *Joined);
+                OutErrors.Add(E);
+                continue;
             }
         }
 
@@ -548,28 +884,23 @@ static void McpValidateConnectionsBatch(
 
     TMap<FCycleNodeKey, TArray<FCycleNodeKey>> Edges;
 
-    // Existing edges
+    // Existing edges - walk inputs via FExpressionInputIterator (GetInput(i)).
+    // Critical for UMaterialExpressionMaterialFunctionCall, whose inputs live in
+    // a dynamic TArray<FFunctionExpressionInput> rather than UPROPERTY-declared
+    // fields. A class-introspection walk would miss those entirely and lose every
+    // upstream edge that feeds an MFC, breaking cycle detection.
     if (const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner))
     {
         for (UMaterialExpression* Holder : *Exprs)
         {
             if (!Holder) continue;
-            for (TFieldIterator<FProperty> PropIt(Holder->GetClass()); PropIt; ++PropIt)
+            for (FExpressionInputIterator It{ Holder }; It; ++It)
             {
-                FProperty* Prop = *PropIt;
-                if (FStructProperty* SP = CastField<FStructProperty>(Prop))
-                {
-                    if (SP->Struct && SP->Struct->GetFName() == FName(TEXT("ExpressionInput")))
-                    {
-                        FExpressionInput* In = SP->ContainerPtrToValuePtr<FExpressionInput>(Holder);
-                        if (In && In->Expression)
-                        {
-                            FCycleNodeKey From = MakeKey(In->Expression, FString());
-                            FCycleNodeKey To   = MakeKey(Holder,         FString());
-                            Edges.FindOrAdd(From).Add(To);
-                        }
-                    }
-                }
+                FExpressionInput* In = It.Input;
+                if (!In || !In->Expression) continue;
+                FCycleNodeKey From = MakeKey(In->Expression, FString());
+                FCycleNodeKey To   = MakeKey(Holder,         FString());
+                Edges.FindOrAdd(From).Add(To);
             }
         }
     }
@@ -1226,35 +1557,9 @@ bool McpHandle_AddMaterialNodes(
     int32 ConnectionsApplied = 0;
     for (const FMcpResolvedConnection& C : ResolvedConnections)
     {
-        UMaterialExpression* From = C.FromExpression
-            ? C.FromExpression
-            : LocalIdToExpr.FindRef(C.FromLocalId);
-
-        if (!From) continue;
-
-        if (C.bToMaterialRoot)
+        if (McpApplyResolvedConnection(Owner, C, LocalIdToExpr))
         {
-            EMaterialProperty MP = McpMaterialPropertyFromName(C.ToPin);
-            if (MP != MP_MAX)
-            {
-                if (UMaterialEditingLibrary::ConnectMaterialProperty(From, C.FromPin, MP))
-                {
-                    ++ConnectionsApplied;
-                }
-            }
-        }
-        else
-        {
-            UMaterialExpression* To = C.ToExpression
-                ? C.ToExpression
-                : LocalIdToExpr.FindRef(C.ToLocalId);
-            if (To)
-            {
-                if (UMaterialEditingLibrary::ConnectMaterialExpressions(From, C.FromPin, To, C.ToPin))
-                {
-                    ++ConnectionsApplied;
-                }
-            }
+            ++ConnectionsApplied;
         }
     }
 
@@ -1707,6 +2012,9 @@ bool McpHandle_UpdateMaterialNodes(
     };
     TArray<FResolvedUpdate>          Resolved;
     TArray<FMcpNodeValidationError>  NodeErrors;
+    TArray<FMcpResolvedConnection>   ResolvedConnections;
+    TArray<FMcpConnectionValidationError> ConnectionErrors;
+    TArray<FString> SentinelWarnings;
     Resolved.Reserve(NodesArr->Num());
 
     for (int32 i = 0; i < NodesArr->Num(); ++i)
@@ -1761,16 +2069,26 @@ bool McpHandle_UpdateMaterialNodes(
         Resolved.Add(R);
     }
 
-    if (NodeErrors.Num() > 0)
+    const TArray<TSharedPtr<FJsonValue>>* ConnsArr = nullptr;
+    if (Payload->TryGetArrayField(TEXT("connections"), ConnsArr) && ConnsArr && ConnsArr->Num() > 0)
+    {
+        const TMap<FString, UClass*> EmptyBatch;
+        McpValidateConnectionsBatch(
+            *ConnsArr, EmptyBatch, Owner,
+            ResolvedConnections, ConnectionErrors, SentinelWarnings);
+    }
+
+    if (NodeErrors.Num() > 0 || ConnectionErrors.Num() > 0)
     {
         TSharedPtr<FJsonObject> Resp = McpHandlerUtils::CreateResultObject();
         Resp->SetBoolField  (TEXT("success"), false);
         Resp->SetStringField(TEXT("errorCode"), TEXT("VALIDATION_FAILED"));
         Resp->SetStringField(TEXT("message"),
-            FString::Printf(TEXT("Batch rejected; 0 mutations applied. %d node errors."),
-                NodeErrors.Num()));
+            FString::Printf(TEXT("Batch rejected; 0 mutations applied. %d node errors, %d connection errors."),
+                NodeErrors.Num(), ConnectionErrors.Num()));
         TArray<TSharedPtr<FJsonValue>> ErrorsJson;
         for (const auto& E : NodeErrors) ErrorsJson.Add(McpFormatNodeError(E));
+        for (const auto& E : ConnectionErrors) ErrorsJson.Add(McpFormatConnError(E));
         Resp->SetArrayField(TEXT("errors"), ErrorsJson);
         Sub->SendAutomationResponse(Socket, RequestId, false,
             TEXT("validation failed"), Resp, TEXT("VALIDATION_FAILED"));
@@ -1815,6 +2133,24 @@ bool McpHandle_UpdateMaterialNodes(
         ResultsJson.Add(Item);
     }
 
+    int32 ConnectionsApplied = 0;
+    const TMap<FString, UMaterialExpression*> EmptyLocalIdToExpr;
+    for (const FMcpResolvedConnection& C : ResolvedConnections)
+    {
+        if (McpApplyResolvedConnection(Owner, C, EmptyLocalIdToExpr))
+        {
+            ++ConnectionsApplied;
+        }
+        else
+        {
+            Tx.Cancel();
+            Sub->SendAutomationError(Socket, RequestId,
+                FString::Printf(TEXT("Connection %d failed after validation"), C.Index),
+                TEXT("APPLY_FAILED"));
+            return true;
+        }
+    }
+
     // Rebuild + optional save
     FString RebuildErr;
     McpRebuildMaterialGraphOwner(Owner, RebuildErr);
@@ -1838,6 +2174,7 @@ bool McpHandle_UpdateMaterialNodes(
     Resp->SetBoolField  (TEXT("success"), true);
     Resp->SetStringField(TEXT("assetPath"), AssetPath);
     Resp->SetNumberField(TEXT("nodesUpdated"), Resolved.Num());
+    Resp->SetNumberField(TEXT("connectionsApplied"), ConnectionsApplied);
     Resp->SetBoolField  (TEXT("saved"), bSaved);
 
     TArray<TSharedPtr<FJsonValue>> ResultsArr;
@@ -1959,7 +2296,75 @@ namespace McpUpdateMaterialNodesValidationForTests
             OutRequestedFields.Add(Key);
         }
     }
+
+    bool ValidatePayloadConnections(
+        const FMcpMaterialGraphOwner& Owner,
+        const TArray<TSharedPtr<FJsonValue>>& ConnectionsJson,
+        FString& OutCode,
+        FString& OutField,
+        FString& OutMessage)
+    {
+        TArray<FMcpResolvedConnection> Resolved;
+        TArray<FMcpConnectionValidationError> Errors;
+        TArray<FString> Warnings;
+        const TMap<FString, UClass*> EmptyBatch;
+        McpValidateConnectionsBatch(
+            ConnectionsJson, EmptyBatch, Owner,
+            Resolved, Errors, Warnings);
+
+        if (Errors.Num() > 0)
+        {
+            OutCode = Errors[0].Code;
+            OutField = Errors[0].Field;
+            OutMessage = Errors[0].Message;
+            return false;
+        }
+
+        OutCode.Reset();
+        OutField.Reset();
+        OutMessage.Reset();
+        return true;
+    }
 #endif
+}
+
+namespace McpMaterialConnectionsValidationForTests
+{
+    bool ValidateConnectionsBatch(
+        const TArray<TSharedPtr<FJsonValue>>& ConnectionsJson,
+        const TMap<FString, UClass*>& BatchLocalIdToClass,
+        const FMcpMaterialGraphOwner& Owner,
+        FString& OutCode,
+        FString& OutField,
+        FString& OutMessage)
+    {
+#if WITH_EDITOR
+        TArray<FMcpResolvedConnection> Resolved;
+        TArray<FMcpConnectionValidationError> Errors;
+        TArray<FString> SentinelWarnings;
+        McpValidateConnectionsBatch(
+            ConnectionsJson, BatchLocalIdToClass, Owner,
+            Resolved, Errors, SentinelWarnings);
+
+        if (Errors.Num() > 0)
+        {
+            OutCode = Errors[0].Code;
+            OutField = Errors[0].Field;
+            OutMessage = Errors[0].Message;
+            return false;
+        }
+
+        OutCode.Reset();
+        OutField.Reset();
+        OutMessage.Reset();
+        return true;
+#else
+        OutCode = TEXT("EDITOR_ONLY");
+        OutField.Reset();
+        OutMessage.Reset();
+        return false;
+#endif
+    }
 }
 
 // =============================================================================
@@ -2274,34 +2679,12 @@ bool McpHandle_ConnectMaterialPins(
     McpModifyMaterialGraphOwnerForTransaction(Owner);
 
     int32 ConnectionsApplied = 0;
+    const TMap<FString, UMaterialExpression*> EmptyLocalIdToExpr;
     for (const FMcpResolvedConnection& C : ResolvedConnections)
     {
-        // for connect_material_pins there are no batch-localIds; FromExpression
-        // and (when not bToMaterialRoot) ToExpression must be already resolved
-        UMaterialExpression* From = C.FromExpression;
-        if (!From) continue;
-
-        if (C.bToMaterialRoot)
+        if (McpApplyResolvedConnection(Owner, C, EmptyLocalIdToExpr))
         {
-            const EMaterialProperty MP = McpMaterialPropertyFromName(C.ToPin);
-            if (MP != MP_MAX)
-            {
-                if (UMaterialEditingLibrary::ConnectMaterialProperty(From, C.FromPin, MP))
-                {
-                    ++ConnectionsApplied;
-                }
-            }
-        }
-        else
-        {
-            UMaterialExpression* To = C.ToExpression;
-            if (To)
-            {
-                if (UMaterialEditingLibrary::ConnectMaterialExpressions(From, C.FromPin, To, C.ToPin))
-                {
-                    ++ConnectionsApplied;
-                }
-            }
+            ++ConnectionsApplied;
         }
     }
 
@@ -2367,47 +2750,6 @@ bool McpHandle_ConnectMaterialPins(
 namespace
 {
 #if WITH_EDITOR
-
-// Finds a (UStruct, FProperty) descriptor for an FExpressionInput-derived
-// struct field whose name matches PinName (case-insensitive). Walks all struct
-// properties of OwningClass; any UScriptStruct that is FExpressionInput or a
-// subtype of it counts as a candidate. Returns the matched FStructProperty
-// (or nullptr) and fills OutAllPinNames with every candidate seen.
-static FStructProperty* McpFindExpressionInputProperty(
-    UClass* OwningClass,
-    const FString& PinName,
-    TArray<FString>& OutAllPinNames)
-{
-    OutAllPinNames.Reset();
-    if (!OwningClass) return nullptr;
-    FStructProperty* Match = nullptr;
-    const FName ExprInputName(TEXT("ExpressionInput"));
-    for (TFieldIterator<FProperty> PropIt(OwningClass); PropIt; ++PropIt)
-    {
-        FStructProperty* SP = CastField<FStructProperty>(*PropIt);
-        if (!SP || !SP->Struct) continue;
-
-        // Walk the struct's super chain to detect FExpressionInput ancestry.
-        // Plain FExpressionInput pins (on UMaterialExpression subclasses) match
-        // directly; root pins on the material's editor-only data class are
-        // FColorMaterialInput / FScalarMaterialInput / etc., which derive from
-        // FMaterialInput<T> -> FExpressionInput.
-        bool bIsExprInput = false;
-        for (UStruct* S = SP->Struct; S; S = S->GetSuperStruct())
-        {
-            if (S->GetFName() == ExprInputName) { bIsExprInput = true; break; }
-        }
-        if (!bIsExprInput) continue;
-
-        const FString Name = SP->GetName();
-        OutAllPinNames.Add(Name);
-        if (!Match && Name.Equals(PinName, ESearchCase::IgnoreCase))
-        {
-            Match = SP;
-        }
-    }
-    return Match;
-}
 
 // Resolves the (Class, ContainerObj) pair for a break-side toNode.
 //   - root sentinel => Class = MaterialEditorOnlyData class, Container = the
@@ -2518,10 +2860,10 @@ static bool McpResolveBreakTarget(
 // noexport in UE 5.7's reflection - the FExpressionInput ancestor is not
 // reachable via UStruct::GetSuperStruct walks.
 //
-// For non-root targets we fall back to the reflective McpFindExpressionInputProperty
-// path (works because plain UMaterialExpression pins ARE FExpressionInput-typed,
-// and FMaterialAttributesInput inherits FExpressionInput directly with full
-// reflection metadata).
+// For non-root targets we delegate to McpResolveExpressionInputByPinName, which
+// walks FExpressionInputIterator (GetInput(i)) - covering both static UPROPERTY
+// pins and dynamic-array pins (e.g. MFC FunctionInputs). OutInputIndex carries
+// the matched pin index for re-derivation at apply time.
 //
 // On miss, OutCode is set to INPUT_NOT_FOUND with a helpful message.
 static FExpressionInput* McpResolveBreakInputPointer(
@@ -2529,12 +2871,12 @@ static FExpressionInput* McpResolveBreakInputPointer(
     const FMcpBreakTarget& Target,
     const FString& ToPin,
     EMaterialProperty& OutRootProperty,
-    FStructProperty*& OutInputProp,
+    int32& OutInputIndex,
     FString& OutCode,
     FString& OutMessage)
 {
     OutRootProperty = MP_MAX;
-    OutInputProp = nullptr;
+    OutInputIndex = INDEX_NONE;
     OutCode.Reset();
     OutMessage.Reset();
 
@@ -2572,24 +2914,35 @@ static FExpressionInput* McpResolveBreakInputPointer(
         return RootIn;
     }
 
+    if (!Target.Expr)
+    {
+        OutCode = TEXT("INPUT_NOT_FOUND");
+        OutMessage = TEXT("Break target has no live expression");
+        return nullptr;
+    }
+
     TArray<FString> AvailablePins;
-    FStructProperty* Prop = McpFindExpressionInputProperty(Target.ContainerClass, ToPin, AvailablePins);
-    if (!Prop)
+    int32 ResolvedIndex = INDEX_NONE;
+    FExpressionInput* Found = McpResolveExpressionInputByPinName(
+        Target.Expr, ToPin, &AvailablePins, &ResolvedIndex);
+    if (!Found)
     {
         FString Joined;
         for (int32 j = 0; j < AvailablePins.Num(); ++j)
         {
             if (j > 0) Joined += TEXT(", ");
-            Joined += AvailablePins[j];
+            Joined += FString::Printf(TEXT("%s (%d)"), *AvailablePins[j], j);
         }
         OutCode = TEXT("INPUT_NOT_FOUND");
         OutMessage = FString::Printf(
             TEXT("toPin '%s' is not a valid input on %s. Valid pins: %s"),
-            *ToPin, Target.ContainerClass ? *Target.ContainerClass->GetName() : TEXT("?"), *Joined);
+            *ToPin,
+            Target.Expr->GetClass() ? *Target.Expr->GetClass()->GetName() : TEXT("?"),
+            *Joined);
         return nullptr;
     }
-    OutInputProp = Prop;
-    return Prop->ContainerPtrToValuePtr<FExpressionInput>(Target.Container);
+    OutInputIndex = ResolvedIndex;
+    return Found;
 }
 
 #endif // WITH_EDITOR
@@ -2633,9 +2986,30 @@ namespace McpBreakMaterialConnectionsForTests
         T.Container = Material;
         T.ContainerClass = Material->GetClass();
 #endif
-        FStructProperty* DummyProp = nullptr;
-        OutInput = McpResolveBreakInputPointer(Material, T, ToPin, OutProperty, DummyProp, OutCode, OutMessage);
+        int32 DummyIndex = INDEX_NONE;
+        OutInput = McpResolveBreakInputPointer(Material, T, ToPin, OutProperty, DummyIndex, OutCode, OutMessage);
         return OutInput != nullptr;
+    }
+#endif
+}
+
+// =============================================================================
+// Test-only forwarder for the instance-based pin resolver. Tests use this to
+// validate that all accepted handle forms (canonical, decorated, UPROPERTY,
+// index) resolve correctly on MFC FunctionInputs and on static UPROPERTY pins.
+// =============================================================================
+namespace McpInputPinResolutionForTests
+{
+#if WITH_EDITOR
+    FExpressionInput* ResolveInputByPinName(
+        UMaterialExpression* Expr,
+        const FString& PinName,
+        TArray<FString>& OutCanonicalHandles,
+        int32& OutInputIndex)
+    {
+        OutCanonicalHandles.Reset();
+        OutInputIndex = INDEX_NONE;
+        return McpResolveExpressionInputByPinName(Expr, PinName, &OutCanonicalHandles, &OutInputIndex);
     }
 #endif
 }
@@ -2702,7 +3076,7 @@ bool McpHandle_BreakMaterialConnections(
         int32                Index = INDEX_NONE;
         // resolved target
         FMcpBreakTarget      Target;
-        FStructProperty*     InputProp = nullptr;     // for non-root: FExpressionInput-typed property on Target.ContainerClass
+        int32                InputIndex = INDEX_NONE; // for non-root: pin index on Target.Expr (re-derived at apply via GetInput)
         FExpressionInput*    RootInput = nullptr;     // for root: pointer obtained via UMaterial::GetExpressionInputForProperty
         EMaterialProperty    RootProperty = MP_MAX;   // for root: resolved EMaterialProperty
         // optional source-match assertion
@@ -2798,7 +3172,7 @@ bool McpHandle_BreakMaterialConnections(
         FString PinCode, PinMsg;
         FExpressionInput* CurrentInput = McpResolveBreakInputPointer(
             OwnerMatOrNull, R.Target, R.ToPin,
-            R.RootProperty, R.InputProp, PinCode, PinMsg);
+            R.RootProperty, R.InputIndex, PinCode, PinMsg);
         if (!CurrentInput)
         {
             FMcpConnectionValidationError E;
@@ -2895,9 +3269,11 @@ bool McpHandle_BreakMaterialConnections(
             UMaterial* Mat = Cast<UMaterial>(Owner.GraphSource);
             if (Mat) In = Mat->GetExpressionInputForProperty(R.RootProperty);
         }
-        else if (R.InputProp)
+        else if (R.Target.Expr && R.InputIndex != INDEX_NONE)
         {
-            In = R.InputProp->ContainerPtrToValuePtr<FExpressionInput>(R.Target.Container);
+            // Re-derive via GetInput(i) so MFC FunctionInputs and any virtual
+            // override (RuntimeVirtualTextureSample etc.) are respected.
+            In = R.Target.Expr->GetInput(R.InputIndex);
         }
         if (!In) continue;
 

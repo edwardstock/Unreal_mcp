@@ -3,6 +3,16 @@
 
 class UClass;
 
+/** Per-pin info surfaced by list_material_expression_classes. PropertyName is empty when
+ *  it matches Name (most nodes); set only when GetInputName overrides the UPROPERTY name
+ *  (e.g. UMaterialExpressionStaticSwitchParameter: A -> "True", B -> "False"). */
+struct FMcpPinInfo
+{
+    int32   Index = 0;
+    FString Name;
+    FString PropertyName;
+};
+
 /** Static catalog of registered UMaterialExpression subclasses, built lazily on first Get().
  *  Used by:
  *  - add_material_nodes / update_material_nodes (nodeType resolution + applicability validation)
@@ -52,6 +62,12 @@ public:
     /** Description blurb pulled from class ToolTip metadata, may be empty. */
     FString GetDescription(const FString& ClassName) const;
 
+    /** Input/output pins as enumerated on the class CDO. nullptr if class is unknown.
+     *  Pin name is the user-facing name (GetInputName(i) override, or Outputs[i].OutputName).
+     *  PropertyName is set only when it differs from Name. */
+    const TArray<FMcpPinInfo>* GetInputPins(const FString& ClassName) const;
+    const TArray<FMcpPinInfo>* GetOutputPins(const FString& ClassName) const;
+
 private:
     FMcpMaterialExpressionCatalog();
     void Build();
@@ -62,5 +78,7 @@ private:
     TMap<FString, TMap<FString, TArray<FString>>>   NameToFieldEnums;
     TMap<FString, TMap<FString, FString>>           NameToFieldUeProp;
     TMap<FString, FString>                          NameToDescription;
+    TMap<FString, TArray<FMcpPinInfo>>              NameToInputPins;
+    TMap<FString, TArray<FMcpPinInfo>>              NameToOutputPins;
     TArray<FString>                                 AllClassNames;
 };

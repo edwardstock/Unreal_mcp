@@ -12,8 +12,6 @@
  *   - create_material_instance      — backward-compat dual-format
  *                                     (name+path+parentMaterial vs
  *                                      instancePath+parentMaterialPath)
- *   - connect_nodes / connect_material_pins
- *                                  — pin-name-as-fallback id normalization
  *   - set_material_parameter        — TS-side generic dispatcher by parameterType
  *                                     (no native equivalent yet)
  *   - rebuild_material              — alias for compile_material
@@ -229,42 +227,6 @@ export async function handleMaterialTools(
           return ResponseFactory.error(res.error ?? 'Failed to create material instance', res.errorCode);
         }
         return ResponseFactory.success(res, res.message ?? `Material instance '${name}' created`);
-      }
-
-      // ===== Shim: connect_nodes / connect_material_pins — pin-name-as-id fallback =====
-      case 'connect_nodes':
-      case 'connect_material_pins': {
-        const rawArgs = args as Record<string, unknown>;
-        const assetPath = extractOptionalString(rawArgs, 'assetPath') ??
-                         extractOptionalString(rawArgs, 'materialPath') ?? '';
-
-        const sourceNodeId = extractOptionalString(rawArgs, 'sourceNodeId') ??
-                            extractOptionalString(rawArgs, 'fromNode') ?? '';
-        const targetNodeId = extractOptionalString(rawArgs, 'targetNodeId') ??
-                            extractOptionalString(rawArgs, 'toNode') ?? '';
-        const sourcePin = extractOptionalString(rawArgs, 'sourcePin') ??
-                         extractOptionalString(rawArgs, 'fromPin') ?? '';
-        const targetPin = extractOptionalString(rawArgs, 'targetPin') ??
-                         extractOptionalString(rawArgs, 'toPin') ??
-                         extractOptionalString(rawArgs, 'inputName') ?? '';
-
-        // If node IDs not provided, use pin names as identifiers
-        const effectiveSourceId = sourceNodeId || sourcePin;
-        const effectiveTargetId = targetNodeId || targetPin;
-
-        const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_MATERIAL, {
-          subAction: 'connect_nodes',
-          assetPath,
-          sourceNodeId: effectiveSourceId,
-          sourcePin,
-          targetNodeId: effectiveTargetId,
-          inputName: targetPin,
-        })) as AutomationResponse;
-
-        if (res.success === false) {
-          return ResponseFactory.error(res.error ?? 'Failed to connect nodes', res.errorCode);
-        }
-        return ResponseFactory.success(res, res.message ?? 'Nodes connected');
       }
 
       // ===== Shim: rebuild_material — alias for compile_material =====

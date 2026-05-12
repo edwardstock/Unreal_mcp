@@ -419,11 +419,6 @@ void UMcpAutomationBridgeSubsystem::ProcessAutomationRequest(
                                             RequestingSocket);
           }))
         return;
-      if (HandleAndLog(TEXT("HandleMaterialGraphAction"), [&]() {
-            return HandleMaterialGraphAction(RequestId, Action, Payload,
-                                             RequestingSocket);
-          }))
-        return;
       if (HandleAndLog(TEXT("HandleBehaviorTreeAction"), [&]() {
             return HandleBehaviorTreeAction(RequestId, Action, Payload,
                                             RequestingSocket);
