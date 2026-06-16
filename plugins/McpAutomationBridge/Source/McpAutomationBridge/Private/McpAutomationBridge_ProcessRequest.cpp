@@ -419,11 +419,6 @@ void UMcpAutomationBridgeSubsystem::ProcessAutomationRequest(
                                             RequestingSocket);
           }))
         return;
-      if (HandleAndLog(TEXT("HandleMaterialGraphAction"), [&]() {
-            return HandleMaterialGraphAction(RequestId, Action, Payload,
-                                             RequestingSocket);
-          }))
-        return;
       if (HandleAndLog(TEXT("HandleBehaviorTreeAction"), [&]() {
             return HandleBehaviorTreeAction(RequestId, Action, Payload,
                                             RequestingSocket);
@@ -457,6 +452,31 @@ void UMcpAutomationBridgeSubsystem::ProcessAutomationRequest(
       if (HandleAndLog(TEXT("HandleManageMaterialAuthoringAction"), [&]() {
             return HandleManageMaterialAuthoringAction(RequestId, Action, Payload,
                                                         RequestingSocket);
+          }))
+        return;
+      if (HandleAndLog(TEXT("HandleManageMaterialDiagnosticsAction"), [&]() {
+            return HandleManageMaterialDiagnosticsAction(RequestId, Action, Payload,
+                                                         RequestingSocket);
+          }))
+        return;
+      if (HandleAndLog(TEXT("HandleGetCustomExpression"), [&]() {
+            return HandleGetCustomExpression(RequestId, Action, Payload,
+                                             RequestingSocket);
+          }))
+        return;
+      if (HandleAndLog(TEXT("HandleGetParameterDefaults"), [&]() {
+            return HandleGetParameterDefaults(RequestId, Action, Payload,
+                                              RequestingSocket);
+          }))
+        return;
+      if (HandleAndLog(TEXT("HandleGetSetMaterialAttributesOverrides"), [&]() {
+            return HandleGetSetMaterialAttributesOverrides(RequestId, Action, Payload,
+                                                          RequestingSocket);
+          }))
+        return;
+      if (HandleAndLog(TEXT("HandleBulkGetMaterialExpressionDetails"), [&]() {
+            return HandleBulkGetMaterialExpressionDetails(RequestId, Action, Payload,
+                                                          RequestingSocket);
           }))
         return;
 

@@ -5,6 +5,9 @@
  * Allows enabling/disabling individual tools or entire categories.
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Logger } from '../utils/logger.js';
 import { consolidatedToolDefinitions, type ToolDefinition } from './consolidated-tool-definitions.js';
 
@@ -26,31 +29,41 @@ interface CategoryState {
   enabledCount: number;
 }
 
-class DynamicToolManager {
+export class DynamicToolManager {
   private toolStates = new Map<string, ToolState>();
   private categoryStates = new Map<ToolCategory, CategoryState>();
   private initialized = false;
 
   /**
-   * Initialize the manager with all tools from definitions
+   * Initialize tool and category state.
+   *
+   * @param opts.defaultEnabledSet  When provided, only those tools are enabled
+   *   on startup. `null` means "all tools enabled" (back-compat).
+   *   When `opts` is omitted entirely, defaults are loaded from
+   *   config/default-enabled-tools.json next to the plugin root. A missing or
+   *   invalid file falls back to "all tools enabled".
    */
-  initialize(): void {
+  initialize(opts?: { defaultEnabledSet: Set<string> | null }): void {
     if (this.initialized) {
       log.warn('DynamicToolManager already initialized');
       return;
     }
 
-    // Initialize all tools from definitions
+    const enabledSet = opts !== undefined
+      ? opts.defaultEnabledSet
+      : this.loadDefaultEnabledSetFromDisk();
+
+    const knownNames = new Set<string>();
     for (const def of consolidatedToolDefinitions) {
       const category = (def.category as ToolCategory) || 'utility';
+      const enabled = enabledSet === null ? true : enabledSet.has(def.name);
       this.toolStates.set(def.name, {
         name: def.name,
         category,
-        enabled: true,
+        enabled,
         description: def.description
       });
-
-      // Track category stats
+      knownNames.add(def.name);
       if (!this.categoryStates.has(category)) {
         this.categoryStates.set(category, {
           name: category,
@@ -59,14 +72,49 @@ class DynamicToolManager {
           enabledCount: 0
         });
       }
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- guaranteed set above
-      const catState = this.categoryStates.get(category)!;
-      catState.toolCount++;
-      catState.enabledCount++;
+    }
+
+    if (enabledSet) {
+      for (const name of enabledSet) {
+        if (!knownNames.has(name)) {
+          log.warn(`Unknown tool in default-enabled-tools.json: ${name}`);
+        }
+      }
+    }
+
+    // Counters reflect actual enabled state. The previous implementation
+    // incremented enabledCount unconditionally, which is wrong as soon as
+    // not every tool starts enabled.
+    for (const tool of this.toolStates.values()) {
+      const cat = this.categoryStates.get(tool.category);
+      if (cat) {
+        cat.toolCount++;
+        if (tool.enabled) cat.enabledCount++;
+      }
     }
 
     this.initialized = true;
     log.info(`Initialized with ${this.toolStates.size} tools across ${this.categoryStates.size} categories`);
+  }
+
+  private loadDefaultEnabledSetFromDisk(): Set<string> | null {
+    try {
+      // This file lives at <plugin>/dist/tools/dynamic-tool-manager.js (built)
+      // or <plugin>/src/tools/dynamic-tool-manager.ts (dev). Plugin root is
+      // two directories up.
+      const here = fileURLToPath(import.meta.url);
+      const configPath = path.resolve(path.dirname(here), '..', '..', 'config', 'default-enabled-tools.json');
+      const raw = fs.readFileSync(configPath, 'utf8');
+      const parsed = JSON.parse(raw) as { enabled?: unknown };
+      if (!Array.isArray(parsed.enabled)) {
+        log.warn(`config/default-enabled-tools.json has no 'enabled' array; allowing all tools`);
+        return null;
+      }
+      return new Set(parsed.enabled.filter((x): x is string => typeof x === 'string'));
+    } catch (err) {
+      log.debug(`No default-enabled-tools.json found (allowing all tools): ${(err as Error).message}`);
+      return null;
+    }
   }
 
   /**

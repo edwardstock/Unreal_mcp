@@ -7,39 +7,6 @@ import { ResponseFactory } from '../../utils/response-factory.js';
 import { sanitizePath } from '../../utils/validation.js';
 
 /**
- * Valid actions for manage_asset tool.
- * Actions not in this list will return UNKNOWN_ACTION error immediately.
- */
-const VALID_ASSET_ACTIONS = new Set([
-  // Core asset operations
-  'list', 'import', 'duplicate', 'rename', 'move', 'delete',
-  'create_folder', 'search_assets', 'get_dependencies', 'validate',
-  'fixup_redirectors', 'find_by_tag', 'exists', 'bulk_rename', 'bulk_delete',
-  'duplicate_asset', 'rename_asset', 'move_asset', 'delete_asset', 'delete_assets',
-  // Asset metadata
-  'create_thumbnail', 'set_tags', 'get_metadata', 'set_metadata', 'generate_report',
-  // Material operations
-  'create_material', 'create_material_instance', 'create_render_target',
-  'generate_lods', 'add_material_parameter', 'list_instances',
-  'reset_instance_parameters', 'get_material_stats', 'nanite_rebuild_mesh',
-  // Material graph operations
-  'add_material_node', 'remove_material_node', 'rebuild_material',
-  'connect_material_pins', 'break_material_connections', 'get_material_node_details',
-  // Source control
-  'source_control_checkout', 'source_control_submit', 'source_control_enable', 'get_source_control_state',
-  // Graph analysis
-  'analyze_graph', 'get_asset_graph'
-]);
-
-/**
- * Check if an action is valid for the manage_asset tool.
- * Returns true if the action is recognized, false otherwise.
- */
-function isValidAssetAction(action: string): boolean {
-  return VALID_ASSET_ACTIONS.has(action);
-}
-
-/**
  * Detect path traversal attempts in user input.
  * Returns true if the path contains suspicious traversal patterns.
  */
@@ -105,8 +72,9 @@ interface AssetListItem {
 interface AssetListResponse {
   success?: boolean;
   assets?: AssetListItem[];
-  result?: { assets?: AssetListItem[]; folders?: string[] };
+  result?: { assets?: AssetListItem[]; folders?: string[]; totalCount?: number };
   folders?: string[];
+  totalCount?: number;
   [key: string]: unknown;
 }
 
@@ -115,19 +83,127 @@ interface AssetOperationResponse {
   success?: boolean;
   message?: string;
   error?: string;
+  errorCode?: string;
   tags?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
+const CANONICAL_MANAGE_ASSET_ACTIONS = new Set([
+  'list_assets',
+  'search_assets',
+  'assets_exist',
+  'import_assets',
+  'duplicate_assets',
+  'rename_assets',
+  'move_assets',
+  'delete_assets',
+  'create_folders',
+  'get_assets_dependencies',
+  'get_assets_graph',
+  'analyze_assets_graph',
+  'get_assets_metadata',
+  'set_assets_metadata',
+  'set_assets_tags',
+  'find_assets_by_tag',
+  'create_thumbnails',
+  'generate_lods',
+  'nanite_rebuild_meshes',
+  'validate_assets',
+  'fixup_redirectors',
+  'generate_assets_report',
+  'source_control_checkout_assets',
+  'source_control_submit_assets',
+  'get_assets_source_control_state',
+  'create_render_targets'
+]);
+
 export async function handleAssetTools(action: string, args: HandlerArgs, tools: ITools): Promise<Record<string, unknown>> {
   try {
-    switch (action) {
+    if (action === 'list_assets') {
+      const params = normalizeArgs(args, [
+        { key: 'path', aliases: ['directory', 'directoryPath', 'assetPath'], default: '/Game' },
+        { key: 'limit', default: 50 },
+        { key: 'offset', default: 0 },
+        { key: 'recursive', aliases: ['recursivePaths'], default: false },
+        { key: 'depth', default: undefined }
+      ]);
+
+      let path = extractOptionalString(params, 'path') ?? '/Game';
+      path = sanitizePath(path);
+
+      const limit = extractOptionalNumber(params, 'limit') ?? 50;
+      const offset = extractOptionalNumber(params, 'offset') ?? 0;
+      const recursive = extractOptionalBoolean(params, 'recursive') ?? false;
+      const depth = extractOptionalNumber(params, 'depth');
+
+      const effectiveRecursive = recursive === true || (depth !== undefined && depth > 0);
+
+      const res = await executeAutomationRequest(tools, 'manage_asset', {
+        path,
+        recursive: effectiveRecursive,
+        depth,
+        pagination: { limit, offset },
+        subAction: 'list_assets'
+      }) as AssetListResponse;
+
+      const assets: AssetListItem[] = (Array.isArray(res.assets) ? res.assets :
+        (Array.isArray(res.result) ? res.result : (res.result?.assets || [])));
+
+      const folders: string[] = Array.isArray(res.folders) ? res.folders : (res.result?.folders || []);
+
+      const totalCount = res.totalCount ?? res.result?.totalCount ?? assets.length;
+      const limitedAssets = assets.slice(0, limit);
+      const remaining = Math.max(0, totalCount - limit);
+
+      let message = `Found ${totalCount} assets`;
+      if (folders.length > 0) {
+        message += ` and ${folders.length} folders`;
+      }
+      message += `: ${limitedAssets.map((a) => a.path || a.package || a.name || 'unknown').join(', ')}`;
+
+      if (folders.length > 0 && limitedAssets.length < limit) {
+        const remainingLimit = limit - limitedAssets.length;
+        if (remainingLimit > 0) {
+          const limitedFolders = folders.slice(0, remainingLimit);
+          if (limitedAssets.length > 0) message += ', ';
+          message += `Folders: [${limitedFolders.join(', ')}]`;
+          if (folders.length > remainingLimit) message += '...';
+        }
+      }
+
+      if (remaining > 0) {
+        message += `... and ${remaining} others`;
+      }
+
+      return ResponseFactory.success({
+        assets: limitedAssets,
+        folders: folders,
+        totalCount: totalCount,
+        count: limitedAssets.length
+      }, message);
+    }
+
+    if (CANONICAL_MANAGE_ASSET_ACTIONS.has(action)) {
+      return await executeAutomationRequest(
+        tools,
+        'manage_asset',
+        { ...args, subAction: action }
+      ) as Record<string, unknown>;
+    }
+
+    let dispatchAction = action;
+    if (!CANONICAL_MANAGE_ASSET_ACTIONS.has(action)) {
+      dispatchAction = '__unknown_manage_asset_sub_action__';
+    }
+
+    switch (dispatchAction) {
       case 'list': {
         // Route through C++ HandleListAssets for proper asset enumeration
         const params = normalizeArgs(args, [
           { key: 'path', aliases: ['directory', 'directoryPath', 'assetPath'], default: '/Game' },
           { key: 'limit', default: 50 },
+          { key: 'offset', default: 0 },
           { key: 'recursive', aliases: ['recursivePaths'], default: false },
           { key: 'depth', default: undefined }
         ]);
@@ -136,6 +212,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         path = sanitizePath(path);
 
         const limit = extractOptionalNumber(params, 'limit') ?? 50;
+        const offset = extractOptionalNumber(params, 'offset') ?? 0;
         const recursive = extractOptionalBoolean(params, 'recursive') ?? false;
         const depth = extractOptionalNumber(params, 'depth');
 
@@ -144,7 +221,8 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const res = await executeAutomationRequest(tools, 'list', {
           path,
           recursive: effectiveRecursive,
-          depth
+          depth,
+          pagination: { limit, offset }
         }) as AssetListResponse;
 
         const assets: AssetListItem[] = (Array.isArray(res.assets) ? res.assets :
@@ -153,7 +231,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         // New: Handle folders
         const folders: string[] = Array.isArray(res.folders) ? res.folders : (res.result?.folders || []);
 
-        const totalCount = assets.length;
+        const totalCount = res.totalCount ?? res.result?.totalCount ?? assets.length;
         const limitedAssets = assets.slice(0, limit);
         const remaining = Math.max(0, totalCount - limit);
 
@@ -195,7 +273,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         }
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           path: folderPath,
-          subAction: 'create_folder'
+          subAction: 'create_folders'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Folder created successfully');
       }
@@ -217,7 +295,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
           destinationPath,
           overwrite,
           save,
-          subAction: 'import'
+          subAction: 'import_assets'
         }) as AssetOperationResponse;
 
         // CRITICAL FIX: Pass through C++ failures instead of wrapping them
@@ -268,7 +346,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           sourcePath,
           destinationPath,
-          subAction: 'duplicate'
+          subAction: 'duplicate_assets'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Asset duplicated successfully');
       }
@@ -295,7 +373,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           sourcePath,
           destinationPath,
-          subAction: 'rename'
+          subAction: 'rename_assets'
         }) as AssetOperationResponse;
 
         if (res && res.success === false) {
@@ -329,7 +407,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           sourcePath,
           destinationPath: destinationPath ?? '',
-          subAction: 'move'
+          subAction: 'move_assets'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Asset moved successfully');
       }
@@ -376,7 +454,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
 
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           paths: normalizedPaths,
-          subAction: 'delete'
+          subAction: 'delete_assets'
         }) as AssetOperationResponse;
         
         // CRITICAL FIX: Check if C++ returned success=false and pass it through
@@ -423,7 +501,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
           assetPath,
           width,
           height,
-          subAction: 'generate_thumbnail'
+          subAction: 'create_thumbnails'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Thumbnail created successfully');
       }
@@ -455,7 +533,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const assetPath = extractString(params, 'assetPath');
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           assetPath,
-          subAction: 'get_metadata'
+          subAction: 'get_assets_metadata'
         }) as AssetOperationResponse;
         const tags = res.tags || {};
         const metadata = res.metadata || {};
@@ -489,7 +567,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const assetPath = extractString(params, 'assetPath');
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           assetPath,
-          subAction: 'validate'
+          subAction: 'validate_assets'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Asset validation complete');
       }
@@ -506,7 +584,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
           directory,
           reportType,
           outputPath,
-          subAction: 'generate_report'
+          subAction: 'generate_assets_report'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Report generated successfully');
       }
@@ -613,7 +691,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         const res = await executeAutomationRequest(tools, 'manage_asset', {
           assetPath,
           recursive,
-          subAction: 'get_dependencies'
+          subAction: 'get_assets_dependencies'
         }) as AssetOperationResponse;
         return ResponseFactory.success(res, 'Dependencies retrieved');
       }
@@ -646,7 +724,7 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         ]);
         const assetPath = extractString(params, 'assetPath');
         const maxDepth = extractOptionalNumber(params, 'maxDepth');
-        const res = await executeAutomationRequest(tools, 'get_asset_graph', {
+        const res = await executeAutomationRequest(tools, 'analyze_graph', {
           assetPath,
           maxDepth
         });
@@ -763,215 +841,48 @@ export async function handleAssetTools(action: string, args: HandlerArgs, tools:
         });
         return ResponseFactory.success(res, 'Material stats retrieved');
       }
-      case 'add_material_node': {
-        const materialNodeAliases: Record<string, string> = {
-          'Multiply': 'MaterialExpressionMultiply',
-          'Add': 'MaterialExpressionAdd',
-          'Subtract': 'MaterialExpressionSubtract',
-          'Divide': 'MaterialExpressionDivide',
-          'Power': 'MaterialExpressionPower',
-          'Clamp': 'MaterialExpressionClamp',
-          'Constant': 'MaterialExpressionConstant',
-          'Constant2Vector': 'MaterialExpressionConstant2Vector',
-          'Constant3Vector': 'MaterialExpressionConstant3Vector',
-          'Constant4Vector': 'MaterialExpressionConstant4Vector',
-          'TextureSample': 'MaterialExpressionTextureSample',
-          'TextureCoordinate': 'MaterialExpressionTextureCoordinate',
-          'Panner': 'MaterialExpressionPanner',
-          'Rotator': 'MaterialExpressionRotator',
-          'Lerp': 'MaterialExpressionLinearInterpolate',
-          'LinearInterpolate': 'MaterialExpressionLinearInterpolate',
-          'Sine': 'MaterialExpressionSine',
-          'Cosine': 'MaterialExpressionCosine',
-          'Append': 'MaterialExpressionAppendVector',
-          'AppendVector': 'MaterialExpressionAppendVector',
-          'ComponentMask': 'MaterialExpressionComponentMask',
-          'Fresnel': 'MaterialExpressionFresnel',
-          'Time': 'MaterialExpressionTime',
-          'ScalarParameter': 'MaterialExpressionScalarParameter',
-          'VectorParameter': 'MaterialExpressionVectorParameter',
-          'StaticSwitchParameter': 'MaterialExpressionStaticSwitchParameter'
-        };
-
+      case 'get_material_instance_info': {
         const params = normalizeArgs(args, [
           { key: 'assetPath', aliases: ['materialPath'], required: true },
-          { key: 'nodeType', aliases: ['type'], required: true, map: materialNodeAliases },
-          { key: 'posX' },
-          { key: 'posY' }
+          { key: 'includeEffective', default: true },
+          { key: 'overriddenOnly', default: false }
         ]);
-
         const assetPath = extractString(params, 'assetPath');
-        const nodeType = extractString(params, 'nodeType');
-        const posX = extractOptionalNumber(params, 'posX');
-        const posY = extractOptionalNumber(params, 'posY');
-
-        const res = await executeAutomationRequest(tools, 'add_material_node', {
+        const includeEffective = extractOptionalBoolean(params, 'includeEffective') ?? true;
+        const overriddenOnly = extractOptionalBoolean(params, 'overriddenOnly') ?? false;
+        const res = await executeAutomationRequest(tools, 'get_material_instance_info', {
           assetPath,
-          nodeType,
-          posX,
-          posY
-        });
-        return ResponseFactory.success(res, 'Material node added successfully');
-      }
-      case 'connect_material_pins': {
-        const params = normalizeArgs(args, [
-          { key: 'assetPath', aliases: ['materialPath'], required: true },
-          { key: 'sourceNodeId', aliases: ['sourceNode'], required: true },
-          { key: 'sourcePin', aliases: ['fromPin', 'outputPin'], required: true },
-          { key: 'targetNodeId', aliases: ['targetNode'], required: true },
-          { key: 'targetPin', aliases: ['toPin', 'inputPin'], required: true }
-        ]);
-        const assetPath = extractString(params, 'assetPath');
-        const sourceNodeId = extractString(params, 'sourceNodeId');
-        const sourcePin = extractString(params, 'sourcePin');
-        const targetNodeId = extractString(params, 'targetNodeId');
-        const targetPin = extractString(params, 'targetPin');
-        const res = await executeAutomationRequest(tools, 'connect_material_pins', {
-          assetPath,
-          sourceNodeId,
-          sourcePin,
-          targetNodeId,
-          targetPin
-        });
-        return ResponseFactory.success(res, 'Material pins connected successfully');
-      }
-      case 'remove_material_node': {
-        const params = normalizeArgs(args, [
-          { key: 'assetPath', aliases: ['materialPath'], required: true },
-          { key: 'nodeId', required: true }
-        ]);
-        const assetPath = extractString(params, 'assetPath');
-        const nodeId = extractString(params, 'nodeId');
-        const res = await executeAutomationRequest(tools, 'remove_material_node', {
-          assetPath,
-          nodeId
-        });
-        return ResponseFactory.success(res, 'Material node removed successfully');
-      }
-      case 'break_material_connections': {
-        const params = normalizeArgs(args, [
-          { key: 'assetPath', aliases: ['materialPath'], required: true },
-          { key: 'nodeId' },
-          { key: 'pinName' }
-        ]);
-        const assetPath = extractString(params, 'assetPath');
-        const nodeId = extractOptionalString(params, 'nodeId');
-        const pinName = extractOptionalString(params, 'pinName');
-        const res = await executeAutomationRequest(tools, 'break_material_connections', {
-          assetPath,
-          nodeId,
-          pinName
-        });
-        return ResponseFactory.success(res, 'Material connections broken successfully');
-      }
-      case 'get_material_node_details': {
-        const params = normalizeArgs(args, [
-          { key: 'assetPath', aliases: ['materialPath'], required: true },
-          { key: 'nodeId', required: false },  // Optional - if not provided, lists all nodes
-          { key: 'expressionIndex' }  // Alternative to nodeId - numeric index
-        ]);
-        const assetPath = extractString(params, 'assetPath');
-        const nodeId = extractOptionalString(params, 'nodeId');
-        const expressionIndex = extractOptionalNumber(params, 'expressionIndex');
-        
-        const res = await executeAutomationRequest(tools, 'get_material_node_details', {
-          assetPath,
-          nodeId,
-          expressionIndex
-        });
-        return ResponseFactory.success(res, 'Material node details retrieved');
-      }
-      case 'rebuild_material': {
-        const params = normalizeArgs(args, [
-          { key: 'assetPath', aliases: ['materialPath'], required: true }
-        ]);
-        const assetPath = extractString(params, 'assetPath');
-        const res = await executeAutomationRequest(tools, 'rebuild_material', {
-          assetPath
-        });
-        return ResponseFactory.success(res, 'Material rebuilt successfully');
-      }
-      case 'bulk_rename': {
-        // Accept either folderPath or assetPaths
-        // Map pattern->searchText and replacement->replaceText for C++ compatibility
-        const argsTyped = args as AssetArgs;
-        const folderPath = argsTyped.folderPath ?? argsTyped.path;
-        const assetPaths = argsTyped.assetPaths ?? argsTyped.paths;
-
-        // SECURITY: Validate folderPath for traversal attempts
-        const folderPathSecurity = validatePathSecurity(
-          typeof folderPath === 'string' ? folderPath : undefined, 'folderPath'
-        );
-        if (folderPathSecurity) return folderPathSecurity;
-
-        // SECURITY: Validate path parameter for traversal attempts (test may pass 'path')
-        const pathParamSecurity = validatePathSecurity(
-          typeof argsTyped.path === 'string' ? argsTyped.path : undefined, 'path'
-        );
-        if (pathParamSecurity) return pathParamSecurity;
-
-        // SECURITY: Validate assetPaths array for traversal attempts
-        const assetPathsSecurity = validatePathsSecurity(assetPaths, 'assetPaths');
-        if (assetPathsSecurity) return assetPathsSecurity;
-        
-        if (!folderPath && (!assetPaths || (Array.isArray(assetPaths) && assetPaths.length === 0))) {
-          return ResponseFactory.error('INVALID_ARGUMENT', 'Either folderPath or assetPaths is required for bulk_rename');
+          includeEffective,
+          overriddenOnly
+        }) as AssetOperationResponse;
+        if (res.success === false) {
+          return ResponseFactory.errorWithCode(res.errorCode ?? res.error ?? 'OPERATION_FAILED', res.message ?? 'Failed to get material instance diagnostics');
         }
-        
-        const res = await executeAutomationRequest(tools, 'bulk_rename', {
-          folderPath,
-          assetPaths,
-          searchText: argsTyped.pattern,
-          replaceText: argsTyped.replacement,
-          prefix: argsTyped.prefix,
-          suffix: argsTyped.suffix
-        });
-        return ResponseFactory.success(res, 'Bulk rename completed');
+        return ResponseFactory.success(res, 'Material instance diagnostics retrieved');
       }
-      case 'bulk_delete': {
-        // Accept either folderPath or assetPaths
-        const argsTyped = args as AssetArgs;
-        const folderPath = argsTyped.folderPath ?? argsTyped.path;
-        const assetPaths = argsTyped.assetPaths ?? argsTyped.paths;
-        
-        if (!folderPath && (!assetPaths || (Array.isArray(assetPaths) && assetPaths.length === 0))) {
-          return ResponseFactory.error('INVALID_ARGUMENT', 'Either folderPath or assetPaths is required for bulk_delete');
-        }
-        
-        const res = await executeAutomationRequest(tools, 'bulk_delete', {
-          ...args,
-          folderPath,
-          assetPaths
-        });
-        return ResponseFactory.success(res, 'Bulk delete completed');
-      }
+      // bulk_rename / bulk_delete dropped after G.2: rename_assets and
+      // delete_assets are the canonical batch forms. Callers who need the
+      // legacy bulk behavior with folderPath / pattern / replacement can still
+      // hit native bulk_rename_assets / bulk_delete_assets directly.
       default: {
-        // Validate action first - return error immediately for unknown actions
-        // This prevents sending invalid requests to C++ and avoids timeout issues
-        if (!isValidAssetAction(action)) {
-          return cleanObject({
-            success: false,
-            error: 'UNKNOWN_ACTION',
-            message: `Unknown asset action: ${action}. Valid actions are: ${Array.from(VALID_ASSET_ACTIONS).join(', ')}`,
-            action: action || 'manage_asset',
-            assetPath: (args as AssetArgs).assetPath ?? (args as AssetArgs).path
-          });
-        }
-        
-        // Pass all args through to C++ handler for actions that are valid but not explicitly handled
-        const res = await executeAutomationRequest(tools, action || 'manage_asset', { ...args, subAction: action }) as AssetOperationResponse;
+        // Pass through to C++ for any subAction. Native FMcpToolRegistry's
+        // manage_asset schema is the source of truth for valid actions; if
+        // the action is unsupported, C++ returns its own UNKNOWN_SUBACTION
+        // error. The old TS-side allowlist (VALID_ASSET_ACTIONS) silently
+        // rejected actions C++ DID support, so it's been removed.
+        const res = await executeAutomationRequest(tools, 'manage_asset', { ...args, subAction: action }) as AssetOperationResponse;
         const result = res ?? {};
         const errorCode = typeof result.error === 'string' ? result.error.toUpperCase() : '';
         const message = typeof result.message === 'string' ? result.message : '';
         const argsTyped = args as AssetArgs;
 
         // Check for unknown/invalid action errors from C++ (UNKNOWN_ACTION or INVALID_SUBACTION)
-        if (errorCode === 'UNKNOWN_ACTION' || errorCode === 'INVALID_SUBACTION' ||
+        if (errorCode === 'UNKNOWN_ACTION' || errorCode === 'INVALID_SUBACTION' || errorCode === 'UNKNOWN_SUB_ACTION' ||
             message.toLowerCase().includes('unknown action') || message.toLowerCase().includes('unknown subaction')) {
           return cleanObject({
             success: false,
-            error: 'UNKNOWN_ACTION',
-            message: `Unknown asset action: ${action}`,
+            error: 'UNKNOWN_SUB_ACTION',
+            message: `Unknown manage_asset subAction: ${action}`,
             action: action || 'manage_asset',
             assetPath: argsTyped.assetPath ?? argsTyped.path
           });

@@ -383,7 +383,18 @@ UObject* ResolveObjectFromPath(const FString& ObjectPath, FString* OutResolvedPa
     }
     
     FString Path = ObjectPath;
-    
+
+    // N3: extract sub-object name from colon syntax (e.g., /Game/Path/Asset.Asset:SubObjectName)
+    FString SubObjectName;
+    {
+        int32 ColonIdx = INDEX_NONE;
+        if (Path.FindChar(TEXT(':'), ColonIdx) && Path.StartsWith(TEXT("/")))
+        {
+            SubObjectName = Path.Mid(ColonIdx + 1);
+            Path = Path.Left(ColonIdx);
+        }
+    }
+
     // Handle component paths in "ActorName.ComponentName" format
     if (Path.Contains(TEXT(".")) && !Path.StartsWith(TEXT("/")))
     {
@@ -449,28 +460,69 @@ UObject* ResolveObjectFromPath(const FString& ObjectPath, FString* OutResolvedPa
         UPackage* LoadedPackage = LoadPackage(nullptr, *PackagePath, LOAD_None);
         if (LoadedPackage)
         {
-            if (UObject* Found = FindObject<UObject>(LoadedPackage, *Path))
+            UObject* Found = FindObject<UObject>(LoadedPackage, *Path);
+            if (!Found) Found = LoadedPackage;
+
+            // N3: resolve sub-object if colon syntax was used
+            if (!SubObjectName.IsEmpty())
             {
-                if (OutResolvedPath)
+                UObject* SubObj = FindObject<UObject>(Found, *SubObjectName);
+                if (!SubObj)
                 {
-                    *OutResolvedPath = Found->GetPathName();
+                    // REG1: fall back to nested-outer scan to find subobjects whose
+                    // outer chain goes through EditorOnlyData -> ExpressionCollection
+                    // (UE 5.7 material/material function expressions live in this chain)
+                    TArray<UObject*> Inner;
+                    GetObjectsWithOuter(Found, Inner, /*bIncludeNestedObjects=*/true);
+                    for (UObject* Obj : Inner)
+                    {
+                        if (Obj && Obj->GetName() == SubObjectName)
+                        {
+                            SubObj = Obj;
+                            break;
+                        }
+                    }
                 }
-                return Found;
+                if (SubObj)
+                {
+                    if (OutResolvedPath) *OutResolvedPath = SubObj->GetPathName();
+                    return SubObj;
+                }
+                return nullptr;
             }
-            if (OutResolvedPath)
-            {
-                *OutResolvedPath = LoadedPackage->GetPathName();
-            }
-            return LoadedPackage;
+
+            if (OutResolvedPath) *OutResolvedPath = Found->GetPathName();
+            return Found;
         }
-        
+
         // Try StaticFindObject for engine assets that may not need package loading
         if (UObject* Found = FindObject<UObject>(nullptr, *Path))
         {
-            if (OutResolvedPath)
+            if (!SubObjectName.IsEmpty())
             {
-                *OutResolvedPath = Found->GetPathName();
+                UObject* SubObj = FindObject<UObject>(Found, *SubObjectName);
+                if (!SubObj)
+                {
+                    // REG1: fall back to nested-outer scan (see comment above)
+                    TArray<UObject*> Inner;
+                    GetObjectsWithOuter(Found, Inner, /*bIncludeNestedObjects=*/true);
+                    for (UObject* Obj : Inner)
+                    {
+                        if (Obj && Obj->GetName() == SubObjectName)
+                        {
+                            SubObj = Obj;
+                            break;
+                        }
+                    }
+                }
+                if (SubObj)
+                {
+                    if (OutResolvedPath) *OutResolvedPath = SubObj->GetPathName();
+                    return SubObj;
+                }
+                return nullptr;
             }
+            if (OutResolvedPath) *OutResolvedPath = Found->GetPathName();
             return Found;
         }
     }

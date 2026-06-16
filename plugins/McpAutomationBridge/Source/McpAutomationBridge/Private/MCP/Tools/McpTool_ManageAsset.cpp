@@ -1,4 +1,4 @@
-// McpTool_ManageAsset.cpp — manage_asset tool definition (45 actions)
+// McpTool_ManageAsset.cpp — manage_asset tool definition (26 canonical actions per spec section 4)
 
 #include "McpVersionCompatibility.h"
 #include "MCP/McpToolDefinition.h"
@@ -12,139 +12,163 @@ public:
 
 	FString GetDescription() const override
 	{
-		return TEXT("Create, import, duplicate, rename, delete assets. "
-			"Edit Material graphs and instances. Analyze dependencies.");
+		return TEXT("Generic, type-agnostic asset operations: list, search, import, "
+			"duplicate, rename, move, delete, dependency analysis, metadata/tags, "
+			"thumbnails, LODs, Nanite rebuild, validation, redirector cleanup, "
+			"reports, source control, and render target creation.");
 	}
 
 	FString GetCategory() const override { return TEXT("core"); }
 
+	TSharedPtr<FJsonObject> BuildAnnotations() const override
+	{
+		// manage_asset can permanently delete and overwrite content (delete_assets,
+		// rename_assets, move_assets, fixup_redirectors, etc.). Mark the tool
+		// destructive so MCP clients (e.g. Claude Code) do not auto-approve calls and
+		// the user gets the standard Allow once / Allow always / Deny prompt before
+		// execution.
+		auto Annotations = MakeShared<FJsonObject>();
+		Annotations->SetBoolField(TEXT("destructiveHint"), true);
+		Annotations->SetBoolField(TEXT("idempotentHint"), false);
+		return Annotations;
+	}
+
 	TSharedPtr<FJsonObject> BuildInputSchema() const override
 	{
+		// 26 canonical plural action names per spec section 4. All material- and
+		// texture-specific actions live in the dedicated tools (manage_material,
+		// manage_texture).
+		const TArray<FString> ActionEnum = {
+			TEXT("list_assets"),
+			TEXT("search_assets"),
+			TEXT("assets_exist"),
+			TEXT("import_assets"),
+			TEXT("duplicate_assets"),
+			TEXT("rename_assets"),
+			TEXT("move_assets"),
+			TEXT("delete_assets"),
+			TEXT("create_folders"),
+			TEXT("get_assets_dependencies"),
+			TEXT("get_assets_graph"),
+			TEXT("analyze_assets_graph"),
+			TEXT("get_assets_metadata"),
+			TEXT("set_assets_metadata"),
+			TEXT("set_assets_tags"),
+			TEXT("find_assets_by_tag"),
+			TEXT("create_thumbnails"),
+			TEXT("generate_lods"),
+			TEXT("nanite_rebuild_meshes"),
+			TEXT("validate_assets"),
+			TEXT("fixup_redirectors"),
+			TEXT("generate_assets_report"),
+			TEXT("source_control_checkout_assets"),
+			TEXT("source_control_submit_assets"),
+			TEXT("get_assets_source_control_state"),
+			TEXT("create_render_targets")
+		};
 		return FMcpSchemaBuilder()
-			.StringEnum(TEXT("action"), {
-				TEXT("list"),
-				TEXT("import"),
-				TEXT("duplicate"),
-				TEXT("duplicate_asset"),
-				TEXT("rename"),
-				TEXT("rename_asset"),
-				TEXT("move"),
-				TEXT("move_asset"),
-				TEXT("delete"),
-				TEXT("delete_asset"),
-				TEXT("delete_assets"),
-				TEXT("create_folder"),
-				TEXT("search_assets"),
-				TEXT("get_dependencies"),
-				TEXT("get_source_control_state"),
-				TEXT("analyze_graph"),
-				TEXT("get_asset_graph"),
-				TEXT("create_thumbnail"),
-				TEXT("set_tags"),
-				TEXT("get_metadata"),
-				TEXT("set_metadata"),
-				TEXT("validate"),
-				TEXT("fixup_redirectors"),
-				TEXT("find_by_tag"),
-				TEXT("generate_report"),
-				TEXT("create_material"),
-				TEXT("create_material_instance"),
-				TEXT("create_render_target"),
-				TEXT("generate_lods"),
-				TEXT("add_material_parameter"),
-				TEXT("list_instances"),
-				TEXT("reset_instance_parameters"),
-				TEXT("exists"),
-				TEXT("get_material_stats"),
-				TEXT("nanite_rebuild_mesh"),
-				TEXT("bulk_rename"),
-				TEXT("bulk_delete"),
-				TEXT("source_control_checkout"),
-				TEXT("source_control_submit"),
-				TEXT("add_material_node"),
-				TEXT("connect_material_pins"),
-				TEXT("remove_material_node"),
-				TEXT("break_material_connections"),
-				TEXT("get_material_node_details"),
-				TEXT("rebuild_material")
-			}, TEXT("Action to perform"))
+			.StringEnum(TEXT("subAction"), ActionEnum,
+				TEXT("Canonical manage_asset sub-action to perform."))
+
+			// Single + batch asset path inputs
 			.String(TEXT("assetPath"), TEXT("Asset path (e.g., /Game/Path/Asset)."))
+			.Array(TEXT("assetPaths"),
+				TEXT("List of asset paths for batch operations (delete_assets, "
+					"rename_assets, move_assets, source_control_submit_assets, etc.)."))
+
+			// list / search filters
 			.String(TEXT("directory"), TEXT("Path to a directory."))
-			.Array(TEXT("classNames"), TEXT(""))
-			.Array(TEXT("packagePaths"), TEXT(""))
-			.Bool(TEXT("recursivePaths"), TEXT(""))
-			.Bool(TEXT("recursiveClasses"), TEXT(""))
-			.Number(TEXT("limit"), TEXT(""))
-			.Number(TEXT("offset"), TEXT(""))
+			.Array(TEXT("classNames"),
+				TEXT("UClass names to filter by (e.g., 'Material', 'StaticMesh') for "
+					"list_assets / search_assets."))
+			.Array(TEXT("packagePaths"),
+				TEXT("Package paths to scope list_assets / search_assets. Empty "
+					"means all paths."))
+			.Bool(TEXT("recursivePaths"),
+				TEXT("When true, list_assets / search_assets descends into "
+					"subdirectories of packagePaths."))
+			.Bool(TEXT("recursiveClasses"),
+				TEXT("When true, list_assets / search_assets includes subclasses of "
+					"classNames."))
+			.Number(TEXT("limit"),
+				TEXT("Maximum number of results to return (paginated list_assets / "
+					"search_assets)."))
+			.Number(TEXT("offset"),
+				TEXT("Skip this many results before returning (paginated list_assets "
+					"/ search_assets)."))
+
+			// Import / duplicate / rename / move
 			.String(TEXT("sourcePath"), TEXT("Source path for import/move/copy."))
-			.String(TEXT("destinationPath"), TEXT("Destination path for move/copy."))
-			.Array(TEXT("assetPaths"), TEXT(""))
-			.Number(TEXT("lodCount"), TEXT(""))
-			.FreeformObject(TEXT("reductionSettings"), TEXT(""))
-			.String(TEXT("nodeName"), TEXT("Name identifier."))
-			.String(TEXT("eventName"), TEXT("Name of the event."))
-			.String(TEXT("memberClass"), TEXT(""))
-			.Number(TEXT("posX"), TEXT(""))
-			.Number(TEXT("posY"), TEXT(""))
+			.String(TEXT("destinationPath"),
+				TEXT("Destination path for move/copy."))
 			.String(TEXT("newName"), TEXT("New name for renaming."))
-			.Bool(TEXT("overwrite"), TEXT("Overwrite if the asset/file already exists."))
-			.Bool(TEXT("save"), TEXT("Save the asset(s) after the operation."))
-			.Bool(TEXT("fixupRedirectors"), TEXT(""))
+			.Bool(TEXT("overwrite"),
+				TEXT("Overwrite if the asset/file already exists."))
+			.Bool(TEXT("save"),
+				TEXT("Save the asset(s) after the operation."))
+			.Bool(TEXT("fixupRedirectors"),
+				TEXT("After move/rename, run fixup-redirectors to consolidate "
+					"references and delete redirector stubs."))
+			.String(TEXT("prefix"),
+				TEXT("Prefix to prepend to asset names during batch rename."))
+			.String(TEXT("suffix"),
+				TEXT("Suffix to append to asset names during batch rename."))
+			.String(TEXT("searchText"),
+				TEXT("Substring to find in asset names during batch rename."))
+			.String(TEXT("replaceText"),
+				TEXT("Replacement text for searchText during batch rename."))
+
+			// Folder management
 			.String(TEXT("directoryPath"), TEXT("Path to a directory."))
-			.String(TEXT("name"), TEXT("Name identifier."))
-			.String(TEXT("path"), TEXT("Path to a directory."))
-			.String(TEXT("parentMaterial"), TEXT("Material asset path."))
-			.FreeformObject(TEXT("parameters"), TEXT(""))
-			.Number(TEXT("width"), TEXT(""))
-			.Number(TEXT("height"), TEXT(""))
-			.String(TEXT("format"), TEXT(""))
-			.String(TEXT("meshPath"), TEXT("Mesh asset path."))
-			.String(TEXT("tag"), TEXT("Name of the tag."))
-			.FreeformObject(TEXT("metadata"), TEXT(""))
-			.String(TEXT("graphName"), TEXT("Name of the graph."))
-			.String(TEXT("nodeType"), TEXT(""))
-			.String(TEXT("nodeId"), TEXT("ID of the node."))
-			.String(TEXT("sourceNodeId"), TEXT("ID of the source node."))
-			.String(TEXT("targetNodeId"), TEXT("ID of the target node."))
-			.String(TEXT("inputName"), TEXT("Name of the pin."))
-			.String(TEXT("fromNodeId"), TEXT("ID of the source node."))
-			.String(TEXT("fromPin"), TEXT("Name of the source pin."))
-			.String(TEXT("toNodeId"), TEXT("ID of the target node."))
-			.String(TEXT("toPin"), TEXT("Name of the target pin."))
-			.String(TEXT("parameterName"), TEXT("Name of the parameter."))
-			.FreeformObject(TEXT("value"), TEXT("Generic value (any type)."))
-			.Number(TEXT("x"), TEXT(""))
-			.Number(TEXT("y"), TEXT(""))
-			.String(TEXT("comment"), TEXT(""))
-			.String(TEXT("parentNodeId"), TEXT("ID of the node."))
-			.String(TEXT("childNodeId"), TEXT("ID of the node."))
-			.Number(TEXT("maxDepth"), TEXT(""))
-			.String(TEXT("prefix"), TEXT(""))
-			.String(TEXT("suffix"), TEXT(""))
-			.String(TEXT("searchText"), TEXT(""))
-			.String(TEXT("replaceText"), TEXT(""))
-			.Array(TEXT("paths"), TEXT(""))
-			.String(TEXT("description"), TEXT(""))
-			.Bool(TEXT("checkoutFiles"), TEXT(""))
-			.Bool(TEXT("showConfirmation"), TEXT(""))
-			.String(TEXT("pinName"), TEXT("Name of the pin."))
-			.String(TEXT("desc"), TEXT(""))
-			.String(TEXT("materialPath"), TEXT("Material asset path."))
-			.String(TEXT("texturePath"), TEXT("Texture asset path."))
-			.String(TEXT("expressionClass"), TEXT(""))
-			.Number(TEXT("coordinateIndex"), TEXT(""))
-			.String(TEXT("parameterType"), TEXT(""))
-			.ArrayOfObjects(TEXT("nodes"), TEXT(""))
-			.Array(TEXT("tags"), TEXT(""))
 			.String(TEXT("folderPath"), TEXT("Path to a directory."))
-			.String(TEXT("sourceNode"), TEXT("ID of the source node."))
-			.String(TEXT("targetNode"), TEXT("ID of the target node."))
-			.String(TEXT("outputPin"), TEXT("Name of the source pin."))
-			.String(TEXT("inputPin"), TEXT("Name of the target pin."))
-			.String(TEXT("type"), TEXT(""))
-			.FreeformObject(TEXT("defaultValue"), TEXT("Generic value (any type)."))
-			.String(TEXT("expressionIndex"), TEXT("ID of the node."))
-			.Required({TEXT("action")})
+			.String(TEXT("path"), TEXT("Path to a directory."))
+			.String(TEXT("name"), TEXT("Name identifier."))
+
+			// Generate LODs / Nanite
+			.String(TEXT("meshPath"), TEXT("Mesh asset path."))
+			.Number(TEXT("lodCount"),
+				TEXT("Number of LODs to generate via generate_lods."))
+			.FreeformObject(TEXT("reductionSettings"),
+				TEXT("Per-LOD mesh reduction settings for generate_lods (e.g., "
+					"screen size, percent triangles)."))
+
+			// Thumbnails / render targets
+			.Number(TEXT("width"),
+				TEXT("Width in pixels for create_thumbnails / create_render_targets."))
+			.Number(TEXT("height"),
+				TEXT("Height in pixels for create_thumbnails / create_render_targets."))
+			.String(TEXT("format"),
+				TEXT("Format identifier: pixel format (e.g., 'RGBA16f') for "
+					"create_render_targets, output format ('png'/'json'/'csv') for "
+					"export/report actions."))
+
+			// Tags / metadata
+			.String(TEXT("tag"), TEXT("Name of the tag."))
+			.Array(TEXT("tags"),
+				TEXT("Asset tag list (string array) for set_assets_tags / "
+					"find_assets_by_tag. Use 'tag' (singular) for single-tag actions."))
+			.FreeformObject(TEXT("metadata"),
+				TEXT("Key-value metadata pairs to attach via set_assets_metadata."))
+			.String(TEXT("description"),
+				TEXT("Free-text description body for set_assets_metadata."))
+
+			// Dependency analysis
+			.Number(TEXT("maxDepth"),
+				TEXT("Maximum recursion depth for get_assets_dependencies / "
+					"analyze_assets_graph. Zero or unset means unlimited."))
+
+			// Source control
+			.Array(TEXT("paths"),
+				TEXT("List of paths for bulk operations like fixup_redirectors and "
+					"source_control_submit_assets."))
+			.Bool(TEXT("checkoutFiles"),
+				TEXT("When true, automatically check out files from source control "
+					"before edit/delete operations."))
+			.Bool(TEXT("showConfirmation"),
+				TEXT("When true, show modal confirmation dialogs (default false to "
+					"keep automation headless)."))
+
+			.Required({TEXT("subAction")})
 			.Build();
 	}
 };

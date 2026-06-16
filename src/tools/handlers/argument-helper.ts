@@ -329,6 +329,19 @@ export async function resolveObjectPath(
   const actorKeys = config?.actorKeys || ['actorName', 'name'];
   const fallback = config?.fallbackToName !== false;
 
+  // Subobject paths look like "/Game/.../Asset.Asset:SubName" - pass them through
+  // to the bridge unchanged. The C++ resolver in McpHandlerUtils::ResolveObjectFromPath
+  // understands this syntax; TS-side resolution would strip the colon part (via the
+  // trailing-slash trim or actor lookup) and resolve to the package object, missing
+  // the actual subobject.
+  const SUBOBJECT_PATH = /^\/[^:]+\.[^:]+:[^\s:]+$/;
+  for (const key of pathKeys) {
+    const rawCandidate = args[key];
+    if (typeof rawCandidate === 'string' && SUBOBJECT_PATH.test(rawCandidate.trim())) {
+      return rawCandidate.trim();
+    }
+  }
+
   // 1. Try direct path keys
   for (const key of pathKeys) {
     const val = args[key];

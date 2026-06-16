@@ -994,8 +994,19 @@ export async function handleTextureTools(
         return ResponseFactory.success(res, res.message ?? `Texture array '${name}' created`);
       }
 
-      default:
-        return ResponseFactory.error(`Unknown texture action: ${action}`, 'UNKNOWN_ACTION');
+      default: {
+        // Passthrough: native C++ manage_texture schema is the source of truth
+        // for valid subActions. Old hardcoded allowlist silently rejected
+        // anything not explicitly handled here.
+        const res = (await executeAutomationRequest(tools, TOOL_ACTIONS.MANAGE_TEXTURE, {
+          subAction: action,
+          ...(args as Record<string, unknown>),
+        })) as AutomationResponse;
+        if (res.success === false) {
+          return ResponseFactory.error(res.error ?? `Failed: ${action}`, res.errorCode);
+        }
+        return ResponseFactory.success(res, res.message ?? `${action} succeeded`);
+      }
     }
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));

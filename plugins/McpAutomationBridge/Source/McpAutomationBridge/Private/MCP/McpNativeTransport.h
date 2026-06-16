@@ -168,7 +168,7 @@ private:
 	TMap<FString, double> ActiveSessions;  // SessionId → LastActivityTime
 	mutable FCriticalSection SessionMutex;
 
-	static constexpr double SessionTimeoutSeconds = 3600.0;  // 1 hour
+	static constexpr double SessionTimeoutSeconds = 86400.0;  // 24 hours
 
 	// Active SSE streaming connections (RequestId → connection)
 	TMap<FString, TSharedPtr<FSSEConnection>> SSEConnections;
@@ -181,6 +181,6 @@ private:
 	mutable FCriticalSection NotificationStreamsMutex;
 
 	static constexpr int32 MaxNotificationStreamsPerSession = 4;
-	static constexpr double NotificationStreamTimeoutSeconds = 3600.0;  // 1 hour
+	static constexpr double NotificationStreamTimeoutSeconds = 86400.0;  // 24 hours
 	static constexpr double KeepaliveIntervalSeconds = 30.0;
 };

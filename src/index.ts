@@ -5,9 +5,7 @@ import { Logger } from './utils/logger.js';
 import { UnrealBridge } from './unreal-bridge.js';
 import { AutomationBridge } from './automation/index.js';
 import { createRequire } from 'node:module';
-import { responseValidator } from './utils/response-validator.js';
 import { z } from 'zod';
-import { consolidatedToolDefinitions } from './tools/consolidated-tool-definitions.js';
 import { HealthMonitor } from './services/health-monitor.js';
 import { ServerSetup } from './server-setup.js';
 import { startMetricsServer } from './services/metrics-server.js';
@@ -113,16 +111,6 @@ export function createServer() {
   });
 
 
-
-  // Initialize response validation with schemas
-  log.debug('Initializing response validation...');
-  const toolDefs = consolidatedToolDefinitions as Array<{ name: string; outputSchema?: Record<string, unknown> }>;
-  toolDefs.forEach((tool) => {
-    if (tool.outputSchema) {
-      responseValidator.registerSchema(tool.name, tool.outputSchema);
-    }
-  });
-  log.debug(`Registered ${responseValidator.getStats().totalSchemas} output schemas for validation`);
 
   log.debug('Server starting without connecting to Unreal Engine');
   healthMonitor.metrics.connectionStatus = 'disconnected';

@@ -23,7 +23,7 @@ import { handlePerformanceTools } from './handlers/performance-handlers.js';
 import { handleInputTools } from './handlers/input-handlers.js';
 import { handleGeometryTools } from './handlers/geometry-handlers.js';
 import { handleSkeletonTools } from './handlers/skeleton-handlers.js';
-import { handleMaterialAuthoringTools } from './handlers/material-authoring-handlers.js';
+import { handleMaterialTools } from './handlers/material-handlers.js';
 import { handleTextureTools } from './handlers/texture-handlers.js';
 import { handleAnimationAuthoringTools } from './handlers/animation-authoring-handlers.js';
 import { handleAudioAuthoringTools } from './handlers/audio-authoring-handlers.js';
@@ -60,14 +60,6 @@ interface DeprecationFlags {
   __animationAuthoringDeprecationLogged?: boolean;
 }
 
-const MATERIAL_GRAPH_ACTION_MAP: Record<string, string> = {
-  add_material_node: 'add_node',
-  connect_material_pins: 'connect_pins',
-  remove_material_node: 'remove_node',
-  break_material_connections: 'break_connections',
-  get_material_node_details: 'get_node_details',
-};
-
 const BEHAVIOR_TREE_ACTION_MAP: Record<string, string> = {
   add_bt_node: 'add_node',
   connect_bt_nodes: 'connect_nodes',
@@ -82,15 +74,6 @@ const NIAGARA_GRAPH_ACTION_MAP: Record<string, string> = {
   remove_niagara_node: 'remove_node',
   set_niagara_parameter: 'set_parameter'
 };
-
-function isMaterialGraphAction(action: string): boolean {
-  return (
-    Object.prototype.hasOwnProperty.call(MATERIAL_GRAPH_ACTION_MAP, action) ||
-    action.includes('material_node') ||
-    action.includes('material_pins') ||
-    action.includes('material_connections')
-  );
-}
 
 function isBehaviorTreeGraphAction(action: string): boolean {
   return (
@@ -116,9 +99,15 @@ function normalizeToolCall(
 ): NormalizedToolCall {
   let normalizedName = name;
   let action: string;
+  let normalizedArgs = args;
 
-  if (args && typeof args.action === 'string') {
+  // Primary: read subAction (the new canonical key per the redesign).
+  // manage_asset/manage_material intentionally hard-break the legacy action key.
+  if (args && typeof args.subAction === 'string' && args.subAction.length > 0) {
+    action = args.subAction;
+  } else if (args && typeof args.action === 'string' && args.action.length > 0) {
     action = args.action;
+    normalizedArgs = { ...normalizedArgs, subAction: action };
   } else if (normalizedName === 'console_command') {
     normalizedName = 'system_control';
     action = 'console_command';
@@ -130,29 +119,35 @@ function normalizeToolCall(
   if (normalizedName === 'console_command') {
     normalizedName = 'system_control';
     action = 'console_command';
+    normalizedArgs = { ...normalizedArgs, action, subAction: action };
   }
   // manage_pipeline has its own handler registered - don't normalize to system_control
   // handlePipelineTools handles: run_ubt (local), list_categories/get_status (via system_control)
   if (normalizedName === 'manage_tests') {
     normalizedName = 'system_control';
     action = 'run_tests';
+    normalizedArgs = { ...normalizedArgs, action, subAction: action };
   }
 
   return {
     name: normalizedName,
     action,
-    args
+    args: normalizedArgs
   };
 }
 
+// Module-scope so tests and any future callers can reach it.
+// Strict subAction discriminator: the legacy `action` key fallback is intentionally gone.
+export const getAction = (args: Record<string, unknown>): string => {
+  const action = args.subAction;
+  if (typeof action !== 'string' || action.length === 0) {
+    throw new Error('MISSING_SUB_ACTION');
+  }
+  return action;
+};
+
 // Registration of default handlers
 function registerDefaultHandlers() {
-  // Helper to extract action string from args
-  const getAction = (args: Record<string, unknown>): string => {
-    const action = args.action ?? args.subAction;
-    return typeof action === 'string' ? action : requireAction(args);
-  };
-
   // 1. ASSET MANAGER
   toolRegistry.register('manage_asset', async (args, tools) => {
     const action = getAction(args);
@@ -160,10 +155,6 @@ function registerDefaultHandlers() {
     if (['create_render_target', 'nanite_rebuild_mesh'].includes(action)) {
       const payload = { ...args, subAction: action };
       return cleanObject(await executeAutomationRequest(tools, 'manage_render', payload, `Automation bridge not available for ${action}`));
-    }
-    if (isMaterialGraphAction(action)) {
-      const subAction = MATERIAL_GRAPH_ACTION_MAP[action] || action;
-      return await handleGraphTools('manage_material_graph', subAction, args, tools);
     }
     if (isBehaviorTreeGraphAction(action)) {
       const subAction = BEHAVIOR_TREE_ACTION_MAP[action] || action;
@@ -380,8 +371,8 @@ function registerDefaultHandlers() {
   // 21. SKELETON MANAGER (Phase 7)
   toolRegistry.register('manage_skeleton', async (args, tools) => await handleSkeletonTools(getAction(args), args, tools));
 
-  // 22. MATERIAL AUTHORING (Phase 8)
-  toolRegistry.register('manage_material_authoring', async (args, tools) => await handleMaterialAuthoringTools(getAction(args), args, tools));
+  // 22. MATERIAL (Phase 8)
+  toolRegistry.register('manage_material', async (args, tools) => await handleMaterialTools(getAction(args), args, tools));
 
   // 23. TEXTURE MANAGEMENT (Phase 9)
   toolRegistry.register('manage_texture', async (args, tools) => await handleTextureTools(getAction(args), args, tools));

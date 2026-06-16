@@ -33,6 +33,16 @@ public:
 	virtual TSharedPtr<FJsonObject> BuildInputSchema() const = 0;
 
 	/**
+	 * Build the optional MCP tool annotations object (destructiveHint, idempotentHint,
+	 * readOnlyHint, openWorldHint, title). Return nullptr to omit.
+	 *
+	 * Clients use these hints to decide whether to auto-approve a tool call. Setting
+	 * destructiveHint=true ensures Claude Code prompts the user before executing
+	 * tools that can permanently delete or overwrite content.
+	 */
+	virtual TSharedPtr<FJsonObject> BuildAnnotations() const { return nullptr; }
+
+	/**
 	 * The Action string to pass to ProcessAutomationRequest.
 	 *
 	 * Pattern A (default): Returns the tool name. The handler checks

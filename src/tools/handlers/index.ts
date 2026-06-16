@@ -62,7 +62,7 @@ export { handleLevelTools } from './level-handlers.js';
 export { handleLevelStructureTools } from './level-structure-handlers.js';
 export { handleLightingTools } from './lighting-handlers.js';
 export { handleManageToolsTools } from './manage-tools-handlers.js';
-export { handleMaterialAuthoringTools } from './material-authoring-handlers.js';
+export { handleMaterialTools } from './material-handlers.js';
 export { handleNavigationTools } from './navigation-handlers.js';
 export { handleNetworkingTools } from './networking-handlers.js';
 export { handleNiagaraAuthoringTools } from './niagara-authoring-handlers.js';

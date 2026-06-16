@@ -346,16 +346,6 @@ bool UMcpAutomationBridgeSubsystem::HandleGetObjectProperty(
     return true;
   }
 
-  FString PropertyName;
-  if (!Payload->TryGetStringField(TEXT("propertyName"), PropertyName) ||
-      PropertyName.TrimStartAndEnd().IsEmpty()) {
-    SendAutomationError(
-        RequestingSocket, RequestId,
-        TEXT("get_object_property requires a non-empty propertyName."),
-        TEXT("INVALID_PROPERTY"));
-    return true;
-  }
-
   // --- Object Resolution (using centralized helper) ---
   FString ResolvedPath;
   UObject* RootObject = McpHandlerUtils::ResolveObjectFromPath(ObjectPath, &ResolvedPath);
@@ -367,12 +357,40 @@ bool UMcpAutomationBridgeSubsystem::HandleGetObjectProperty(
           TEXT("OBJECT_NOT_FOUND"));
       return true;
   }
-  
+
   // Use resolved path for error messages
   if (!ResolvedPath.IsEmpty())
   {
       ObjectPath = ResolvedPath;
   }
+
+  FString PropertyName;
+  const bool bHasName = Payload->TryGetStringField(TEXT("propertyName"), PropertyName) && !PropertyName.TrimStartAndEnd().IsEmpty();
+
+  bool bDetailed = false;
+  Payload->TryGetBoolField(TEXT("detailed"), bDetailed);
+
+  if (!bHasName)
+  {
+      if (!bDetailed)
+      {
+          SendAutomationError(RequestingSocket, RequestId,
+                              TEXT("propertyName required (or detailed:true for dump-all)"),
+                              TEXT("INVALID_ARGUMENT"));
+          return true;
+      }
+
+      // Dump-all branch: emit every accessible UProperty.
+      TSharedPtr<FJsonObject> Result = McpHandlerUtils::CreateResultObject();
+      Result->SetStringField(TEXT("objectPath"), RootObject->GetPathName());
+      Result->SetStringField(TEXT("className"), RootObject->GetClass()->GetName());
+      Result->SetObjectField(TEXT("properties"),
+                             McpPropertyReflection::ExportObjectToJson(RootObject, /*bIncludeTransient=*/ false));
+      SendAutomationResponse(RequestingSocket, RequestId, true, TEXT("Object properties dumped"), Result, FString());
+      return true;
+  }
+
+  /* existing single-property handling below */
 
   // Special handling for common AActor properties that are actually functions
   // or require setters

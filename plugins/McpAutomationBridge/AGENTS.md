@@ -38,3 +38,24 @@ Source/McpAutomationBridge/
 - **Modal Dialogs**: Avoid `UEditorAssetLibrary::SaveAsset()` on new assets (crashes D3D12).
 - **Hardcoded Paths**: Do not use absolute Windows paths in handlers.
 - **Blocking Thread**: WebSocket frame processing must not block game thread.
+
+## File organization
+
+One domain per file. Don't dump everything into a single mega-handler file.
+The `McpAutomationBridge_AssetWorkflowHandlers.cpp` 7000-line monolith
+mixing asset CRUD with material graph operations is the anti-pattern
+this convention exists to prevent.
+
+**File naming:** `McpAutomationBridge_<ToolName>_<Domain>.cpp` for native
+handlers; one TS handler file per tool under `src/tools/handlers/`.
+
+**Soft size guideline: 3000 lines.** When a file approaches that size with
+one more handler, split before adding.
+
+**Scope rule for refactors:** apply this convention to files you touch in
+a given change, not to the whole codebase at once.
+
+The TS-side `consolidated-tool-definitions.ts` is auto-generated from native
+`McpTool_*.cpp` schemas via `npm run mcp:rebuild` — exempt from manual-split
+rules, never hand-edited. The hand-edited dispatch file is
+`consolidated-tool-handlers.ts` (different file).

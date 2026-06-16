@@ -264,23 +264,42 @@ export async function handleInspectTools(action: string, args: HandlerArgs, tool
 
       return cleanObject(res);
     }
+    case 'dump_subobject': {
+      const SUBOBJECT_PATH = /^\/[^:]+\.[^:]+:[^\s:]+$/;
+      const path = (args as any).objectPath as string | undefined;
+      if (!path || !SUBOBJECT_PATH.test(path.trim())) {
+        throw new Error('inspect:dump_subobject requires a subobject path "/Game/X.Asset:SubName"');
+      }
+      const res = await executeAutomationRequest(
+        tools,
+        'inspect',
+        { action: 'inspect_object', objectPath: path.trim(), detailed: true }
+      ) as InspectResponse;
+      return cleanObject(res);
+    }
     case 'get_property': {
       const objectPath = await resolveObjectPath(args, tools);
-      const params = normalizeArgs(args, [{ key: 'propertyName', aliases: ['propertyPath'], required: true }]);
-      const propertyName = extractString(params, 'propertyName');
 
       if (!objectPath) {
         throw new Error('Invalid objectPath: must be a non-empty string');
       }
 
-      const res = await executeAutomationRequest(tools, 'inspect', {
-        action: 'get_property',
-        objectPath,
-        propertyName
-      }) as InspectResponse;
+      const propertyName = extractString(args, 'propertyName') ?? extractString(args, 'propertyPath');
+      const detailed = Boolean((args as any).detailed);
 
-      // Smart Lookup: If property not found on the Actor, try to find it on components
-      if (!res.success && (res.error === 'PROPERTY_NOT_FOUND' || String(res.error).includes('not found'))) {
+      if (!propertyName && !detailed) {
+        throw new Error('inspect:get_property requires propertyName or detailed:true (dump-all mode)');
+      }
+
+      const payload: Record<string, unknown> = { action: 'get_property', objectPath };
+      if (propertyName) payload.propertyName = propertyName;
+      if (detailed) payload.detailed = true;
+
+      const res = await executeAutomationRequest(tools, 'inspect', payload) as InspectResponse;
+
+      // Smart Lookup: If property not found on the Actor, try to find it on components.
+      // Only runs when propertyName was provided; dump-all mode skips component fallbacks.
+      if (propertyName && !res.success && (res.error === 'PROPERTY_NOT_FOUND' || String(res.error).includes('not found'))) {
         const actorName = await resolveObjectPath(args, tools, { pathKeys: [], actorKeys: ['actorName', 'name', 'objectPath'] });
         if (actorName) {
           const triedPaths: string[] = [];

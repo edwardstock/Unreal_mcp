@@ -1182,9 +1182,10 @@ void FMcpNativeTransport::HandleToolsCall(
 		}
 	}
 
-	// Normalize: some handlers read "subAction" instead of "action".
-	// Ensure both fields exist so handlers find the value regardless of field name.
-	if (!Arguments->HasField(TEXT("subAction")) && Arguments->HasField(TEXT("action")))
+	// Normalize: some non-redesigned handlers read "subAction" instead of "action".
+	// manage_asset and manage_material intentionally hard-break the legacy action key.
+	if (ToolName != TEXT("manage_asset") && ToolName != TEXT("manage_material") &&
+		!Arguments->HasField(TEXT("subAction")) && Arguments->HasField(TEXT("action")))
 	{
 		FString ActionVal;
 		Arguments->TryGetStringField(TEXT("action"), ActionVal);
@@ -1510,8 +1511,13 @@ bool FMcpNativeTransport::ValidateSession(
 	double* LastActivity = ActiveSessions.Find(SessionId);
 	if (!LastActivity)
 	{
-		OutError = TEXT("Invalid or expired session ID");
-		return false;
+		// Local editor workflow recovery: Codex can keep a session id after the editor
+		// process restarts, while the bridge loses its in-memory session table.
+		ActiveSessions.Add(SessionId, FPlatformTime::Seconds());
+		UE_LOG(LogMcpNativeTransport, Warning,
+			TEXT("Recovered missing MCP session: %s (active sessions: %d)"),
+			*SessionId, ActiveSessions.Num());
+		return true;
 	}
 
 	// Touch session activity

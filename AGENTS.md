@@ -11,12 +11,16 @@ MCP server for Unreal Engine 5 (5.0-5.7). Dual-process: TypeScript MCP server + 
 ./
 ├── src/                    # TS Server (NodeNext ESM)
 │   ├── tools/              # Tool definitions + handlers
-│   │   ├── consolidated-tool-definitions.ts  # Action enums + schemas (212KB)
+│   │   ├── consolidated-tool-definitions.ts  # AUTO-GENERATED from generated/tool-manifest.json — DO NOT EDIT
 │   │   ├── consolidated-tool-handlers.ts     # Tool routing
 │   │   └── handlers/       # Domain handlers (40 files)
 │   ├── automation/         # Bridge Client & Handshake (9 files)
 │   ├── utils/              # Normalization & Security
-├── plugins/               # UE Plugin (C++)
+├── generated/              # Committed codegen artifacts
+│   └── tool-manifest.json  # Native-side tool schemas (source of truth)
+├── config/
+│   └── default-enabled-tools.json  # TS-side default-enabled tool set
+├── plugins/                # UE Plugin (C++)
 │       ├── Source/         # Native Handlers (56 files) & Subsystem
 │       └── Config/         # Plugin Settings
 ├── tests/                  # Integration + Unit Tests
@@ -28,7 +32,7 @@ MCP server for Unreal Engine 5 (5.0-5.7). Dual-process: TypeScript MCP server + 
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
-| Add MCP Tool | `src/tools/consolidated-tool-definitions.ts` | Add action enum + schema |
+| Add MCP Tool | `plugins/.../McpTool_*.cpp` | Native is source of truth; re-run `npm run mcp:rebuild` |
 | Route Tool | `src/tools/consolidated-tool-handlers.ts` | Register in `registerDefaultHandlers()` |
 | Implement Handler | `src/tools/handlers/*-handlers.ts` | Call `executeAutomationRequest()` |
 | Add UE Action | `plugins/.../Private/*Handlers.cpp` | Register in `Subsystem::InitializeHandlers()` |
@@ -36,9 +40,13 @@ MCP server for Unreal Engine 5 (5.0-5.7). Dual-process: TypeScript MCP server + 
 | Path Handling | `src/utils/normalize.ts` | Force `/Game/` prefix |
 | CI Workflows | `.github/workflows/` | All actions use commit SHAs (secure) |
 | Version Sync | `.github/workflows/bump-version.yml` | Updates 4 files atomically |
+| Change default enabled tools | `config/default-enabled-tools.json` | Filters `tools/list` at startup |
+| Regenerate tool schemas | `npm run mcp:rebuild` | Runs `DumpMcpManifest`, regenerates TypeScript tool definitions, verifies them, builds the MCP server, and audits tool schema quality |
+| Audit tool-defs quality | `npm run lint:tool-defs` | Lists missing descriptions and similar issues |
 
 ## CONVENTIONS
 ### Dual-Process Flow
+0. **Schema Definition**: C++ `McpTool_*.cpp` declares each tool via `FMcpToolDefinition` + `FMcpSchemaBuilder` → `FMcpToolRegistry` → `DumpMcpManifest` commandlet → `npm run mcp:rebuild`. Native is the single source of truth for `name/description/inputSchema/category/annotations`.
 1. **TS (MCP)**: Validates JSON Schema → Executes Tool Handler.
 2. **Bridge (WS)**: TS sends JSON payload → C++ Subsystem dispatches to Game Thread.
 3. **Execution**: C++ handler performs native UE API calls → Returns JSON result.
@@ -60,6 +68,7 @@ MCP server for Unreal Engine 5 (5.0-5.7). Dual-process: TypeScript MCP server + 
 - **Incomplete Tools**: No "Not Implemented" stubs. 100% TS + C++ coverage required.
 - **Bypass Registry**: Always use `toolRegistry.register()`, never call handlers directly.
 - **Raw WS Calls**: Use `executeAutomationRequest()` instead of WebSocket directly.
+- **Hand-edit Tool Schemas**: Never modify `consolidated-tool-definitions.ts` directly — it is regenerated from `generated/tool-manifest.json`. Edit the corresponding `McpTool_*.cpp` and re-run codegen.
 
 ## UNIQUE STYLES
 - **Consolidated Tools**: 36 tools with action-based dispatch (single schema file).
@@ -69,13 +78,37 @@ MCP server for Unreal Engine 5 (5.0-5.7). Dual-process: TypeScript MCP server + 
 
 ## COMMANDS
 ```bash
-npm run build:core   # Build TypeScript
-npm run test:unit    # Vitest unit tests
-npm test             # UE Integration (Requires Editor)
-npm run test:smoke   # Mock mode smoke test
+npm run build:core      # Build TypeScript
+npm run test:unit       # Vitest unit tests
+npm test                # UE Integration (Requires Editor)
+npm run test:smoke      # Mock mode smoke test
+npm run mcp:rebuild     # Dump native manifest, regenerate tool definitions, verify, build, and lint schemas
+npm run gen:tool-defs   # Regenerate consolidated-tool-definitions.ts from the current manifest only
+npm run lint:tool-defs  # Audit tool manifest for missing descriptions
 ```
 
 ## NOTES
 - **Engine Reference**: Check engine code at `X:\Unreal_Engine\UE_5.7\Engine`, `UE_5.6`, `UE_5.5`, `UE_5.4`, `UE_5.3`, `UE_5.2`, `UE_5.1`, `UE_5.0`.
 - **Version Files**: Version in `package.json`, `server.json`, `src/index.ts`.
 - **Test Patterns**: Integration tests use pipe-separated expectations (`success|error|timeout`).
+
+## File organization
+
+One domain per file. Don't dump everything into a single mega-handler file.
+The `McpAutomationBridge_AssetWorkflowHandlers.cpp` 7000-line monolith
+mixing asset CRUD with material graph operations is the anti-pattern
+this convention exists to prevent.
+
+**File naming:** `McpAutomationBridge_<ToolName>_<Domain>.cpp` for native
+handlers; one TS handler file per tool under `src/tools/handlers/`.
+
+**Soft size guideline: 3000 lines.** When a file approaches that size with
+one more handler, split before adding.
+
+**Scope rule for refactors:** apply this convention to files you touch in
+a given change, not to the whole codebase at once.
+
+The TS-side `consolidated-tool-definitions.ts` is auto-generated from native
+`McpTool_*.cpp` schemas via `npm run mcp:rebuild` — exempt from manual-split
+rules, never hand-edited. The hand-edited dispatch file is
+`consolidated-tool-handlers.ts` (different file).

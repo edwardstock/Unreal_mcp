@@ -36,7 +36,7 @@ export const TOOL_ACTIONS = {
   
   // ==================== AUTHORING TOOLS ====================
   MANAGE_BLUEPRINT: 'manage_blueprint',
-  MANAGE_MATERIAL_AUTHORING: 'manage_material_authoring',
+  MANAGE_MATERIAL: 'manage_material',
   MANAGE_TEXTURE: 'manage_texture',
   MANAGE_GEOMETRY: 'manage_geometry',
   MANAGE_SKELETON: 'manage_skeleton',

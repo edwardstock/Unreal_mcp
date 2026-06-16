@@ -3369,6 +3369,21 @@ static inline bool VerifyAssetExists(TSharedPtr<FJsonObject> Response, const FSt
 }
 
 /**
+ * Verify a content-browser directory exists at the given path and add to response.
+ *
+ * UEditorAssetLibrary::DoesAssetExist() returns false for folders, so HandleCreateFolder must
+ * use this helper to populate existsAfter correctly (see openspec SMOKE_BUGS.md bug #2).
+ */
+static inline bool VerifyDirectoryExists(TSharedPtr<FJsonObject> Response, const FString& Path) {
+  bool bExists = UEditorAssetLibrary::DoesDirectoryExist(Path);
+  if (Response) {
+    Response->SetStringField(TEXT("verifiedPath"), Path);
+    Response->SetBoolField(TEXT("existsAfter"), bExists);
+  }
+  return bExists;
+}
+
+/**
  * Check if a UE asset directory path ACTUALLY exists on disk.
  * 
  * UEditorAssetLibrary::DoesDirectoryExist() uses the AssetRegistry cache which may
@@ -3441,11 +3456,1240 @@ static inline bool DoesParentDirectoryExist(const FString& AssetPath) {
   if (ParentPath.IsEmpty()) {
     return false;
   }
-  
+
   // Check if parent exists on disk
   return DoesAssetDirectoryExistOnDisk(ParentPath);
 #else
   return false;
+#endif
+}
+
+// ============================================================================
+// Material Graph Owner - unified UMaterial / UMaterialFunction support
+// ============================================================================
+// UMaterial and UMaterialFunction (including MaterialLayer / MaterialLayerBlend
+// subclasses) expose identical FMaterialExpressionCollection APIs in UE 5.1+.
+// UMaterialFunctionInstance has no graph of its own - it delegates to its Base.
+// These helpers resolve any asset path to a common struct so callers can stay
+// type-agnostic for read operations; write operations check bReadOnly first.
+
+#if WITH_EDITOR
+#include "Engine/Texture.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialFunction.h"
+#include "Materials/MaterialFunctionInterface.h"
+#include "Materials/MaterialFunctionInstance.h"
+#include "Materials/MaterialExpression.h"
+#include "Materials/MaterialInstance.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "Materials/MaterialExpressionParameter.h"
+#include "Materials/MaterialInterface.h"
+#include "StaticParameterSet.h"
+#if __has_include("ScopedTransaction.h")
+#include "ScopedTransaction.h"
+#elif __has_include("Misc/ScopedTransaction.h")
+#include "Misc/ScopedTransaction.h"
+#endif
+#endif
+
+enum class EMcpMaterialGraphOwnerKind : uint8
+{
+    Material,
+    MaterialFunction,       // includes MaterialLayer / MaterialLayerBlend subclasses
+    MaterialFunctionInstance,
+};
+
+struct FMcpMaterialGraphOwner
+{
+    // the raw loaded asset (UMaterial, UMaterialFunction, or UMaterialFunctionInstance)
+    UObject* Asset = nullptr;
+    // the object that actually owns the expression collection; for Instance this is the Base function
+    UObject* GraphSource = nullptr;
+    EMcpMaterialGraphOwnerKind Kind = EMcpMaterialGraphOwnerKind::Material;
+    // true for UMaterialFunctionInstance - edit ops must be rejected
+    bool bReadOnly = false;
+};
+
+enum class EMcpMaterialFamilyAssetKind : uint8
+{
+    Material,
+    MaterialFunction,
+    MaterialInstance,
+    MaterialFunctionInstance,
+};
+
+struct FMcpMaterialFamilyAsset
+{
+    UObject* Asset = nullptr;
+    UObject* GraphOwner = nullptr;
+    UObject* OverrideOwner = nullptr;
+    EMcpMaterialFamilyAssetKind Kind = EMcpMaterialFamilyAssetKind::Material;
+    bool bHasEditableGraph = false;
+    bool bHasParameterOverrides = false;
+};
+
+static inline FString McpMaterialFamilyAssetKindToString(EMcpMaterialFamilyAssetKind Kind)
+{
+    switch (Kind)
+    {
+    case EMcpMaterialFamilyAssetKind::Material:
+        return TEXT("Material");
+    case EMcpMaterialFamilyAssetKind::MaterialFunction:
+        return TEXT("MaterialFunction");
+    case EMcpMaterialFamilyAssetKind::MaterialInstance:
+        return TEXT("MaterialInstance");
+    case EMcpMaterialFamilyAssetKind::MaterialFunctionInstance:
+        return TEXT("MaterialFunctionInstance");
+    default:
+        return TEXT("Unknown");
+    }
+}
+
+static inline bool McpResolveMaterialFamilyAsset(
+    const FString& AssetPath,
+    FMcpMaterialFamilyAsset& Out,
+    FString& OutError)
+{
+#if WITH_EDITOR
+    Out = FMcpMaterialFamilyAsset();
+
+    if (UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath))
+    {
+        Out.Asset = Mat;
+        Out.GraphOwner = Mat;
+        Out.Kind = EMcpMaterialFamilyAssetKind::Material;
+        Out.bHasEditableGraph = true;
+        return true;
+    }
+
+    if (UMaterialFunction* Func = LoadObject<UMaterialFunction>(nullptr, *AssetPath))
+    {
+        Out.Asset = Func;
+        Out.GraphOwner = Func;
+        Out.Kind = EMcpMaterialFamilyAssetKind::MaterialFunction;
+        Out.bHasEditableGraph = true;
+        return true;
+    }
+
+    if (UMaterialInstanceConstant* MatInst = LoadObject<UMaterialInstanceConstant>(nullptr, *AssetPath))
+    {
+        Out.Asset = MatInst;
+        Out.OverrideOwner = MatInst;
+        Out.Kind = EMcpMaterialFamilyAssetKind::MaterialInstance;
+        Out.bHasParameterOverrides = true;
+        return true;
+    }
+
+    if (UMaterialFunctionInstance* FuncInst = LoadObject<UMaterialFunctionInstance>(nullptr, *AssetPath))
+    {
+        Out.Asset = FuncInst;
+        Out.GraphOwner = FuncInst->GetBaseFunction();
+        Out.OverrideOwner = FuncInst;
+        Out.Kind = EMcpMaterialFamilyAssetKind::MaterialFunctionInstance;
+        Out.bHasParameterOverrides = true;
+        return true;
+    }
+
+    if (UObject* Generic = LoadObject<UObject>(nullptr, *AssetPath))
+    {
+        OutError = FString::Printf(
+            TEXT("Asset '%s' (class: %s) is not a supported material-family asset"),
+            *AssetPath,
+            *Generic->GetClass()->GetName());
+        return false;
+    }
+
+    OutError = FString::Printf(TEXT("Asset not found: %s"), *AssetPath);
+    return false;
+#else
+    OutError = TEXT("Material-family asset resolution requires an editor build");
+    return false;
+#endif
+}
+
+// Resolves assetPath to FMcpMaterialGraphOwner.
+// Returns false and fills OutError on failure.
+static inline bool McpResolveMaterialGraphOwner(
+    const FString& AssetPath,
+    FMcpMaterialGraphOwner& Out,
+    FString& OutError)
+{
+#if WITH_EDITOR
+    // try UMaterial first (exact class, no subclass confusion)
+    if (UMaterial* Mat = LoadObject<UMaterial>(nullptr, *AssetPath))
+    {
+        Out.Asset       = Mat;
+        Out.GraphSource = Mat;
+        Out.Kind        = EMcpMaterialGraphOwnerKind::Material;
+        Out.bReadOnly   = false;
+        return true;
+    }
+
+    // try UMaterialFunction (catches Layer / LayerBlend via polymorphism)
+    if (UMaterialFunction* Func = LoadObject<UMaterialFunction>(nullptr, *AssetPath))
+    {
+        Out.Asset       = Func;
+        Out.GraphSource = Func;
+        Out.Kind        = EMcpMaterialGraphOwnerKind::MaterialFunction;
+        Out.bReadOnly   = false;
+        return true;
+    }
+
+    // try UMaterialFunctionInstance (read-only proxy; graph lives in Base)
+    if (UMaterialFunctionInstance* Inst = LoadObject<UMaterialFunctionInstance>(nullptr, *AssetPath))
+    {
+        UMaterialFunction* Base = Inst->GetBaseFunction();
+        Out.Asset       = Inst;
+        Out.GraphSource = Base; // may be nullptr if parent not loaded
+        Out.Kind        = EMcpMaterialGraphOwnerKind::MaterialFunctionInstance;
+        Out.bReadOnly   = true;
+        if (!Base)
+        {
+            OutError = FString::Printf(
+                TEXT("MaterialFunctionInstance '%s' has no resolvable Base function"),
+                *AssetPath);
+            return false;
+        }
+        return true;
+    }
+
+    // asset exists but is an unsupported type
+    if (UObject* Generic = LoadObject<UObject>(nullptr, *AssetPath))
+    {
+        OutError = FString::Printf(
+            TEXT("Asset '%s' (class: %s) is not a Material, MaterialFunction, or MaterialFunctionInstance"),
+            *AssetPath, *Generic->GetClass()->GetName());
+        return false;
+    }
+
+    OutError = FString::Printf(TEXT("Asset not found: %s"), *AssetPath);
+    return false;
+#else
+    OutError = TEXT("Material graph resolution requires an editor build");
+    return false;
+#endif
+}
+
+// Returns the expressions array from the GraphSource (const).
+// GraphSource must be UMaterial or UMaterialFunction (not nullptr).
+static inline const TArray<TObjectPtr<UMaterialExpression>>* McpGetGraphExpressions(
+    const FMcpMaterialGraphOwner& Owner)
+{
+#if WITH_EDITOR && ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+    {
+        UMaterial* Mat = CastChecked<UMaterial>(Owner.GraphSource);
+        if (Mat->GetEditorOnlyData())
+            return &Mat->GetEditorOnlyData()->ExpressionCollection.Expressions;
+        return nullptr;
+    }
+    else if (Owner.GraphSource)
+    {
+        // UMaterialFunction (includes Layer/LayerBlend subclasses)
+        UMaterialFunction* Func = Cast<UMaterialFunction>(Owner.GraphSource);
+        if (Func && Func->GetEditorOnlyData())
+            return &Func->GetEditorOnlyData()->ExpressionCollection.Expressions;
+    }
+#elif WITH_EDITOR
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+    {
+        UMaterial* Mat = CastChecked<UMaterial>(Owner.GraphSource);
+        return reinterpret_cast<const TArray<TObjectPtr<UMaterialExpression>>*>(&Mat->Expressions);
+    }
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunction && Owner.GraphSource)
+    {
+        UMaterialFunction* Func = CastChecked<UMaterialFunction>(Owner.GraphSource);
+        return reinterpret_cast<const TArray<TObjectPtr<UMaterialExpression>>*>(&Func->FunctionExpressions);
+    }
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunctionInstance && Owner.GraphSource)
+    {
+        UMaterialFunction* Func = CastChecked<UMaterialFunction>(Owner.GraphSource);
+        return reinterpret_cast<const TArray<TObjectPtr<UMaterialExpression>>*>(&Func->FunctionExpressions);
+    }
+#endif
+    return nullptr;
+}
+
+// Returns the expressions array from the GraphSource (mutable).
+static inline TArray<TObjectPtr<UMaterialExpression>>* McpGetGraphExpressionsMutable(
+    const FMcpMaterialGraphOwner& Owner)
+{
+    return const_cast<TArray<TObjectPtr<UMaterialExpression>>*>(
+        McpGetGraphExpressions(Owner));
+}
+
+static inline void McpModifyMaterialGraphOwnerForTransaction(const FMcpMaterialGraphOwner& Owner)
+{
+#if WITH_EDITOR && ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+    if (Owner.Asset)
+    {
+        Owner.Asset->Modify();
+    }
+    if (Owner.GraphSource && Owner.GraphSource != Owner.Asset)
+    {
+        Owner.GraphSource->Modify();
+    }
+
+    if (UMaterial* Mat = Cast<UMaterial>(Owner.GraphSource))
+    {
+        if (Mat->GetEditorOnlyData())
+        {
+            Mat->GetEditorOnlyData()->Modify();
+        }
+    }
+    else if (UMaterialFunction* Func = Cast<UMaterialFunction>(Owner.GraphSource))
+    {
+        if (Func->GetEditorOnlyData())
+        {
+            Func->GetEditorOnlyData()->Modify();
+        }
+    }
+#else
+    if (Owner.Asset)
+    {
+        Owner.Asset->Modify();
+    }
+    if (Owner.GraphSource && Owner.GraphSource != Owner.Asset)
+    {
+        Owner.GraphSource->Modify();
+    }
+#endif
+}
+
+// N6: infer sampler type from texture compression settings when samplerType not provided
+static inline EMaterialSamplerType McpInferSamplerTypeFromTexture(const UTexture* Texture)
+{
+    if (!Texture) return SAMPLERTYPE_Color;
+    switch (Texture->CompressionSettings)
+    {
+    case TC_Normalmap:
+        return SAMPLERTYPE_Normal;
+    case TC_Grayscale:
+    case TC_Alpha:
+    case TC_DistanceFieldFont:
+        return Texture->SRGB ? SAMPLERTYPE_Grayscale : SAMPLERTYPE_LinearGrayscale;
+    case TC_Masks:
+        return SAMPLERTYPE_Masks;
+    default:
+        return SAMPLERTYPE_Color;
+    }
+}
+
+// Returns the EMaterialSamplerType for the given string (canonical names without SAMPLERTYPE_ prefix).
+// If OutRecognized is non-null, sets it to true on a known value, false on unknown/empty.
+// On unknown, returns SAMPLERTYPE_Color as a benign default; callers that care should check
+// the OutRecognized flag and handle the unknown case explicitly (e.g., raise UNKNOWN_SAMPLER_TYPE)
+static inline EMaterialSamplerType McpParseSamplerTypeString(
+    const FString& SamplerTypeStr, bool* OutRecognized = nullptr)
+{
+    auto Mark = [OutRecognized](bool b) { if (OutRecognized) *OutRecognized = b; };
+
+    if (SamplerTypeStr == TEXT("Color"))                  { Mark(true); return SAMPLERTYPE_Color; }
+    if (SamplerTypeStr == TEXT("LinearColor"))            { Mark(true); return SAMPLERTYPE_LinearColor; }
+    if (SamplerTypeStr == TEXT("Normal"))                 { Mark(true); return SAMPLERTYPE_Normal; }
+    if (SamplerTypeStr == TEXT("Masks"))                  { Mark(true); return SAMPLERTYPE_Masks; }
+    if (SamplerTypeStr == TEXT("Alpha"))                  { Mark(true); return SAMPLERTYPE_Alpha; }
+    if (SamplerTypeStr == TEXT("Grayscale"))              { Mark(true); return SAMPLERTYPE_Grayscale; }
+    if (SamplerTypeStr == TEXT("LinearGrayscale"))        { Mark(true); return SAMPLERTYPE_LinearGrayscale; }
+    if (SamplerTypeStr == TEXT("DistanceFieldFont"))      { Mark(true); return SAMPLERTYPE_DistanceFieldFont; }
+    if (SamplerTypeStr == TEXT("External"))               { Mark(true); return SAMPLERTYPE_External; }
+    if (SamplerTypeStr == TEXT("Data"))                   { Mark(true); return SAMPLERTYPE_Data; }
+    if (SamplerTypeStr == TEXT("VirtualColor"))           { Mark(true); return SAMPLERTYPE_VirtualColor; }
+    if (SamplerTypeStr == TEXT("VirtualLinearColor"))     { Mark(true); return SAMPLERTYPE_VirtualLinearColor; }
+    if (SamplerTypeStr == TEXT("VirtualGrayscale"))       { Mark(true); return SAMPLERTYPE_VirtualGrayscale; }
+    if (SamplerTypeStr == TEXT("VirtualLinearGrayscale")) { Mark(true); return SAMPLERTYPE_VirtualLinearGrayscale; }
+    if (SamplerTypeStr == TEXT("VirtualNormal"))          { Mark(true); return SAMPLERTYPE_VirtualNormal; }
+    if (SamplerTypeStr == TEXT("VirtualMasks"))           { Mark(true); return SAMPLERTYPE_VirtualMasks; }
+    if (SamplerTypeStr == TEXT("VirtualAlpha"))           { Mark(true); return SAMPLERTYPE_VirtualAlpha; }
+
+    Mark(false);
+    return SAMPLERTYPE_Color;
+}
+
+// Structured warning emitted by McpValidateSamplerTextureCompatibility.
+// Code is one of: SAMPLER_TEXTURE_MISMATCH, SAMPLER_VT_MISMATCH.
+struct FMcpSamplerWarning
+{
+    FString Code;                       // SAMPLER_TEXTURE_MISMATCH or SAMPLER_VT_MISMATCH
+    FString Message;                    // human-readable explanation with suggestion
+    FString Expected;                   // canonical samplerType string for the texture's flags
+    FString Got;                        // string form of the requested samplerType
+    FString CompressionSettingsName;    // e.g., "TC_Default"
+    bool    bSRGB = false;
+    bool    bVirtualTexture = false;
+};
+
+// Returns true if RequestedType is compatible with Texture's compression/SRGB/VT flags.
+// On mismatch returns false and fills OutWarning. A null Texture is treated as legal
+// (unbound sampler) and returns true with no warning.
+// VT mismatches take priority over compression mismatches.
+static inline bool McpValidateSamplerTextureCompatibility(
+    EMaterialSamplerType RequestedType,
+    const UTexture* Texture,
+    FMcpSamplerWarning& OutWarning)
+{
+    if (!Texture) return true;  // unbound sampler is legal
+
+    // canonical name for an EMaterialSamplerType
+    auto SamplerName = [](EMaterialSamplerType T) -> FString
+    {
+        switch (T)
+        {
+            case SAMPLERTYPE_Color:                  return TEXT("Color");
+            case SAMPLERTYPE_LinearColor:            return TEXT("LinearColor");
+            case SAMPLERTYPE_Normal:                 return TEXT("Normal");
+            case SAMPLERTYPE_Masks:                  return TEXT("Masks");
+            case SAMPLERTYPE_Alpha:                  return TEXT("Alpha");
+            case SAMPLERTYPE_Grayscale:              return TEXT("Grayscale");
+            case SAMPLERTYPE_LinearGrayscale:        return TEXT("LinearGrayscale");
+            case SAMPLERTYPE_DistanceFieldFont:      return TEXT("DistanceFieldFont");
+            case SAMPLERTYPE_External:               return TEXT("External");
+            case SAMPLERTYPE_Data:                   return TEXT("Data");
+            case SAMPLERTYPE_VirtualColor:           return TEXT("VirtualColor");
+            case SAMPLERTYPE_VirtualLinearColor:     return TEXT("VirtualLinearColor");
+            case SAMPLERTYPE_VirtualGrayscale:       return TEXT("VirtualGrayscale");
+            case SAMPLERTYPE_VirtualLinearGrayscale: return TEXT("VirtualLinearGrayscale");
+            case SAMPLERTYPE_VirtualNormal:          return TEXT("VirtualNormal");
+            case SAMPLERTYPE_VirtualMasks:           return TEXT("VirtualMasks");
+            case SAMPLERTYPE_VirtualAlpha:           return TEXT("VirtualAlpha");
+            default:                                 return TEXT("Unknown");
+        }
+    };
+
+    // canonical name for a TextureCompressionSettings value
+    auto CompName = [](TextureCompressionSettings TC) -> FString
+    {
+        switch (TC)
+        {
+            case TC_Default:           return TEXT("TC_Default");
+            case TC_Normalmap:         return TEXT("TC_Normalmap");
+            case TC_Masks:             return TEXT("TC_Masks");
+            case TC_Grayscale:         return TEXT("TC_Grayscale");
+            case TC_Alpha:             return TEXT("TC_Alpha");
+            case TC_DistanceFieldFont: return TEXT("TC_DistanceFieldFont");
+            case TC_HDR:               return TEXT("TC_HDR");
+            case TC_HDR_Compressed:    return TEXT("TC_HDR_Compressed");
+            case TC_BC7:               return TEXT("TC_BC7");
+            default:                   return FString::Printf(TEXT("TC_%d"), static_cast<int32>(TC));
+        }
+    };
+
+    const bool bVT = Texture->VirtualTextureStreaming != 0;
+    const bool bIsVirtualSampler = (
+        RequestedType == SAMPLERTYPE_VirtualColor ||
+        RequestedType == SAMPLERTYPE_VirtualLinearColor ||
+        RequestedType == SAMPLERTYPE_VirtualGrayscale ||
+        RequestedType == SAMPLERTYPE_VirtualLinearGrayscale ||
+        RequestedType == SAMPLERTYPE_VirtualNormal ||
+        RequestedType == SAMPLERTYPE_VirtualMasks ||
+        RequestedType == SAMPLERTYPE_VirtualAlpha);
+
+    OutWarning.CompressionSettingsName = CompName(Texture->CompressionSettings);
+    OutWarning.bSRGB = (Texture->SRGB != 0);
+    OutWarning.bVirtualTexture = bVT;
+    OutWarning.Got = SamplerName(RequestedType);
+
+    // VT mismatch takes priority — checked first
+    if (bVT != bIsVirtualSampler)
+    {
+        OutWarning.Code = TEXT("SAMPLER_VT_MISMATCH");
+        OutWarning.Expected = bVT
+            ? TEXT("a Virtual* samplerType (e.g., VirtualColor)")
+            : TEXT("a non-Virtual samplerType (e.g., Color)");
+        OutWarning.Message = FString::Printf(
+            TEXT("samplerType '%s' is %s, but texture has bVirtualTextureStreaming=%s. Use the matching kind."),
+            *OutWarning.Got,
+            bIsVirtualSampler ? TEXT("a Virtual variant") : TEXT("not a Virtual variant"),
+            bVT ? TEXT("true") : TEXT("false"));
+        return false;
+    }
+
+    // Expected canonical samplerType from compression x SRGB x VT
+    EMaterialSamplerType Expected = SAMPLERTYPE_Color;
+    switch (Texture->CompressionSettings)
+    {
+        case TC_Normalmap:
+            Expected = bVT ? SAMPLERTYPE_VirtualNormal : SAMPLERTYPE_Normal;
+            break;
+        case TC_Masks:
+            Expected = bVT ? SAMPLERTYPE_VirtualMasks : SAMPLERTYPE_Masks;
+            break;
+        case TC_Alpha:
+            Expected = bVT ? SAMPLERTYPE_VirtualAlpha : SAMPLERTYPE_Alpha;
+            break;
+        case TC_DistanceFieldFont:
+            // no VT analog — fall back to non-VT
+            Expected = SAMPLERTYPE_DistanceFieldFont;
+            break;
+        case TC_Grayscale:
+            Expected = OutWarning.bSRGB
+                ? (bVT ? SAMPLERTYPE_VirtualGrayscale       : SAMPLERTYPE_Grayscale)
+                : (bVT ? SAMPLERTYPE_VirtualLinearGrayscale : SAMPLERTYPE_LinearGrayscale);
+            break;
+        case TC_HDR:
+        case TC_HDR_Compressed:
+            Expected = bVT ? SAMPLERTYPE_VirtualLinearColor : SAMPLERTYPE_LinearColor;
+            break;
+        case TC_Default:
+        case TC_BC7:
+        default:
+            Expected = OutWarning.bSRGB
+                ? (bVT ? SAMPLERTYPE_VirtualColor       : SAMPLERTYPE_Color)
+                : (bVT ? SAMPLERTYPE_VirtualLinearColor : SAMPLERTYPE_LinearColor);
+            break;
+    }
+
+    if (Expected == RequestedType)
+    {
+        return true;
+    }
+
+    OutWarning.Code = TEXT("SAMPLER_TEXTURE_MISMATCH");
+    OutWarning.Expected = SamplerName(Expected);
+    OutWarning.Message = FString::Printf(
+        TEXT("samplerType '%s' does not match texture compression. Texture has CompressionSettings=%s, SRGB=%s, which suggests samplerType '%s'. Material may render with incorrect color space."),
+        *OutWarning.Got,
+        *OutWarning.CompressionSettingsName,
+        OutWarning.bSRGB ? TEXT("true") : TEXT("false"),
+        *OutWarning.Expected);
+    return false;
+}
+
+// N10: find min/max X of all expressions to support smart default node placement
+static inline void McpFindExpressionsBoundingX(const FMcpMaterialGraphOwner& Owner, float& OutMinX, float& OutMaxX)
+{
+    OutMinX = 0.f;
+    OutMaxX = 0.f;
+    bool bFirst = true;
+    const TArray<TObjectPtr<UMaterialExpression>>* Expressions = McpGetGraphExpressions(Owner);
+    if (!Expressions) return;
+    for (UMaterialExpression* Expr : *Expressions)
+    {
+        if (!Expr) continue;
+        const float EX = static_cast<float>(Expr->MaterialExpressionEditorX);
+        if (bFirst) { OutMinX = OutMaxX = EX; bFirst = false; }
+        else { OutMinX = FMath::Min(OutMinX, EX); OutMaxX = FMath::Max(OutMaxX, EX); }
+    }
+}
+
+// Finds an expression inside Owner.GraphSource by GUID string, object name, path,
+// parameter name, or numeric string index. Returns nullptr if not found.
+static inline UMaterialExpression* McpFindGraphExpression(
+    const FMcpMaterialGraphOwner& Owner,
+    const FString& IdOrName,
+    int32 NumericIndex = -1)
+{
+#if WITH_EDITOR
+    const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+    if (!Exprs) return nullptr;
+
+    // numeric index
+    if (NumericIndex >= 0)
+    {
+        if (NumericIndex < Exprs->Num())
+            return (*Exprs)[NumericIndex];
+        return nullptr;
+    }
+
+    if (IdOrName.IsEmpty()) return nullptr;
+
+    // numeric string index
+    if (IdOrName.IsNumeric())
+    {
+        int32 Idx = FCString::Atoi(*IdOrName);
+        if (Idx >= 0 && Idx < Exprs->Num())
+            return (*Exprs)[Idx];
+        return nullptr;
+    }
+
+    // GUID
+    FGuid ParsedGuid;
+    if (FGuid::Parse(IdOrName, ParsedGuid))
+    {
+        for (UMaterialExpression* Expr : *Exprs)
+        {
+            if (Expr && Expr->MaterialExpressionGuid == ParsedGuid)
+                return Expr;
+        }
+    }
+
+    // name / path / parameter name
+    for (UMaterialExpression* Expr : *Exprs)
+    {
+        if (!Expr) continue;
+        if (Expr->GetName() == IdOrName || Expr->GetPathName() == IdOrName)
+            return Expr;
+        if (UMaterialExpressionParameter* Param = Cast<UMaterialExpressionParameter>(Expr))
+        {
+            if (Param->ParameterName.ToString() == IdOrName)
+                return Expr;
+        }
+    }
+#endif
+    return nullptr;
+}
+
+static inline int32 McpGraphExpressionIndex(
+    const FMcpMaterialGraphOwner& Owner,
+    const UMaterialExpression* Expression)
+{
+#if WITH_EDITOR
+    const TArray<TObjectPtr<UMaterialExpression>>* Exprs = McpGetGraphExpressions(Owner);
+    if (!Exprs || !Expression)
+    {
+        return INDEX_NONE;
+    }
+    for (int32 Index = 0; Index < Exprs->Num(); ++Index)
+    {
+        if ((*Exprs)[Index] == Expression)
+        {
+            return Index;
+        }
+    }
+#endif
+    return INDEX_NONE;
+}
+
+static inline TSharedPtr<FJsonObject> McpBuildMaterialExpressionIdentity(
+    const FMcpMaterialGraphOwner& Owner,
+    UMaterialExpression* Expression,
+    int32 ExpressionIndex = INDEX_NONE)
+{
+    TSharedPtr<FJsonObject> Identity = MakeShared<FJsonObject>();
+#if WITH_EDITOR
+    if (ExpressionIndex == INDEX_NONE)
+    {
+        ExpressionIndex = McpGraphExpressionIndex(Owner, Expression);
+    }
+    Identity->SetNumberField(TEXT("expressionIndex"), ExpressionIndex);
+    if (Expression)
+    {
+        Identity->SetStringField(TEXT("expressionName"), Expression->GetName());
+        Identity->SetStringField(TEXT("expressionPath"), Expression->GetPathName());
+        Identity->SetStringField(TEXT("expressionGuid"), Expression->MaterialExpressionGuid.ToString());
+        Identity->SetStringField(TEXT("class"), Expression->GetClass()->GetName());
+    }
+    if (Owner.Asset)
+    {
+        Identity->SetStringField(TEXT("ownerPath"), Owner.Asset->GetPathName());
+    }
+#endif
+    return Identity;
+}
+
+static inline TSharedPtr<FJsonObject> McpBuildMaterialObjectReferenceSummary(UObject* Object)
+{
+    TSharedPtr<FJsonObject> Summary = MakeShared<FJsonObject>();
+#if WITH_EDITOR
+    Summary->SetBoolField(TEXT("isNull"), Object == nullptr);
+    if (Object)
+    {
+        Summary->SetStringField(TEXT("name"), Object->GetName());
+        Summary->SetStringField(TEXT("path"), Object->GetPathName());
+        Summary->SetStringField(TEXT("class"), Object->GetClass()->GetName());
+    }
+#endif
+    return Summary;
+}
+
+static inline TSharedPtr<FJsonObject> McpBuildBoundedMaterialObjectDump(
+    UObject* Object,
+    int32 MaxProperties,
+    const TArray<FString>& PropertyAllowList,
+    bool& bOutTruncated)
+{
+    TSharedPtr<FJsonObject> Dump = MakeShared<FJsonObject>();
+    bOutTruncated = false;
+#if WITH_EDITOR
+    if (!Object)
+    {
+        return Dump;
+    }
+
+    int32 AddedProperties = 0;
+    for (TFieldIterator<FProperty> It(Object->GetClass()); It; ++It)
+    {
+        FProperty* Property = *It;
+        if (!Property)
+        {
+            continue;
+        }
+
+        const FString PropertyName = Property->GetName();
+        if (PropertyAllowList.Num() > 0 && !PropertyAllowList.Contains(PropertyName))
+        {
+            continue;
+        }
+
+        if (AddedProperties >= MaxProperties)
+        {
+            bOutTruncated = true;
+            break;
+        }
+
+        if (FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
+        {
+            UObject* ReferencedObject = ObjectProperty->GetObjectPropertyValue_InContainer(Object);
+            Dump->SetObjectField(PropertyName, McpBuildMaterialObjectReferenceSummary(ReferencedObject));
+        }
+        else
+        {
+            FString TextValue;
+            const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Object);
+            MCP_PROPERTY_EXPORT_TEXT(Property, TextValue, ValuePtr, nullptr, Object, PPF_None);
+            Dump->SetStringField(PropertyName, TextValue);
+        }
+        ++AddedProperties;
+    }
+#endif
+    return Dump;
+}
+
+enum class EMcpMaterialTypedValueKind : uint8
+{
+    Scalar,
+    Vector,
+    DoubleVector,
+    Texture,
+    RuntimeVirtualTexture,
+    SparseVolumeTexture,
+    Font,
+    StaticSwitch,
+    StaticComponentMask,
+    Unknown,
+};
+
+struct FMcpMaterialTypedValue
+{
+    EMcpMaterialTypedValueKind Kind = EMcpMaterialTypedValueKind::Unknown;
+    double Scalar = 0.0;
+    FLinearColor Vector = FLinearColor::Transparent;
+    FVector4d DoubleVector = FVector4d(0.0, 0.0, 0.0, 0.0);
+    UObject* Object = nullptr;
+    int32 FontPage = 0;
+    bool bEnabled = false;
+    bool bMaskR = false;
+    bool bMaskG = false;
+    bool bMaskB = false;
+    bool bMaskA = false;
+};
+
+static inline EMcpMaterialTypedValueKind McpParseMaterialTypedValueKind(const FString& Type)
+{
+    if (Type.Equals(TEXT("Scalar"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::Scalar;
+    if (Type.Equals(TEXT("Vector"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::Vector;
+    if (Type.Equals(TEXT("DoubleVector"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::DoubleVector;
+    if (Type.Equals(TEXT("Texture"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::Texture;
+    if (Type.Equals(TEXT("RuntimeVirtualTexture"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::RuntimeVirtualTexture;
+    if (Type.Equals(TEXT("SparseVolumeTexture"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::SparseVolumeTexture;
+    if (Type.Equals(TEXT("Font"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::Font;
+    if (Type.Equals(TEXT("StaticSwitch"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::StaticSwitch;
+    if (Type.Equals(TEXT("StaticComponentMask"), ESearchCase::IgnoreCase)) return EMcpMaterialTypedValueKind::StaticComponentMask;
+    return EMcpMaterialTypedValueKind::Unknown;
+}
+
+static inline bool McpParseMaterialTypedValue(
+    const TSharedPtr<FJsonObject>& ParameterObject,
+    const TSharedPtr<FJsonObject>& ValueObject,
+    FMcpMaterialTypedValue& OutValue,
+    FString& OutError)
+{
+#if WITH_EDITOR
+    if (!ParameterObject.IsValid() || !ValueObject.IsValid())
+    {
+        OutError = TEXT("parameter and value objects are required");
+        return false;
+    }
+
+    FString Type;
+    if (!ParameterObject->TryGetStringField(TEXT("type"), Type) || Type.IsEmpty())
+    {
+        OutError = TEXT("parameter.type is required");
+        return false;
+    }
+
+    OutValue = FMcpMaterialTypedValue();
+    OutValue.Kind = McpParseMaterialTypedValueKind(Type);
+
+    switch (OutValue.Kind)
+    {
+    case EMcpMaterialTypedValueKind::Scalar:
+        if (!ValueObject->TryGetNumberField(TEXT("value"), OutValue.Scalar))
+        {
+            OutError = TEXT("Scalar value requires numeric value");
+            return false;
+        }
+        return true;
+    case EMcpMaterialTypedValueKind::Vector:
+        ValueObject->TryGetNumberField(TEXT("r"), OutValue.Vector.R);
+        ValueObject->TryGetNumberField(TEXT("g"), OutValue.Vector.G);
+        ValueObject->TryGetNumberField(TEXT("b"), OutValue.Vector.B);
+        ValueObject->TryGetNumberField(TEXT("a"), OutValue.Vector.A);
+        return true;
+    case EMcpMaterialTypedValueKind::DoubleVector:
+        ValueObject->TryGetNumberField(TEXT("x"), OutValue.DoubleVector.X);
+        ValueObject->TryGetNumberField(TEXT("y"), OutValue.DoubleVector.Y);
+        ValueObject->TryGetNumberField(TEXT("z"), OutValue.DoubleVector.Z);
+        ValueObject->TryGetNumberField(TEXT("w"), OutValue.DoubleVector.W);
+        return true;
+    case EMcpMaterialTypedValueKind::Texture:
+    case EMcpMaterialTypedValueKind::RuntimeVirtualTexture:
+    case EMcpMaterialTypedValueKind::SparseVolumeTexture:
+    {
+        FString AssetPath;
+        if (!ValueObject->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+        {
+            OutError = TEXT("Object value requires assetPath");
+            return false;
+        }
+        OutValue.Object = LoadObject<UObject>(nullptr, *AssetPath);
+        if (!OutValue.Object)
+        {
+            OutError = FString::Printf(TEXT("Could not load value asset: %s"), *AssetPath);
+            return false;
+        }
+        return true;
+    }
+    case EMcpMaterialTypedValueKind::Font:
+    {
+        FString FontPath;
+        if (!ValueObject->TryGetStringField(TEXT("fontPath"), FontPath) || FontPath.IsEmpty())
+        {
+            OutError = TEXT("Font value requires fontPath");
+            return false;
+        }
+        OutValue.Object = LoadObject<UObject>(nullptr, *FontPath);
+        ValueObject->TryGetNumberField(TEXT("fontPage"), OutValue.FontPage);
+        if (!OutValue.Object)
+        {
+            OutError = FString::Printf(TEXT("Could not load font asset: %s"), *FontPath);
+            return false;
+        }
+        return true;
+    }
+    case EMcpMaterialTypedValueKind::StaticSwitch:
+        if (!ValueObject->TryGetBoolField(TEXT("enabled"), OutValue.bEnabled))
+        {
+            OutError = TEXT("StaticSwitch value requires enabled");
+            return false;
+        }
+        return true;
+    case EMcpMaterialTypedValueKind::StaticComponentMask:
+        ValueObject->TryGetBoolField(TEXT("r"), OutValue.bMaskR);
+        ValueObject->TryGetBoolField(TEXT("g"), OutValue.bMaskG);
+        ValueObject->TryGetBoolField(TEXT("b"), OutValue.bMaskB);
+        ValueObject->TryGetBoolField(TEXT("a"), OutValue.bMaskA);
+        return true;
+    default:
+        OutError = FString::Printf(TEXT("Unsupported material typed value: %s"), *Type);
+        return false;
+    }
+#else
+    OutError = TEXT("Material typed value parsing requires an editor build");
+    return false;
+#endif
+}
+
+// Saves/rebuilds the material graph owner after edit operations.
+// For MaterialFunction: uses PreEditChange/PostEditChange which updates the graph
+// and notifies dependents of structural changes (added/removed pins, etc.).
+// This is intentionally different from compile_material which uses
+// ForceRecompileForRendering - the heavier path that recompiles all dependent
+// material shaders. Graph edits only need the lightweight notification.
+// Also calls MarkPackageDirty() internally - callers do not need to repeat it.
+// Returns false with OutError when Owner.bReadOnly is true.
+static inline bool McpRebuildMaterialGraphOwner(
+    const FMcpMaterialGraphOwner& Owner,
+    FString& OutError)
+{
+#if WITH_EDITOR
+    if (Owner.bReadOnly)
+    {
+        OutError = TEXT("UNSUPPORTED_OPERATION: cannot edit a MaterialFunctionInstance graph - edit the parent function instead");
+        return false;
+    }
+
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::Material)
+    {
+        UMaterial* Mat = CastChecked<UMaterial>(Owner.GraphSource);
+        Mat->PreEditChange(nullptr);
+        Mat->PostEditChange();
+        Mat->MarkPackageDirty();
+        return true;
+    }
+
+    if (Owner.Kind == EMcpMaterialGraphOwnerKind::MaterialFunction)
+    {
+        UMaterialFunction* Func = CastChecked<UMaterialFunction>(Owner.GraphSource);
+        Func->PreEditChange(nullptr);
+        Func->PostEditChange();
+        Func->MarkPackageDirty();
+        return true;
+    }
+
+    OutError = TEXT("UNSUPPORTED_OPERATION: unknown graph owner kind");
+    return false;
+#else
+    OutError = TEXT("Rebuild requires an editor build");
+    return false;
+#endif
+}
+
+struct FMcpMaterialMutationLifecycle
+{
+#if WITH_EDITOR
+    TUniquePtr<FScopedTransaction> Transaction;
+#endif
+    TArray<UObject*> MutatedObjects;
+    bool bSave = false;
+
+    explicit FMcpMaterialMutationLifecycle(const FText& TransactionText, bool bInSave = false)
+        : bSave(bInSave)
+    {
+#if WITH_EDITOR
+        Transaction = MakeUnique<FScopedTransaction>(TransactionText);
+#endif
+    }
+
+    void Modify(UObject* Object)
+    {
+#if WITH_EDITOR
+        if (Object && !MutatedObjects.Contains(Object))
+        {
+            Object->Modify();
+            MutatedObjects.Add(Object);
+        }
+#endif
+    }
+
+    bool FinalizeGraphOwner(
+        const FMcpMaterialGraphOwner& Owner,
+        bool& bOutSaved,
+        bool& bOutDirty,
+        FString& OutError)
+    {
+        bOutSaved = false;
+        bOutDirty = false;
+#if WITH_EDITOR
+        if (Owner.Asset)
+        {
+            Modify(Owner.Asset);
+        }
+        if (Owner.GraphSource && Owner.GraphSource != Owner.Asset)
+        {
+            Modify(Owner.GraphSource);
+        }
+
+        if (!McpRebuildMaterialGraphOwner(Owner, OutError))
+        {
+            return false;
+        }
+
+        UObject* DirtyObject = Owner.GraphSource ? Owner.GraphSource : Owner.Asset;
+        bOutDirty = DirtyObject && DirtyObject->GetOutermost() && DirtyObject->GetOutermost()->IsDirty();
+        if (bSave && DirtyObject)
+        {
+            bOutSaved = McpSafeAssetSave(DirtyObject);
+            if (!bOutSaved)
+            {
+                OutError = TEXT("save-failed");
+                return false;
+            }
+            bOutDirty = DirtyObject->GetOutermost() && DirtyObject->GetOutermost()->IsDirty();
+        }
+        return true;
+#else
+        OutError = TEXT("Material mutation lifecycle requires an editor build");
+        return false;
+#endif
+    }
+
+    bool FinalizeObject(
+        UObject* Object,
+        bool& bOutSaved,
+        bool& bOutDirty,
+        FString& OutError)
+    {
+        bOutSaved = false;
+        bOutDirty = false;
+#if WITH_EDITOR
+        if (!Object)
+        {
+            OutError = TEXT("invalid-asset");
+            return false;
+        }
+        Modify(Object);
+        Object->PreEditChange(nullptr);
+        Object->PostEditChange();
+        Object->MarkPackageDirty();
+        bOutDirty = Object->GetOutermost() && Object->GetOutermost()->IsDirty();
+        if (bSave)
+        {
+            bOutSaved = McpSafeAssetSave(Object);
+            if (!bOutSaved)
+            {
+                OutError = TEXT("save-failed");
+                return false;
+            }
+            bOutDirty = Object->GetOutermost() && Object->GetOutermost()->IsDirty();
+        }
+        return true;
+#else
+        OutError = TEXT("Material mutation lifecycle requires an editor build");
+        return false;
+#endif
+    }
+};
+
+// Adds function instance parameter overrides to a JSON object.
+// Used by get_material_info for MaterialFunctionInstance assets.
+static inline void McpCollectFunctionInstanceOverrides(
+    UMaterialFunctionInstance* Inst,
+    TSharedRef<FJsonObject> Out)
+{
+#if WITH_EDITOR
+    if (!Inst) return;
+
+    TArray<TSharedPtr<FJsonValue>> ScalarArr;
+    for (const FScalarParameterValue& P : Inst->ScalarParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetNumberField(TEXT("value"), P.ParameterValue);
+        ScalarArr.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("scalarOverrides"), ScalarArr);
+
+    TArray<TSharedPtr<FJsonValue>> VectorArr;
+    for (const FVectorParameterValue& P : Inst->VectorParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        TSharedPtr<FJsonObject> Color = MakeShared<FJsonObject>();
+        Color->SetNumberField(TEXT("r"), P.ParameterValue.R);
+        Color->SetNumberField(TEXT("g"), P.ParameterValue.G);
+        Color->SetNumberField(TEXT("b"), P.ParameterValue.B);
+        Color->SetNumberField(TEXT("a"), P.ParameterValue.A);
+        Obj->SetObjectField(TEXT("value"), Color);
+        VectorArr.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("vectorOverrides"), VectorArr);
+
+    TArray<TSharedPtr<FJsonValue>> TextureArr;
+    for (const FTextureParameterValue& P : Inst->TextureParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetStringField(TEXT("texture"), P.ParameterValue.Get() ? P.ParameterValue.Get()->GetPathName() : TEXT(""));
+        TextureArr.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("textureOverrides"), TextureArr);
+
+    TArray<TSharedPtr<FJsonValue>> StaticArr;
+    for (const FStaticSwitchParameter& P : Inst->StaticSwitchParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetBoolField(TEXT("value"), P.Value);
+        StaticArr.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("staticSwitchOverrides"), StaticArr);
+#endif
+}
+
+static inline void McpCollectMaterialInstanceInfo(
+    UMaterialInstance* Inst,
+    TSharedRef<FJsonObject> Out,
+    bool bIncludeEffective = true,
+    bool bOverriddenOnly = false)
+{
+#if WITH_EDITOR
+    if (!Inst) return;
+
+    Out->SetStringField(TEXT("assetClass"), Inst->GetClass()->GetName());
+
+    if (UMaterialInterface* Parent = Inst->Parent)
+    {
+        Out->SetStringField(TEXT("parentAsset"), Parent->GetPathName());
+        if (UMaterial* BaseMaterial = Parent->GetMaterial())
+        {
+            Out->SetStringField(TEXT("resolvedBaseMaterial"), BaseMaterial->GetPathName());
+        }
+    }
+
+    TArray<TSharedPtr<FJsonValue>> ScalarOverrides;
+    for (const FScalarParameterValue& P : Inst->ScalarParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetNumberField(TEXT("value"), P.ParameterValue);
+        Obj->SetBoolField(TEXT("isOverride"), true);
+        ScalarOverrides.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("scalarOverrides"), ScalarOverrides);
+
+    TArray<TSharedPtr<FJsonValue>> VectorOverrides;
+    for (const FVectorParameterValue& P : Inst->VectorParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        TSharedPtr<FJsonObject> Color = MakeShared<FJsonObject>();
+        Color->SetNumberField(TEXT("r"), P.ParameterValue.R);
+        Color->SetNumberField(TEXT("g"), P.ParameterValue.G);
+        Color->SetNumberField(TEXT("b"), P.ParameterValue.B);
+        Color->SetNumberField(TEXT("a"), P.ParameterValue.A);
+        Obj->SetObjectField(TEXT("value"), Color);
+        Obj->SetBoolField(TEXT("isOverride"), true);
+        VectorOverrides.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("vectorOverrides"), VectorOverrides);
+
+    TArray<TSharedPtr<FJsonValue>> TextureOverrides;
+    for (const FTextureParameterValue& P : Inst->TextureParameterValues)
+    {
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetStringField(TEXT("texture"), P.ParameterValue.Get() ? P.ParameterValue.Get()->GetPathName() : TEXT(""));
+        Obj->SetBoolField(TEXT("isOverride"), true);
+        TextureOverrides.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("textureOverrides"), TextureOverrides);
+
+    FStaticParameterSet StaticParameters;
+    Inst->GetStaticParameterValues(StaticParameters);
+    TArray<TSharedPtr<FJsonValue>> StaticSwitchOverrides;
+    for (const FStaticSwitchParameter& P : StaticParameters.StaticSwitchParameters)
+    {
+        if (bOverriddenOnly && !P.bOverride)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), P.ParameterInfo.Name.ToString());
+        Obj->SetBoolField(TEXT("value"), P.Value);
+        Obj->SetBoolField(TEXT("isOverride"), P.bOverride);
+        StaticSwitchOverrides.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("staticSwitchOverrides"), StaticSwitchOverrides);
+
+    if (!bIncludeEffective)
+    {
+        return;
+    }
+
+    TArray<TSharedPtr<FJsonValue>> EffectiveScalarValues;
+    TArray<FMaterialParameterInfo> ScalarInfos;
+    TArray<FGuid> ScalarIds;
+    Inst->GetAllScalarParameterInfo(ScalarInfos, ScalarIds);
+    for (const FMaterialParameterInfo& Info : ScalarInfos)
+    {
+        float Value = 0.0f;
+        const bool bFound = Inst->GetScalarParameterValue(FHashedMaterialParameterInfo(Info), Value, bOverriddenOnly);
+        if (!bFound)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), Info.Name.ToString());
+        Obj->SetNumberField(TEXT("value"), Value);
+        Obj->SetBoolField(TEXT("isOverride"), Inst->GetScalarParameterValue(FHashedMaterialParameterInfo(Info), Value, true));
+        EffectiveScalarValues.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("effectiveScalarParameters"), EffectiveScalarValues);
+
+    TArray<TSharedPtr<FJsonValue>> EffectiveVectorValues;
+    TArray<FMaterialParameterInfo> VectorInfos;
+    TArray<FGuid> VectorIds;
+    Inst->GetAllVectorParameterInfo(VectorInfos, VectorIds);
+    for (const FMaterialParameterInfo& Info : VectorInfos)
+    {
+        FLinearColor Value = FLinearColor::Black;
+        const bool bFound = Inst->GetVectorParameterValue(FHashedMaterialParameterInfo(Info), Value, bOverriddenOnly);
+        if (!bFound)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), Info.Name.ToString());
+        TSharedPtr<FJsonObject> Color = MakeShared<FJsonObject>();
+        Color->SetNumberField(TEXT("r"), Value.R);
+        Color->SetNumberField(TEXT("g"), Value.G);
+        Color->SetNumberField(TEXT("b"), Value.B);
+        Color->SetNumberField(TEXT("a"), Value.A);
+        Obj->SetObjectField(TEXT("value"), Color);
+        Obj->SetBoolField(TEXT("isOverride"), Inst->GetVectorParameterValue(FHashedMaterialParameterInfo(Info), Value, true));
+        EffectiveVectorValues.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("effectiveVectorParameters"), EffectiveVectorValues);
+
+    TArray<TSharedPtr<FJsonValue>> EffectiveTextureValues;
+    TArray<FMaterialParameterInfo> TextureInfos;
+    TArray<FGuid> TextureIds;
+    Inst->GetAllTextureParameterInfo(TextureInfos, TextureIds);
+    for (const FMaterialParameterInfo& Info : TextureInfos)
+    {
+        UTexture* Value = nullptr;
+        const bool bFound = Inst->GetTextureParameterValue(FHashedMaterialParameterInfo(Info), Value, bOverriddenOnly);
+        if (!bFound)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), Info.Name.ToString());
+        Obj->SetStringField(TEXT("texture"), Value ? Value->GetPathName() : TEXT(""));
+        Obj->SetBoolField(TEXT("isOverride"), Inst->GetTextureParameterValue(FHashedMaterialParameterInfo(Info), Value, true));
+        EffectiveTextureValues.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("effectiveTextureParameters"), EffectiveTextureValues);
+
+    TArray<TSharedPtr<FJsonValue>> EffectiveStaticSwitchValues;
+    TArray<FMaterialParameterInfo> StaticInfos;
+    TArray<FGuid> StaticIds;
+    Inst->GetAllStaticSwitchParameterInfo(StaticInfos, StaticIds);
+    for (const FMaterialParameterInfo& Info : StaticInfos)
+    {
+        bool bValue = false;
+        bool bHasValue = false;
+        bool bIsOverride = false;
+        for (const FStaticSwitchParameter& P : StaticParameters.StaticSwitchParameters)
+        {
+            if (P.ParameterInfo == Info)
+            {
+                bValue = P.Value;
+                bHasValue = true;
+                bIsOverride = P.bOverride;
+                break;
+            }
+        }
+        if (bOverriddenOnly && !bIsOverride)
+        {
+            continue;
+        }
+        if (!bHasValue && Inst->Parent)
+        {
+            FStaticParameterSet ParentStaticParameters;
+            Inst->Parent->GetStaticParameterValues(ParentStaticParameters);
+            for (const FStaticSwitchParameter& P : ParentStaticParameters.StaticSwitchParameters)
+            {
+                if (P.ParameterInfo == Info)
+                {
+                    bValue = P.Value;
+                    bHasValue = true;
+                    break;
+                }
+            }
+        }
+        if (!bHasValue)
+        {
+            continue;
+        }
+        TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+        Obj->SetStringField(TEXT("name"), Info.Name.ToString());
+        Obj->SetBoolField(TEXT("value"), bValue);
+        Obj->SetBoolField(TEXT("isOverride"), bIsOverride);
+        EffectiveStaticSwitchValues.Add(MakeShared<FJsonValueObject>(Obj));
+    }
+    Out->SetArrayField(TEXT("effectiveStaticSwitchParameters"), EffectiveStaticSwitchValues);
 #endif
 }
 

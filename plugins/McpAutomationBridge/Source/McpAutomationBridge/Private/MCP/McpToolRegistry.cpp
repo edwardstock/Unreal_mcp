@@ -98,7 +98,30 @@ TSharedPtr<FJsonObject> FMcpToolRegistry::BuildToolJson(FMcpToolDefinition* Tool
 		ToolObj->SetObjectField(TEXT("inputSchema"), InputSchema);
 	}
 
+	TSharedPtr<FJsonObject> Annotations = Tool->BuildAnnotations();
+	if (Annotations.IsValid() && Annotations->Values.Num() > 0)
+	{
+		ToolObj->SetObjectField(TEXT("annotations"), Annotations);
+	}
+
 	return ToolObj;
+}
+
+TArray<TSharedPtr<FJsonObject>> FMcpToolRegistry::BuildToolManifest()
+{
+	FScopeLock Lock(&CacheMutex);
+	EnsureCache();
+
+	TArray<TSharedPtr<FJsonObject>> Result;
+	Result.Reserve(Tools.Num());
+	for (const FMcpToolDefinition* Tool : Tools)
+	{
+		if (const TSharedPtr<FJsonObject>* Cached = CachedToolSchemas.Find(Tool->GetName()))
+		{
+			Result.Add(*Cached);
+		}
+	}
+	return Result;
 }
 
 void FMcpToolRegistry::InvalidateCache()

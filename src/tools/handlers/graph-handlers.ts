@@ -85,8 +85,6 @@ export async function handleGraphTools(toolName: string, action: string, args: G
             return handleBlueprintGraph(action, args, tools);
         case 'manage_niagara_graph':
             return handleNiagaraGraph(action, args, tools);
-        case 'manage_material_graph':
-            return handleMaterialGraph(action, args, tools);
         case 'manage_behavior_tree':
             return handleBehaviorTree(action, args, tools);
         default:
@@ -183,32 +181,6 @@ async function handleNiagaraGraph(action: string, args: GraphArgs, tools: ITools
         payload.assetPath = args.system as string;
     }
     const res = await executeAutomationRequest(tools, 'manage_niagara_graph', payload as HandlerArgs, 'Automation bridge not available') as AutomationResponse;
-    return cleanObject({ ...res, ...(res.result || {}) }) as Record<string, unknown>;
-}
-
-async function handleMaterialGraph(action: string, args: GraphArgs, tools: ITools): Promise<Record<string, unknown>> {
-    const payload: ProcessedGraphArgs = { ...args, subAction: action };
-
-    // Map blueprint-style parameters to material graph parameters
-    if (action === 'connect_pins' || action === 'connect_nodes') {
-        if (payload.fromNodeId && !payload.sourceNodeId) {
-            payload.sourceNodeId = payload.fromNodeId;
-        }
-        
-        if (payload.toNodeId && !payload.targetNodeId) {
-            if (typeof payload.toNodeId === 'string') {
-                payload.targetNodeId = payload.toNodeId.toLowerCase() === 'root' ? 'Main' : payload.toNodeId;
-            }
-        }
-        
-        if (payload.toPin && !payload.inputName) {
-            if (typeof payload.toPin === 'string') {
-                payload.inputName = payload.toPin.replace(/\s+/g, '');
-            }
-        }
-    }
-
-    const res = await executeAutomationRequest(tools, 'manage_material_graph', payload as HandlerArgs, 'Automation bridge not available') as AutomationResponse;
     return cleanObject({ ...res, ...(res.result || {}) }) as Record<string, unknown>;
 }
 

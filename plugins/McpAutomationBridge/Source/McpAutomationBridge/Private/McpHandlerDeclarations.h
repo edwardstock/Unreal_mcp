@@ -156,6 +156,12 @@ namespace McpHandlers
         MCP_DECLARE_HANDLER(AssetAction);
         MCP_DECLARE_HANDLER(GetAssetReferences);
         MCP_DECLARE_HANDLER(GetAssetDependencies);
+
+        // N3: read-back action - returns all Set/GetMaterialAttributes expression overrides in a material
+        MCP_DECLARE_HANDLER(GetSetMaterialAttributesOverrides);
+
+        // R10: batch read-back action - fetch get_material_expression_details for many nodes in one request
+        MCP_DECLARE_HANDLER(BulkGetMaterialExpressionDetails);
     }
 
     // =========================================================================
@@ -822,6 +828,12 @@ namespace McpHandlers
             const TSharedPtr<FJsonObject>& Payload,
             TSharedPtr<FMcpBridgeWebSocket> Socket
         ));
+
+        // N1: read-back action - returns details for a single Custom HLSL expression node
+        MCP_DECLARE_HANDLER(GetCustomExpression);
+
+        // N2: read-back action - returns defaults/ranges for every parameter expression in a material
+        MCP_DECLARE_HANDLER(GetParameterDefaults);
     }
 
     // =========================================================================
